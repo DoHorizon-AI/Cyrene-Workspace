@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hmac
 import ipaddress
 import json
@@ -43,6 +44,12 @@ MAX_BODY_BYTES = 64_000
 MAX_CLI_OUTPUT_BYTES = 2_000_000
 MAX_PRIVATE_CONFIG_BYTES = 16_384
 CLI_TIMEOUT_SECONDS = 60
+STATUS_CACHE_TTL_SECONDS = 5.0
+BRIDGE_ADMISSION_TIMEOUT_SECONDS = 3.0
+STATUS_POLL_INTERVAL_MS = 5_000
+STATUS_REQUEST_TIMEOUT_MS = 8_000
+AUTHORIZATION_WAIT_NOTICE_MS = 15_000
+AUTHORIZATION_WAIT_TIMEOUT_MS = 135_000
 OWNER_UID = 10001
 MAX_DISCOVERY_PAGES = 20
 MAX_DISCOVERY_ITEMS = 1_000
@@ -732,8 +739,15 @@ class OfficeSetupService:
         self.port = port
         self.session_ttl = session_ttl
         self._lock = threading.RLock()
+        self._flow_operation_lock = threading.Lock()
+        self._status_lock = threading.Lock()
         self._sessions: dict[str, SetupSession] = {}
         self._active_flow: ActiveFlow | None = None
+        self._begin_pending = False
+        self._status_cache: dict[str, Any] | None = None
+        self._status_cache_profile_ref: str | None = None
+        self._status_cache_at = 0.0
+        self._status_generation = 0
         self._last_callback_message: str | None = None
         self._profile_ref: str | None = None
 
@@ -769,23 +783,98 @@ class OfficeSetupService:
             if now - session.created_at > self.session_ttl:
                 self._sessions.pop(session_id, None)
 
+    def _cached_status_locked(self, now: float) -> tuple[dict[str, Any], str] | None:
+        """Return a private copy of the recent safe status snapshot, if still fresh."""
+
+        if (
+            self._status_cache is None
+            or self._status_cache_profile_ref is None
+            or now - self._status_cache_at > STATUS_CACHE_TTL_SECONDS
+        ):
+            return None
+        return copy.deepcopy(self._status_cache), self._status_cache_profile_ref
+
+    def _store_status_locked(self, safe: Mapping[str, Any], profile_ref: str) -> None:
+        """Replace the short-lived safe status snapshot after a validated bridge response."""
+
+        self._status_cache = copy.deepcopy(dict(safe))
+        self._status_cache_profile_ref = profile_ref
+        self._status_cache_at = time.monotonic()
+
+    def _invalidate_status_locked(self) -> None:
+        """Discard status snapshots after an operation can change Exchange state."""
+
+        self._status_cache = None
+        self._status_cache_profile_ref = None
+        self._status_cache_at = 0.0
+        self._status_generation += 1
+
+    def _session_status_locked(
+        self,
+        session: SetupSession,
+        safe: Mapping[str, Any],
+        profile_ref: str,
+    ) -> dict[str, Any]:
+        """Project cached/validated status into one browser session without holding RPC locks."""
+
+        session.credential_revision = safe["credentialRevision"]
+        session.enabled_features = dict(safe["enabledFeatures"])
+        self._profile_ref = profile_ref
+        if self._active_flow and profile_ref != self._active_flow.profile_ref:
+            raise OfficeSetupError("office_status_profile_mismatch")
+        result = copy.deepcopy(dict(safe))
+        result["message"] = self._last_callback_message or "READY"
+        return result
+
     def begin(self, session: SetupSession) -> str:
         """Begin or reopen this browser session's provider flow until its URL expires."""
 
-        with self._lock:
-            active_flow = self._active_flow
-            if active_flow is not None:
-                if active_flow.expires_at > datetime.now(UTC):
+        if not self._flow_operation_lock.acquire(blocking=False):
+            raise OfficeSetupError("office_authorization_pending")
+        status_admitted = False
+        try:
+            with self._lock:
+                active_flow = self._active_flow
+                if active_flow is not None and active_flow.expires_at > datetime.now(UTC):
                     if active_flow.session is not session:
                         raise OfficeSetupError("office_authorization_pending")
                     return active_flow.authorization_url
-                self._active_flow = None
-                self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
-            current = _safe_status(self.bridge.invoke("status", {}), self.operator_context)
-            session.credential_revision = current["credentialRevision"]
-            session.enabled_features = current["enabledFeatures"]
+                if active_flow is not None:
+                    self._active_flow = None
+                    self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+                self._begin_pending = True
+                cached = self._cached_status_locked(time.monotonic())
+
+            if cached is None:
+                status_admitted = self._status_lock.acquire(
+                    timeout=BRIDGE_ADMISSION_TIMEOUT_SECONDS
+                )
+                if not status_admitted:
+                    raise OfficeSetupError("office_bridge_busy")
+                with self._lock:
+                    cached = self._cached_status_locked(time.monotonic())
+                if cached is None:
+                    status_response = self.bridge.invoke("status", {})
+                    current = _safe_status(status_response, self.operator_context)
+                    profile_ref = status_response["profileRef"]
+                    with self._lock:
+                        self._store_status_locked(current, profile_ref)
+                        self._session_status_locked(session, current, profile_ref)
+                else:
+                    current, profile_ref = cached
+                    with self._lock:
+                        self._session_status_locked(session, current, profile_ref)
+            else:
+                current, profile_ref = cached
+                with self._lock:
+                    self._session_status_locked(session, current, profile_ref)
+
             if current["identityVerified"] and not current["reauthRequired"]:
                 raise OfficeSetupError("office_already_linked")
+
+            # Do not let a later poll treat the pre-begin snapshot as post-begin state.
+            with self._lock:
+                self._invalidate_status_locked()
             response = self.bridge.invoke("begin", {})
             required = {
                 "state",
@@ -810,9 +899,30 @@ class OfficeSetupService:
             )
             if expires_at <= datetime.now(UTC):
                 raise OfficeSetupError("office_begin_response_invalid")
-            self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at, auth_url, session)
-            self._last_callback_message = "AUTHORIZATION_PENDING"
+            with self._lock:
+                self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at, auth_url, session)
+                self._last_callback_message = "AUTHORIZATION_PENDING"
             return auth_url
+        except OfficeSetupError as error:
+            if str(error) in {
+                "office_bridge_busy",
+                "office_bridge_unavailable",
+                "office_bridge_timeout",
+            }:
+                with self._lock:
+                    self._last_callback_message = (
+                        "AUTHORIZATION_UNCONFIRMED"
+                        if str(error) == "office_bridge_timeout"
+                        else "AUTHORIZATION_DID_NOT_COMPLETE"
+                    )
+                    self._invalidate_status_locked()
+            raise
+        finally:
+            if status_admitted:
+                self._status_lock.release()
+            with self._lock:
+                self._begin_pending = False
+            self._flow_operation_lock.release()
 
     def complete_callback(self, query: str) -> None:
         """Pass one loopback callback's code/state directly to the Exchange CLI stdin."""
@@ -884,42 +994,72 @@ class OfficeSetupService:
         ):
             raise OfficeSetupError("office_callback_invalid")
         # Code and state are never stored, placed in argv, or returned to the browser.
-        response = self.bridge.invoke("complete", {"state": state, "code": code})
-        safe = _safe_status(response, self.operator_context)
-        if not safe["identityVerified"]:
-            raise OfficeSetupError("office_owner_identity_mismatch")
-        with self._lock:
-            if self._active_flow and safe.get("provider") != _EXCHANGE_PROVIDER_ID:
-                raise OfficeSetupError("office_callback_profile_mismatch")
-            if self._active_flow and response.get("profileRef") != self._active_flow.profile_ref:
-                raise OfficeSetupError("office_callback_profile_mismatch")
-        self._active_flow = None
-        self._last_callback_message = "AUTHORIZATION_COMPLETE"
+        with self._flow_operation_lock:
+            response = self.bridge.invoke("complete", {"state": state, "code": code})
+            safe = _safe_status(response, self.operator_context)
+            if not safe["identityVerified"]:
+                raise OfficeSetupError("office_owner_identity_mismatch")
+            with self._lock:
+                if self._active_flow and safe.get("provider") != _EXCHANGE_PROVIDER_ID:
+                    raise OfficeSetupError("office_callback_profile_mismatch")
+                if (
+                    self._active_flow
+                    and response.get("profileRef") != self._active_flow.profile_ref
+                ):
+                    raise OfficeSetupError("office_callback_profile_mismatch")
+                self._active_flow = None
+                self._last_callback_message = "AUTHORIZATION_COMPLETE"
+                self._invalidate_status_locked()
 
     def callback_failed(self, safe_error_code: str | None = None) -> None:
         """Forget any pending UI flow after a provider error without retaining its query."""
 
-        with self._lock:
+        with self._flow_operation_lock, self._lock:
             self._active_flow = None
             self._last_callback_message = (
                 "AADSTS50011"
                 if safe_error_code == "AADSTS50011"
                 else "AUTHORIZATION_DID_NOT_COMPLETE"
             )
+            self._invalidate_status_locked()
 
     def status(self, session: SetupSession) -> dict[str, Any]:
-        """Read Exchange's owner-bound profile state and expose only safe status fields."""
+        """Read a fresh owner-bound status once, sharing the short-lived safe snapshot."""
 
-        response = self.bridge.invoke("status", {})
-        safe = _safe_status(response, self.operator_context)
         with self._lock:
-            session.credential_revision = safe["credentialRevision"]
-            session.enabled_features = safe["enabledFeatures"]
-            self._profile_ref = response["profileRef"]
-            if self._active_flow and response.get("profileRef") != self._active_flow.profile_ref:
-                raise OfficeSetupError("office_status_profile_mismatch")
-            safe["message"] = self._last_callback_message or "READY"
-        return safe
+            if self._begin_pending or self._flow_operation_lock.locked():
+                raise OfficeSetupError("office_status_busy")
+            cached = self._cached_status_locked(time.monotonic())
+            if cached is not None:
+                safe, profile_ref = cached
+                return self._session_status_locked(session, safe, profile_ref)
+            if not self._status_lock.acquire(blocking=False):
+                raise OfficeSetupError("office_status_busy")
+            generation = self._status_generation
+
+        try:
+            with self._lock:
+                cached = self._cached_status_locked(time.monotonic())
+                if cached is not None:
+                    safe, profile_ref = cached
+                    return self._session_status_locked(session, safe, profile_ref)
+                if self._begin_pending or self._flow_operation_lock.locked():
+                    raise OfficeSetupError("office_status_busy")
+
+            response = self.bridge.invoke("status", {})
+            safe = _safe_status(response, self.operator_context)
+            profile_ref = response["profileRef"]
+            with self._lock:
+                # A begin waiting on this status call may reuse it; mutation/callback
+                # invalidation changes the generation and makes this result stale.
+                if self._status_generation != generation or (
+                    self._flow_operation_lock.locked() and not self._begin_pending
+                ):
+                    raise OfficeSetupError("office_status_busy")
+                self._store_status_locked(safe, profile_ref)
+                return self._session_status_locked(session, safe, profile_ref)
+        finally:
+            self._status_lock.release()
 
     def discover(self, session: SetupSession, resource_type: str) -> dict[str, Any]:
         """List only fixed metadata resources returned by Exchange's owner-bound discovery."""
@@ -1032,6 +1172,7 @@ class OfficeSetupService:
             raise OfficeSetupError("office_target_update_scope_invalid")
         with self._lock:
             session.credential_revision = revision
+            self._invalidate_status_locked()
         return {
             "state": "UPDATED",
             "credentialRevision": revision,
@@ -1238,31 +1379,113 @@ function renderAll(){
   for(const [type,title] of groups) if(discovered[type]) renderGroup(type,title,discovered[type]);
   document.getElementById('save').disabled=!Object.keys(discovered).length;
 }
-async function refresh(){
+const STATUS_REQUEST_TIMEOUT_MS=8000;
+const STATUS_POLL_INTERVAL_MS=5000;
+const AUTHORIZATION_WAIT_NOTICE_MS=15000;
+const AUTHORIZATION_WAIT_TIMEOUT_MS=135000;
+let refreshInFlight=false;
+let statusTimer=null;
+let authSubmitPending=false;
+let authNoticeTimer=null;
+let authTimeoutTimer=null;
+let authPopupDocument=null;
+function setPopupMessage(message){
   try{
-    const response=await fetch('/api/status',{credentials:'same-origin'});
+    if(!authPopupDocument)return;
+    const note=authPopupDocument.createElement('p');
+    note.textContent=message;
+    authPopupDocument.title='Microsoft sign-in';
+    authPopupDocument.body.replaceChildren(note);
+  }catch(_error){}
+}
+function clearAuthorizationWait(){
+  if(authNoticeTimer!==null) clearTimeout(authNoticeTimer);
+  if(authTimeoutTimer!==null) clearTimeout(authTimeoutTimer);
+  authNoticeTimer=null;
+  authTimeoutTimer=null;
+  authSubmitPending=false;
+}
+function scheduleStatusRefresh(){
+  if(statusTimer!==null) clearTimeout(statusTimer);
+  statusTimer=setTimeout(()=>{statusTimer=null;refresh()},STATUS_POLL_INTERVAL_MS);
+}
+async function refresh(){
+  if(refreshInFlight)return;
+  refreshInFlight=true;
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),STATUS_REQUEST_TIMEOUT_MS);
+  try{
+    const response=await fetch('/api/status',{credentials:'same-origin',signal:controller.signal});
     const data=await response.json();
-    if(!response.ok) throw new Error(data.error||'office_status_unavailable');
+    if(!response.ok){
+      if(!authSubmitPending){
+        statusNode.textContent=response.status===503
+          ? 'Office is handling another setup request. Status will retry shortly.'
+          : 'Office connection status is temporarily unavailable. Status will retry shortly.';
+      }
+      return;
+    }
     revision=data.credentialRevision;
-    statusNode.textContent=data.identityVerified
-      ? `Microsoft account verified · ${data.authStatus} · credential revision ${revision}`
-      : data.message==='AADSTS50011'
-        ? 'Microsoft rejected the registered loopback redirect (AADSTS50011). The localhost callback must match the tenant app registration.'
-        : data.message==='AUTHORIZATION_DID_NOT_COMPLETE'
-        ? 'Microsoft sign-in did not complete. You can try again.'
-        : `Microsoft connection status: ${data.authStatus}`;
     const ready=data.identityVerified&&!data.reauthRequired;
-    document.getElementById('connect').disabled=ready;
     document.getElementById('targets').hidden=!ready;
+    if(authSubmitPending&&['AUTHORIZATION_PENDING','AUTHORIZATION_COMPLETE','AUTHORIZATION_DID_NOT_COMPLETE','AADSTS50011'].includes(data.message)){
+      clearAuthorizationWait();
+      setPopupMessage(data.message==='AUTHORIZATION_PENDING'
+        ? 'The sign-in request is ready. If Microsoft did not open, return to the setup page and click Sign in again.'
+        : 'The sign-in request has finished. Return to the Office setup page for the current status.');
+    }
+    if(authSubmitPending&&data.message==='AUTHORIZATION_UNCONFIRMED'){
+      setPopupMessage('The sign-in request could not be confirmed. Check the Office setup page before trying again.');
+    }
+    document.getElementById('connect').disabled=ready||authSubmitPending;
+    if(ready){
+      statusNode.textContent=`Microsoft account verified · ${data.authStatus} · credential revision ${revision}`;
+    }else if(data.message==='AADSTS50011'){
+      statusNode.textContent='Microsoft rejected the registered loopback redirect (AADSTS50011). The localhost callback must match the tenant app registration.';
+    }else if(data.message==='AUTHORIZATION_DID_NOT_COMPLETE'){
+      statusNode.textContent='Microsoft sign-in did not complete. You can try again.';
+    }else if(data.message==='AUTHORIZATION_PENDING'){
+      statusNode.textContent='A Microsoft sign-in is pending. If its window stayed blank, click Sign in again to reopen it.';
+    }else if(data.message==='AUTHORIZATION_UNCONFIRMED'){
+      statusNode.textContent='The sign-in request could not be confirmed. Wait before trying again; no automatic retry was made.';
+    }else if(!authSubmitPending){
+      statusNode.textContent=`Microsoft connection status: ${data.authStatus}`;
+    }
     if(ready && data.requiredOAuthScopes.some(scope=>scope.toLowerCase().split('/').pop().startsWith('mail.'))){
       throw new Error('office_mail_scope_forbidden');
     }
-  }catch(error){statusNode.textContent=error.message;}
+  }catch(_error){
+    if(!authSubmitPending) statusNode.textContent='The Office status check timed out. It will retry automatically.';
+  }finally{
+    clearTimeout(timeout);
+    refreshInFlight=false;
+    scheduleStatusRefresh();
+  }
 }
 document.getElementById('authorize').addEventListener('submit',event=>{
+  if(authSubmitPending){event.preventDefault();return;}
   const popup=window.open('about:blank','cyrene-office-oauth','popup,width=720,height=820');
-  if(!popup){event.preventDefault();statusNode.textContent='Allow the Microsoft sign-in window, then try again.';return;}
-  statusNode.textContent='Waiting for Microsoft sign-in…';
+  if(!popup){event.preventDefault();document.getElementById('connect').disabled=false;statusNode.textContent='Allow the Microsoft sign-in window, then try again.';return;}
+  authSubmitPending=true;
+  document.getElementById('connect').disabled=true;
+  authPopupDocument=null;
+  try{authPopupDocument=popup.document;}catch(_error){}
+  setPopupMessage('Requesting Microsoft sign-in…');
+  statusNode.textContent='Requesting Microsoft sign-in…';
+  authNoticeTimer=setTimeout(()=>{
+    if(!authSubmitPending)return;
+    const message='Office is still preparing sign-in. Keep this window open; no authorization URL or code is shown here.';
+    statusNode.textContent=message;
+    setPopupMessage(message);
+  },AUTHORIZATION_WAIT_NOTICE_MS);
+  authTimeoutTimer=setTimeout(()=>{
+    if(!authSubmitPending)return;
+    clearAuthorizationWait();
+    document.getElementById('connect').disabled=false;
+    const message='The Office sign-in request timed out. No automatic retry was made. Wait before trying again.';
+    statusNode.textContent=message;
+    setPopupMessage(message);
+  },AUTHORIZATION_WAIT_TIMEOUT_MS);
 });
 document.getElementById('discover').addEventListener('click',async()=>{
   document.getElementById('discover').disabled=true;
@@ -1309,7 +1532,6 @@ document.getElementById('save').addEventListener('click',async()=>{
   }catch(error){document.getElementById('selection').textContent=error.message;}
 });
 refresh();
-setInterval(refresh,5000);
 </script></body></html>"""
     return (
         document.replace("__NONCE__", nonce)
@@ -1341,6 +1563,24 @@ class OfficeSetupServer(ThreadingHTTPServer):
         )
         super().__init__(address, OfficeSetupHandler)
         self.expected_port = int(self.server_address[1])
+
+
+def _authorization_wait_error_page(message: str) -> bytes:
+    """Build a safe sign-in wait page using only fixed, non-sensitive messages."""
+
+    allowed = {
+        "Office is busy preparing sign-in. Wait for the setup page to recover, then try again.",
+        "A sign-in request is already being prepared. Keep the setup page open and wait for its status.",
+        "The sign-in request could not be confirmed. Check the setup page before trying again.",
+    }
+    if message not in allowed:
+        raise OfficeSetupError("office_authorization_error_page_invalid")
+    return (
+        '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" '
+        'content="width=device-width, initial-scale=1"><title>Office sign-in status</title>'
+        f"<main><h1>Office sign-in status</h1><p>{message}</p>"
+        "<p>Return to the Office setup page for the current status.</p></main></html>"
+    ).encode()
 
 
 class OfficeSetupHandler(BaseHTTPRequestHandler):
@@ -1569,6 +1809,10 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                 status = (
                     HTTPStatus.UNAUTHORIZED
                     if str(error) in {"session_required", "session_expired"}
+                    else HTTPStatus.SERVICE_UNAVAILABLE
+                    if str(error) in {"office_status_busy", "office_bridge_busy"}
+                    else HTTPStatus.GATEWAY_TIMEOUT
+                    if str(error) == "office_bridge_timeout"
                     else HTTPStatus.BAD_GATEWAY
                 )
                 self._json(status, {"error": str(error)})
@@ -1583,12 +1827,41 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                 authorization_url = self.server.service.begin(session)
                 self._redirect(authorization_url)
             except OfficeSetupError as error:
-                status = (
-                    HTTPStatus.FORBIDDEN
-                    if str(error) in {"origin_not_allowed", "csrf_invalid"}
-                    else HTTPStatus.BAD_GATEWAY
-                )
-                self._json(status, {"error": str(error)})
+                code = str(error)
+                page_message = {
+                    "office_bridge_busy": (
+                        "Office is busy preparing sign-in. Wait for the setup page to recover, then try again."
+                    ),
+                    "office_status_busy": (
+                        "Office is busy preparing sign-in. Wait for the setup page to recover, then try again."
+                    ),
+                    "office_authorization_pending": (
+                        "A sign-in request is already being prepared. Keep the setup page open and wait for its status."
+                    ),
+                    "office_bridge_timeout": (
+                        "The sign-in request could not be confirmed. Check the setup page before trying again."
+                    ),
+                }.get(code)
+                if page_message is not None:
+                    status = (
+                        HTTPStatus.GATEWAY_TIMEOUT
+                        if code == "office_bridge_timeout"
+                        else HTTPStatus.CONFLICT
+                        if code == "office_authorization_pending"
+                        else HTTPStatus.SERVICE_UNAVAILABLE
+                    )
+                    self._send(
+                        status,
+                        _authorization_wait_error_page(page_message),
+                        "text/html; charset=utf-8",
+                    )
+                else:
+                    status = (
+                        HTTPStatus.FORBIDDEN
+                        if code in {"origin_not_allowed", "csrf_invalid"}
+                        else HTTPStatus.BAD_GATEWAY
+                    )
+                    self._json(status, {"error": code})
             return
         try:
             body = self._body()
@@ -1618,6 +1891,10 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                 if str(error) in {"origin_not_allowed", "csrf_invalid"}
                 else HTTPStatus.UNAUTHORIZED
                 if str(error) in {"session_required", "session_expired"}
+                else HTTPStatus.SERVICE_UNAVAILABLE
+                if str(error) in {"office_bridge_busy", "office_status_busy"}
+                else HTTPStatus.GATEWAY_TIMEOUT
+                if str(error) == "office_bridge_timeout"
                 else HTTPStatus.BAD_REQUEST
             )
             self._json(status, {"error": str(error)})
