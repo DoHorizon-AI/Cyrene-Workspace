@@ -58,6 +58,7 @@ LOCK_SERVICE_FOR_TARGET = {
     "huggingface": "huggingface-provider",
     "navigator-persistence": "navigator-persistence",
     "navigator": "dsh-executor",
+    "account-center": "account-center",
     "exchange": "exchange",
     "cloud-management-phase2": "cloud-management",
 }

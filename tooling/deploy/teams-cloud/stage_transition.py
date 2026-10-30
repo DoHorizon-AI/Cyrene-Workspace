@@ -44,6 +44,7 @@ PHASES = {
 }
 IMAGE_UPDATE_TARGETS = frozenset(
     {
+        "account-center",
         "cloud-management-phase2",
         "exchange",
         "github-issues",
@@ -52,6 +53,7 @@ IMAGE_UPDATE_TARGETS = frozenset(
         "navigator-persistence",
     }
 )
+ACCOUNT_CENTER_IMAGE_UPDATE_TARGET = "account-center"
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
 GITHUB_ISSUES_IMAGE_UPDATE_TARGET = "github-issues"
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
@@ -60,7 +62,12 @@ CLOUD_MONITOR_PROVIDER_IDS = frozenset({"azure", "gcp", "runpod"})
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
 EXCHANGE_READINESS_IMAGE_TARGETS = frozenset(
-    {"cloud-management-phase2", "exchange", GITHUB_ISSUES_IMAGE_UPDATE_TARGET}
+    {
+        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "cloud-management-phase2",
+        "exchange",
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+    }
 )
 IMAGE_UPDATE_READINESS_TARGETS = EXCHANGE_READINESS_IMAGE_TARGETS | frozenset(
     {HUGGINGFACE_IMAGE_UPDATE_TARGET}
@@ -109,6 +116,19 @@ RUNTIME_SERVICE_ORDER = (
 )
 RUNTIME_SERVICE_SET = frozenset(RUNTIME_SERVICE_ORDER)
 OFFICE_GRAPH_RUNTIME_SERVICE_SET = RUNTIME_SERVICE_SET | {"microsoft-graph"}
+ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET = OFFICE_GRAPH_RUNTIME_SERVICE_SET
+ACCOUNT_CENTER_DATABASE_USER_VERSION = 9
+ACCOUNT_CENTER_PROFILE_COLUMNS = (
+    "profile_ref,anchor_issuer,anchor_subject,organization_id,workspace_id,"
+    "provider,identity_ref,target_scope_json,external_subject,status,auth_mode"
+)
+ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS = frozenset(
+    {"github", "huggingface", "azure", "gcp", "runpod"}
+)
+ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256 = (
+    "a1158e9135f83baf1c755d6f62e8432b342bb14d39523960dec392ac3d72476f"
+)
+ACCOUNT_CENTER_MICROSOFT_PROFILE_PROVIDER = "microsoft_graph"
 AUTOMATION_RUNTIME_SERVICE_SET = RUNTIME_SERVICE_SET | set(OPTIONAL_RUNTIME_SERVICE_ORDER)
 # A hot memory update may target one already-running service from the active profile.
 # It never adds a service or changes the mutable-stage target set.
@@ -1071,9 +1091,27 @@ def _verify_provider_monitor_quiescence(
                 "Cloud image update requires its issued Azure and GCP bindings"
             )
         include_cloud_refresh = True
+    elif (
+        target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and plan.get("phase") == "issued-connector-activation"
+    ):
+        target_journal_key = "accountCenterImageUpdate"
+        expected_scope_digests = plan.get("candidatePreflight", {}).get(
+            "expectedProviderScopeDigests"
+        )
+        if not isinstance(expected_scope_digests, dict):
+            raise StageTransitionError("candidate Account Center provider scopes are malformed")
+        required_providers = sorted(
+            set(expected_scope_digests) & {"github", "huggingface", "azure", "gcp", "runpod"}
+        )
+        if not required_providers:
+            raise StageTransitionError(
+                "Account Center image update requires the existing provider monitor bindings"
+            )
+        include_cloud_refresh = False
     else:
         raise StageTransitionError(
-            "connector monitor gate is restricted to issued GitHub/HF/Cloud image updates"
+            "connector monitor gate is restricted to issued Account Center/GitHub/HF/Cloud image updates"
         )
 
     readiness = journal.get("exchangeReadiness")
@@ -1087,6 +1125,13 @@ def _verify_provider_monitor_quiescence(
     elif target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
         github_refs = receipt.get("githubConnectionRefs") if isinstance(receipt, dict) else None
         connection_refs = {"github": github_refs}
+    elif target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
+        connection_refs = (
+            {provider: refs.get(provider) for provider in required_providers}
+            if isinstance(refs, dict)
+            else {}
+        )
     else:
         refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
         connection_refs = refs if isinstance(refs, dict) else {}
@@ -3896,7 +3941,11 @@ def _validate_image_update_topology(
 
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+            "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+        )
+    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+        raise StageTransitionError(
+            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
         )
     if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -3916,6 +3965,13 @@ def _validate_image_update_topology(
         )
     if sum(name == "navigator" for name in new_services) != 1:
         raise StageTransitionError("image update must retain exactly one Navigator executor")
+    if (
+        target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and set(new_services) != ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+    ):
+        raise StageTransitionError(
+            "Account Center image update must preserve the exact 15-service Graph runtime"
+        )
 
     try:
         runtime_update._validate_lock_pair(active_lock, candidate_lock, [target])
@@ -3975,6 +4031,305 @@ def _validate_image_update_topology(
             "configChanged": False,
         }
     return [target], target_images
+
+
+def _validate_account_center_database_state(database: Any) -> None:
+    """Require schema 9, clean SQLite checks, and the five fixed profile identities."""
+
+    database_fields = {
+        "databasePathSha256",
+        "schemaVersion",
+        "schemaSha256",
+        "foreignKeyViolationCount",
+        "quickCheck",
+        "protectedProviderCount",
+        "protectedProvidersSha256",
+        "additionalMicrosoftProfileCount",
+        "additionalMicrosoftProfileIdentitySha256",
+    }
+    if not isinstance(database, dict) or set(database) != database_fields:
+        raise StageTransitionError("Account Center database identity record is malformed")
+    microsoft_count = database.get("additionalMicrosoftProfileCount")
+    microsoft_digest = database.get("additionalMicrosoftProfileIdentitySha256")
+    if (
+        database.get("schemaVersion") != ACCOUNT_CENTER_DATABASE_USER_VERSION
+        or isinstance(database.get("schemaVersion"), bool)
+        or not isinstance(database.get("schemaVersion"), int)
+        or database.get("foreignKeyViolationCount") != 0
+        or isinstance(database.get("foreignKeyViolationCount"), bool)
+        or not isinstance(database.get("foreignKeyViolationCount"), int)
+        or database.get("quickCheck") != ["ok"]
+        or database.get("protectedProviderCount") != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
+        or isinstance(database.get("protectedProviderCount"), bool)
+        or not isinstance(database.get("protectedProviderCount"), int)
+        or database.get("protectedProvidersSha256") != ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256
+        or isinstance(microsoft_count, bool)
+        or not isinstance(microsoft_count, int)
+        or microsoft_count not in {0, 1}
+        or (microsoft_count == 0 and microsoft_digest is not None)
+        or (
+            microsoft_count == 1
+            and (
+                not isinstance(microsoft_digest, str)
+                or SHA256_RE.fullmatch(microsoft_digest) is None
+            )
+        )
+        or any(
+            not isinstance(database.get(field), str) or SHA256_RE.fullmatch(database[field]) is None
+            for field in (
+                "databasePathSha256",
+                "schemaSha256",
+                "protectedProvidersSha256",
+            )
+        )
+    ):
+        raise StageTransitionError(
+            "Account Center image update requires schema 9 and the five fixed provider identities"
+        )
+
+
+def _validate_account_center_image_update_state(value: Any) -> None:
+    """Require the sealed Account Center database state and exact 15-service budgets."""
+
+    if not isinstance(value, dict) or set(value) != {"database", "runtimeCapacity"}:
+        raise StageTransitionError("Account Center image update state is malformed")
+    _validate_account_center_database_state(value.get("database"))
+    capacity = value.get("runtimeCapacity")
+    capacity_fields = {
+        "serviceCount",
+        "totalMemoryBytes",
+        "maxMemoryBytes",
+        "totalNanoCpus",
+        "maxNanoCpus",
+    }
+    maximum_memory = 3584 * preflight.MIB
+    maximum_nano_cpus = 1_950_000_000
+    if (
+        not isinstance(capacity, dict)
+        or set(capacity) != capacity_fields
+        or capacity.get("serviceCount") != 15
+        or isinstance(capacity.get("serviceCount"), bool)
+        or not isinstance(capacity.get("serviceCount"), int)
+        or capacity.get("maxMemoryBytes") != maximum_memory
+        or isinstance(capacity.get("maxMemoryBytes"), bool)
+        or not isinstance(capacity.get("maxMemoryBytes"), int)
+        or capacity.get("maxNanoCpus") != maximum_nano_cpus
+        or isinstance(capacity.get("maxNanoCpus"), bool)
+        or not isinstance(capacity.get("maxNanoCpus"), int)
+        or any(
+            isinstance(capacity.get(field), bool)
+            or not isinstance(capacity.get(field), int)
+            or capacity[field] < 0
+            for field in ("totalMemoryBytes", "totalNanoCpus")
+        )
+        or capacity.get("totalMemoryBytes", maximum_memory + 1) > maximum_memory
+        or capacity.get("totalNanoCpus", maximum_nano_cpus + 1) > maximum_nano_cpus
+    ):
+        raise StageTransitionError(
+            "Account Center image update must retain the 15-service 3584 MiB/1.95 CPU budget"
+        )
+
+
+def _account_center_database_state(
+    *,
+    compose: dict[str, Any],
+    project: str,
+    container_id: str,
+    image_ref: str,
+    image_id: str,
+    docker_prefix: list[str],
+) -> dict[str, Any]:
+    """Read the mounted Account Center database without exposing profile values."""
+
+    if (
+        FULL_CONTAINER_ID_RE.fullmatch(container_id) is None
+        or IMAGE_ID_RE.fullmatch(image_id) is None
+    ):
+        raise StageTransitionError("Account Center database container identity is malformed")
+    raw = runtime_update._decode_json_output(
+        runtime_update._checked_stdout(
+            [*docker_prefix, "inspect", container_id],
+            label="Account Center database container inspection",
+        ),
+        "Account Center database container inspection",
+    )
+    if not isinstance(raw, list) or len(raw) != 1 or not isinstance(raw[0], dict):
+        raise StageTransitionError("Account Center database container inspection is ambiguous")
+    container = raw[0]
+    config = container.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    state = container.get("State")
+    if (
+        container.get("Id") != container_id
+        or container.get("Image") != image_id
+        or not isinstance(config, dict)
+        or config.get("Image") != image_ref
+        or not isinstance(labels, dict)
+        or labels.get("com.docker.compose.project") != project
+        or labels.get("com.docker.compose.service") != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        or not isinstance(state, dict)
+        or state.get("Running") is not True
+        or state.get("Paused") is True
+    ):
+        raise StageTransitionError("Account Center database container is not the exact live target")
+
+    mounts = container.get("Mounts")
+    data_mounts = (
+        [
+            row
+            for row in mounts
+            if isinstance(row, dict)
+            and row.get("Type") == "volume"
+            and row.get("Destination") == "/data"
+        ]
+        if isinstance(mounts, list)
+        else []
+    )
+    environment = config.get("Env")
+    if (
+        len(data_mounts) != 1
+        or not isinstance(data_mounts[0].get("Source"), str)
+        or not isinstance(environment, list)
+    ):
+        raise StageTransitionError("Account Center SQLite volume/configuration is ambiguous")
+    environment_values: dict[str, str] = {}
+    for entry in environment:
+        if not isinstance(entry, str) or "=" not in entry:
+            raise StageTransitionError("Account Center environment is malformed")
+        name, value = entry.split("=", 1)
+        if name in environment_values:
+            raise StageTransitionError("Account Center environment contains duplicate keys")
+        environment_values[name] = value
+    compose_service = compose.get("services", {}).get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
+    compose_environment = (
+        compose_service.get("environment") if isinstance(compose_service, dict) else None
+    )
+    if isinstance(compose_environment, dict):
+        expected_environment = compose_environment
+    elif isinstance(compose_environment, list):
+        expected_environment = {}
+        for entry in compose_environment:
+            if not isinstance(entry, str) or "=" not in entry:
+                raise StageTransitionError("rendered Account Center environment is malformed")
+            name, value = entry.split("=", 1)
+            if name in expected_environment:
+                raise StageTransitionError("rendered Account Center environment is ambiguous")
+            expected_environment[name] = value
+    else:
+        raise StageTransitionError("rendered Account Center environment is unavailable")
+    if any(
+        not isinstance(name, str)
+        or not isinstance(value, str)
+        or environment_values.get(name) != value
+        for name, value in expected_environment.items()
+    ):
+        raise StageTransitionError(
+            "live Account Center environment differs from the sealed Compose configuration"
+        )
+    connection: sqlite3.Connection | None = None
+    try:
+        activation = json.loads(
+            environment_values["CYRENE_CAPABILITY_CONFIGURATION_JSON"],
+            object_pairs_hook=preflight._unique_json_object,
+        )
+        database_path = Path(data_mounts[0]["Source"]) / "accounts.sqlite3"
+        resolved_database_path = database_path.resolve(strict=True)
+    except (
+        KeyError,
+        OSError,
+        RuntimeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as error:
+        raise StageTransitionError(
+            "Account Center SQLite source/configuration is unavailable"
+        ) from error
+    if (
+        environment_values.get("CYRENE_PLUGIN_STORAGE_PATH") != "/data"
+        or not isinstance(activation, dict)
+        or activation.get("storage_path", "/data/accounts.sqlite3") != "/data/accounts.sqlite3"
+        or database_path.is_symlink()
+        or not resolved_database_path.is_file()
+    ):
+        raise StageTransitionError("Account Center SQLite path differs from its selected volume")
+
+    try:
+        connection = sqlite3.connect(
+            f"{resolved_database_path.as_uri()}?mode=ro", uri=True, timeout=15
+        )
+        connection.execute("BEGIN")
+        schema = list(
+            connection.execute(
+                "SELECT type,name,tbl_name,sql FROM sqlite_master "
+                "WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
+            )
+        )
+        user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+        foreign_key_count = len(connection.execute("PRAGMA foreign_key_check").fetchall())
+        quick_check = [row[0] for row in connection.execute("PRAGMA quick_check")]
+        profiles = list(
+            connection.execute(
+                f"SELECT {ACCOUNT_CENTER_PROFILE_COLUMNS} "
+                "FROM provider_profiles ORDER BY profile_ref"
+            )
+        )
+    except sqlite3.Error as error:
+        raise StageTransitionError(
+            "Account Center SQLite read-only identity check failed"
+        ) from error
+    finally:
+        if connection is not None:
+            connection.close()
+
+    protected = [row for row in profiles if row[5] in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS]
+    extras = [row for row in profiles if row[5] not in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS]
+    if (
+        len(protected) != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
+        or {row[5] for row in protected} != ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS
+        or _sha256_bytes(_canonical_json(protected)) != ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256
+        or len(extras) > 1
+    ):
+        raise StageTransitionError(
+            "Account Center does not contain the five fixed provider profile identities"
+        )
+    additional_microsoft_digest = None
+    if extras:
+        extra = extras[0]
+        try:
+            actor = preflight._connector_bootstrap_actor(compose)
+        except preflight.PreflightError as error:
+            raise StageTransitionError(
+                "Account Center Microsoft profile owner/workspace binding is unavailable"
+            ) from error
+        if (
+            not isinstance(actor, dict)
+            or any(
+                not isinstance(actor.get(field), str) or not actor[field]
+                for field in ("issuer", "subject", "workspaceId")
+            )
+            or extra[5] != ACCOUNT_CENTER_MICROSOFT_PROFILE_PROVIDER
+            or extra[1] != actor.get("issuer")
+            or extra[2] != actor.get("subject")
+            or extra[4] != actor.get("workspaceId")
+        ):
+            raise StageTransitionError(
+                "additional Microsoft profile is not bound to the selected Office owner/workspace"
+            )
+        additional_microsoft_digest = _sha256_bytes(_canonical_json(extras))
+    result = {
+        "databasePathSha256": _sha256_bytes(str(resolved_database_path).encode("utf-8")),
+        "schemaVersion": user_version,
+        "schemaSha256": _sha256_bytes(_canonical_json(schema)),
+        "foreignKeyViolationCount": foreign_key_count,
+        "quickCheck": quick_check,
+        "protectedProviderCount": len(protected),
+        "protectedProvidersSha256": _sha256_bytes(_canonical_json(protected)),
+        "additionalMicrosoftProfileCount": len(extras),
+        "additionalMicrosoftProfileIdentitySha256": additional_microsoft_digest,
+    }
+    _validate_account_center_database_state(result)
+    return result
 
 
 def _validate_listener_repair_topology(
@@ -4258,6 +4613,14 @@ def _validate_image_update_selection_contract(
     ):
         raise StageTransitionError(
             "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+        )
+    if (
+        not is_memory_update
+        and target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
         )
     if (
         not is_memory_update
@@ -6396,7 +6759,13 @@ def create_plan(
         not isinstance(image_update_target, str) or image_update_target not in IMAGE_UPDATE_TARGETS
     ):
         raise StageTransitionError(
-            "image update target must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+            "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+        )
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and (
+        phase != "issued-connector-activation" or max_memory_mib != 3584 or max_cpus != 1.95
+    ):
+        raise StageTransitionError(
+            "Account Center image updates require issued activation and the 3584 MiB/1.95 CPU budget"
         )
     if image_update_target is not None and memory_update_target is not None:
         raise StageTransitionError("image and memory update modes are mutually exclusive")
@@ -6420,6 +6789,13 @@ def create_plan(
     ):
         raise StageTransitionError(
             "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+        )
+    if (
+        image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and phase != "issued-connector-activation"
+    ):
+        raise StageTransitionError(
+            "Account Center image updates require issued-connector-activation and the existing Graph runtime"
         )
     if image_update_target == CLOUD_IMAGE_UPDATE_TARGET and phase not in PHASES:
         raise StageTransitionError(
@@ -6632,6 +7008,13 @@ def create_plan(
         raise StageTransitionError(
             "candidate preflight did not return the scoped read-only readiness contract"
         )
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and (
+        candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+        or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+    ):
+        raise StageTransitionError(
+            "Account Center candidate Compose must retain the 3584 MiB/1.95 CPU budget"
+        )
     if (
         image_update_target is not None
         or memory_update_target is not None
@@ -6771,6 +7154,30 @@ def create_plan(
     if navigator_status["mode"] != "accepting":
         raise StageTransitionError("Navigator must be accepting before transition planning")
 
+    account_center_image_update_state = None
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        account_center = active_services.get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
+        if not isinstance(account_center, dict):
+            raise StageTransitionError("active Account Center service is missing")
+        account_center_image_update_state = {
+            "database": _account_center_database_state(
+                compose=active_compose,
+                project=project,
+                container_id=account_center["containerId"],
+                image_ref=account_center["imageRef"],
+                image_id=account_center["imageId"],
+                docker_prefix=docker_prefix,
+            ),
+            "runtimeCapacity": _memory_update_actual_capacity(
+                compose=active_compose,
+                services=active_services,
+                max_memory_mib=3584,
+                max_cpus=1.95,
+                docker_prefix=docker_prefix,
+            ),
+        }
+        _validate_account_center_image_update_state(account_center_image_update_state)
+
     operation_id = str(uuid.uuid4())
     backup_path = backup_dir / f"{operation_id}.navigator-sessions.sqlite3"
     if memory_update_target is None and (backup_path.exists() or backup_path.is_symlink()):
@@ -6790,6 +7197,11 @@ def create_plan(
         **(
             {"listenerRepairState": listener_repair_state}
             if listener_repair_state is not None
+            else {}
+        ),
+        **(
+            {"accountCenterImageUpdateState": account_center_image_update_state}
+            if account_center_image_update_state is not None
             else {}
         ),
         "createdAtUtc": _utc_now(),
@@ -6979,10 +7391,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         if (
             not isinstance(image_update_target, str)
             or image_update_target not in IMAGE_UPDATE_TARGETS
+            or image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
             or (
                 image_update_target == CLOUD_IMAGE_UPDATE_TARGET
                 and plan.get("phase") != "issued-connector-activation"
             )
+        ):
+            image_update_target = "__invalid__"
+    elif set(plan) == required | {"imageUpdateTarget", "accountCenterImageUpdateState"}:
+        image_update_target = plan.get("imageUpdateTarget")
+        if (
+            image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+            or plan.get("phase") != "issued-connector-activation"
         ):
             image_update_target = "__invalid__"
     elif set(plan) == required | {"imageUpdateTarget", "cloudRunnerState"}:
@@ -7155,6 +7575,54 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                 raise StageTransitionError(
                     f"Graph bootstrap changes unselected runtime service {service_name}"
                 )
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        candidate_preflight = plan.get("candidatePreflight")
+        if (
+            active_runtime_services != ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+            or candidate_runtime_services != ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+            or plan.get("targets") != [ACCOUNT_CENTER_IMAGE_UPDATE_TARGET]
+            or not isinstance(candidate_preflight, dict)
+            or candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+            or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+            or candidate_preflight.get("maxMemoryMiB") != 3584
+            or candidate_preflight.get("maxCpus") != 1.95
+        ):
+            raise StageTransitionError(
+                "Account Center image update must preserve the exact 15-service Graph runtime and budgets"
+            )
+        for service_name, row in plan["candidateServices"].items():
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"active", "candidate", "added", "configChanged"}
+                or not isinstance(row.get("active"), dict)
+                or not isinstance(row.get("candidate"), dict)
+                or row.get("added") is not False
+                or row.get("configChanged") is not False
+                or (
+                    service_name == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                    and (
+                        row.get("active") == row.get("candidate")
+                        or set(row["active"]) != {"imageRef", "imageId"}
+                        or set(row["candidate"]) != {"imageRef", "imageId"}
+                        or not isinstance(row["active"].get("imageRef"), str)
+                        or not isinstance(row["candidate"].get("imageRef"), str)
+                        or row["active"].get("imageRef") == row["candidate"].get("imageRef")
+                        or row["active"].get("imageId") == row["candidate"].get("imageId")
+                        or not isinstance(row["active"].get("imageId"), str)
+                        or IMAGE_ID_RE.fullmatch(row["active"]["imageId"]) is None
+                        or not isinstance(row["candidate"].get("imageId"), str)
+                        or IMAGE_ID_RE.fullmatch(row["candidate"]["imageId"]) is None
+                    )
+                )
+                or (
+                    service_name != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                    and row.get("active") != row.get("candidate")
+                )
+            ):
+                raise StageTransitionError(
+                    f"Account Center image update changes an unselected image: {service_name}"
+                )
+        _validate_account_center_image_update_state(plan.get("accountCenterImageUpdateState"))
     if listener_repair:
         if (
             _runtime_service_shape(plan["activeServices"], "listener repair active plan")
@@ -8908,7 +9376,7 @@ def _record_exchange_readiness(
 def _image_update_exchange_readiness_checkpoint(
     plan: dict[str, Any], journal: dict[str, Any]
 ) -> dict[str, Any]:
-    """Require the exact live 14-binding Exchange snapshot for HF/Cloud image updates."""
+    """Require exact live Exchange bindings for image updates that depend on them."""
 
     target = plan.get("imageUpdateTarget")
     exchange = plan.get("activeServices", {}).get("exchange")
@@ -8939,9 +9407,22 @@ def _image_update_exchange_readiness_checkpoint(
             )
         refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
         connection_refs = refs if isinstance(refs, dict) else {}
+    elif (
+        target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+        and plan.get("phase") == "issued-connector-activation"
+    ):
+        expected_monitor_providers = sorted(
+            set(expected_scope_digests) & {"github", "huggingface", "azure", "gcp", "runpod"}
+        )
+        refs = receipt.get("connectionRefByProvider") if isinstance(receipt, dict) else None
+        connection_refs = (
+            {provider: refs.get(provider) for provider in expected_monitor_providers}
+            if isinstance(refs, dict)
+            else {}
+        )
     else:
         raise StageTransitionError(
-            "Exchange readiness checkpoint is outside the HF/Cloud image route"
+            "Exchange readiness checkpoint is outside its closed image-update route"
         )
 
     if set(connection_refs) != set(expected_monitor_providers):
@@ -9089,6 +9570,22 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "beforeReadiness": None,
             "monitorQuiescence": None,
             "afterReadiness": None,
+        },
+        "accountCenterImageUpdate": {
+            "required": plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+            "databaseMutationInvoked": False,
+            "beforeDatabaseIdentity": copy.deepcopy(
+                plan.get("accountCenterImageUpdateState", {}).get("database")
+            ),
+            "afterDatabaseIdentity": None,
+            "beforeRuntimeCapacity": copy.deepcopy(
+                plan.get("accountCenterImageUpdateState", {}).get("runtimeCapacity")
+            ),
+            "afterRuntimeCapacity": None,
+            "beforeReadiness": None,
+            "monitorQuiescence": None,
+            "afterReadiness": None,
+            "identityReadbackStatus": "PENDING",
         },
         "cloudRunnerIdle": {
             "required": "cloudRunnerState" in plan or "listenerRepairState" in plan,
@@ -9452,6 +9949,59 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if journal.get("state") == "RECOVERY_REQUIRED"
         else "PENDING"
     )
+    account_center_update_record = journal.get("accountCenterImageUpdate", {})
+    account_center_update = (
+        account_center_update_record if isinstance(account_center_update_record, dict) else {}
+    )
+    account_center_update_required = account_center_update.get("required") is True
+    account_center_monitor = (
+        account_center_update.get("monitorQuiescence")
+        if isinstance(account_center_update, dict)
+        else None
+    )
+    account_center_before = (
+        account_center_update.get("beforeReadiness")
+        if isinstance(account_center_update, dict)
+        else None
+    )
+    account_center_after = (
+        account_center_update.get("afterReadiness")
+        if isinstance(account_center_update, dict)
+        else None
+    )
+    account_center_monitor_status = (
+        "NOT_REQUIRED"
+        if not account_center_update_required
+        else "VERIFIED"
+        if isinstance(account_center_monitor, dict)
+        and account_center_monitor.get("verified") is True
+        else "BLOCKED"
+        if isinstance(account_center_monitor, dict)
+        and account_center_monitor.get("verified") is False
+        else "PENDING"
+    )
+    account_center_update_status = (
+        "NOT_REQUIRED"
+        if not account_center_update_required
+        else "RECOVERY_REQUIRED"
+        if journal.get("state") == "RECOVERY_REQUIRED"
+        else "VERIFIED"
+        if journal.get("state") == "APPLIED"
+        and account_center_update.get("identityReadbackStatus") == "VERIFIED"
+        and account_center_monitor_status == "VERIFIED"
+        and isinstance(account_center_before, dict)
+        and account_center_before.get("verified") is True
+        and isinstance(account_center_after, dict)
+        and account_center_after.get("verified") is True
+        else "BLOCKED"
+        if account_center_monitor_status == "BLOCKED"
+        else "PENDING"
+    )
+    account_center_before_database = (
+        account_center_update.get("beforeDatabaseIdentity")
+        if isinstance(account_center_update, dict)
+        else None
+    )
     return {
         "schemaVersion": journal.get("schemaVersion"),
         "operationId": journal.get("operationId"),
@@ -9538,6 +10088,40 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             else "LIVE_VERIFIED"
             if isinstance(github_issues_after, dict) and github_issues_after.get("verified") is True
             else "PENDING"
+        ),
+        "accountCenterImageUpdateRequired": account_center_update_required,
+        "accountCenterImageUpdateStatus": account_center_update_status,
+        "accountCenterMonitorQuiescenceStatus": account_center_monitor_status,
+        "accountCenterBeforeReadinessStatus": (
+            "NOT_REQUIRED"
+            if not account_center_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(account_center_before, dict)
+            and account_center_before.get("verified") is True
+            else "PENDING"
+        ),
+        "accountCenterAfterReadinessStatus": (
+            "NOT_REQUIRED"
+            if not account_center_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(account_center_after, dict)
+            and account_center_after.get("verified") is True
+            else "PENDING"
+        ),
+        "accountCenterSchemaVersion": (
+            account_center_before_database.get("schemaVersion")
+            if isinstance(account_center_before_database, dict)
+            else None
+        ),
+        "accountCenterProtectedProviderCount": (
+            account_center_before_database.get("protectedProviderCount")
+            if isinstance(account_center_before_database, dict)
+            else None
+        ),
+        "accountCenterDatabaseMutationInvoked": (
+            account_center_update.get("databaseMutationInvoked") is True
+            if isinstance(account_center_update, dict)
+            else False
         ),
         "exchangeReadinessRequired": exchange_readiness_required,
         "exchangeReadinessStatus": (
@@ -10855,6 +11439,46 @@ def apply_plan_file(
         _candidate_preflight(plan)
         active_compose, _active_lock = _verify_active_baseline(plan, docker_prefix)
         candidate_compose, _candidate_lock = _candidate_configs(plan, docker_prefix)
+        account_center_update_state = plan.get("accountCenterImageUpdateState")
+        if plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+            targets, candidate_services = _validate_phase_topology(
+                phase=plan["phase"],
+                image_update_target=ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+                active=active_compose,
+                candidate=candidate_compose,
+                active_lock=_active_lock,
+                candidate_lock=_candidate_lock,
+            )
+            if targets != plan["targets"] or candidate_services != plan["candidateServices"]:
+                raise StageTransitionError(
+                    "Account Center image update topology changed after the plan was sealed"
+                )
+            if not isinstance(account_center_update_state, dict):
+                raise StageTransitionError("Account Center image update baseline is missing")
+            account_center = plan["activeServices"].get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
+            if not isinstance(account_center, dict):
+                raise StageTransitionError("active Account Center service identity is missing")
+            database_state = _account_center_database_state(
+                compose=active_compose,
+                project=plan["project"],
+                container_id=account_center["containerId"],
+                image_ref=account_center["imageRef"],
+                image_id=account_center["imageId"],
+                docker_prefix=docker_prefix,
+            )
+            capacity_state = _memory_update_actual_capacity(
+                compose=active_compose,
+                services=plan["activeServices"],
+                max_memory_mib=3584,
+                max_cpus=1.95,
+                docker_prefix=docker_prefix,
+            )
+            if database_state != account_center_update_state.get(
+                "database"
+            ) or capacity_state != account_center_update_state.get("runtimeCapacity"):
+                raise StageTransitionError(
+                    "Account Center database/profile or 15-service resource baseline changed after planning"
+                )
         if plan.get("memoryUpdateTarget") is not None:
             targets, candidate_services = _validate_phase_topology(
                 phase=plan["phase"],
@@ -10980,6 +11604,7 @@ def apply_plan_file(
                 if (
                     plan.get("imageUpdateTarget")
                     in {
+                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
                         HUGGINGFACE_IMAGE_UPDATE_TARGET,
                         CLOUD_IMAGE_UPDATE_TARGET,
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
@@ -10999,6 +11624,7 @@ def apply_plan_file(
                         docker_prefix=docker_prefix,
                     )
                     update_key = {
+                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET: "accountCenterImageUpdate",
                         HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
                         CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
@@ -11018,6 +11644,43 @@ def apply_plan_file(
                         journal=journal,
                         journal_path=journal_path,
                         docker_prefix=docker_prefix,
+                    )
+                if (
+                    plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                    and service_name == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                ):
+                    account_center_state = journal["accountCenterImageUpdate"]
+                    baseline = plan["accountCenterImageUpdateState"]
+                    account_center = plan["activeServices"][ACCOUNT_CENTER_IMAGE_UPDATE_TARGET]
+                    database_state = _account_center_database_state(
+                        compose=active_compose,
+                        project=plan["project"],
+                        container_id=account_center["containerId"],
+                        image_ref=account_center["imageRef"],
+                        image_id=account_center["imageId"],
+                        docker_prefix=docker_prefix,
+                    )
+                    capacity_state = _memory_update_actual_capacity(
+                        compose=active_compose,
+                        services=plan["activeServices"],
+                        max_memory_mib=3584,
+                        max_cpus=1.95,
+                        docker_prefix=docker_prefix,
+                    )
+                    if (
+                        database_state != baseline["database"]
+                        or capacity_state != baseline["runtimeCapacity"]
+                    ):
+                        raise StageTransitionError(
+                            "Account Center database/profile or 15-service budget changed before target mutation"
+                        )
+                    account_center_state["beforeDatabaseIdentity"] = database_state
+                    account_center_state["beforeRuntimeCapacity"] = capacity_state
+                    account_center_state["identityReadbackStatus"] = "PRE_MUTATION_VERIFIED"
+                    _write_journal(
+                        journal_path,
+                        journal,
+                        "ACCOUNT_CENTER_PRE_MUTATION_IDENTITY_VERIFIED",
                     )
                 if (
                     plan.get("imageUpdateTarget") == PERSISTENCE_IMAGE_UPDATE_TARGET
@@ -11063,6 +11726,7 @@ def apply_plan_file(
                 if (
                     plan.get("imageUpdateTarget")
                     in {
+                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
                         HUGGINGFACE_IMAGE_UPDATE_TARGET,
                         CLOUD_IMAGE_UPDATE_TARGET,
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
@@ -11078,6 +11742,7 @@ def apply_plan_file(
                         docker_prefix=docker_prefix,
                     )
                     update_key = {
+                        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET: "accountCenterImageUpdate",
                         HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
                         CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
@@ -11203,6 +11868,68 @@ def apply_plan_file(
             runtime_update._verify_live_network_membership(
                 candidate_compose, candidate_services, docker_prefix
             )
+            if plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+                account_center_state = journal["accountCenterImageUpdate"]
+                candidate_account_center = candidate_services.get(
+                    ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+                )
+                try:
+                    capacity_state = _memory_update_actual_capacity(
+                        compose=candidate_compose,
+                        services=candidate_services,
+                        max_memory_mib=3584,
+                        max_cpus=1.95,
+                        docker_prefix=docker_prefix,
+                    )
+                    if not isinstance(candidate_account_center, dict):
+                        raise StageTransitionError(
+                            "candidate Account Center service is missing from live inventory"
+                        )
+                    database_state = _account_center_database_state(
+                        compose=candidate_compose,
+                        project=plan["project"],
+                        container_id=candidate_account_center["containerId"],
+                        image_ref=candidate_account_center["imageRef"],
+                        image_id=candidate_account_center["imageId"],
+                        docker_prefix=docker_prefix,
+                    )
+                except StageTransitionError as error:
+                    account_center_state["identityReadbackStatus"] = "UNREADABLE"
+                    journal["lastErrorCode"] = "account_center_image_update_readback_failed"
+                    _write_journal(
+                        journal_path,
+                        journal,
+                        "RECOVERY_REQUIRED",
+                        state="RECOVERY_REQUIRED",
+                    )
+                    raise StageTransitionError(
+                        "Account Center database/resource read-back failed; preserve the candidate image for read-only recovery"
+                    ) from error
+                account_center_state["afterDatabaseIdentity"] = database_state
+                account_center_state["afterRuntimeCapacity"] = capacity_state
+                verified = (
+                    database_state == plan["accountCenterImageUpdateState"]["database"]
+                    and capacity_state == plan["accountCenterImageUpdateState"]["runtimeCapacity"]
+                )
+                account_center_state["identityReadbackStatus"] = (
+                    "VERIFIED" if verified else "MISMATCH"
+                )
+                if not verified:
+                    journal["lastErrorCode"] = "account_center_image_update_readback_mismatch"
+                    _write_journal(
+                        journal_path,
+                        journal,
+                        "RECOVERY_REQUIRED",
+                        state="RECOVERY_REQUIRED",
+                    )
+                    raise StageTransitionError(
+                        "Account Center schema/profile identity or actual resource limits changed; preserve the candidate image for read-only recovery"
+                    )
+                _write_journal(
+                    journal_path,
+                    journal,
+                    "ACCOUNT_CENTER_DATABASE_AND_RESOURCE_READBACK_VERIFIED",
+                )
             if (
                 journal["exchangeReadiness"]["required"]
                 and journal["exchangeReadiness"]["verified"] is not True
