@@ -2215,7 +2215,7 @@ def _expected_connector_providers(
             raise PreflightError(
                 "Azure DevOps requires its actor-owned source setup outside the connector auth evidence flow"
             )
-        if connector_auth_phase in {"provider-bootstrap", "microsoft-graph-provider-bootstrap"}:
+        if connector_auth_phase == "provider-bootstrap":
             return {"github"} | ({"computer"} if has_computer_runner else set())
         if connector_auth_phase == "microsoft-graph-provider-bootstrap":
             services = config.get("services", {})
