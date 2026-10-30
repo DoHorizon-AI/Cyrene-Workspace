@@ -747,3 +747,40 @@ def test_callback_provider_error_is_generic_and_never_reaches_exchange() -> None
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_callback_redirect_registration_error_surfaces_only_aadsts_code() -> None:
+    """Report AADSTS50011 explicitly without echoing its query or using a public fallback."""
+
+    bridge = FakeBridge()
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, _csrf, _page = _page_session(port)
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request(
+            "GET",
+            f"{setup.CALLBACK_PATH}?error=invalid_request&error_description=AADSTS50011%3A+redirect+URI+must+be+registered&state=state-secret",
+            headers={"Host": f"localhost:{port}"},
+        )
+        response = connection.getresponse()
+        body = response.read().decode("utf-8")
+        assert response.status == HTTPStatus.SEE_OTHER
+        assert response.getheader("Location") == "/"
+        assert "AADSTS50011" not in body
+        assert "state-secret" not in body
+        assert not any(operation == "complete" for operation, _ in bridge.calls)
+
+        connection.request(
+            "GET",
+            "/api/status",
+            headers={"Host": f"localhost:{port}", "Cookie": cookie},
+        )
+        status = connection.getresponse()
+        data = json.loads(status.read().decode("utf-8"))
+        assert status.status == HTTPStatus.OK
+        assert data["message"] == "AADSTS50011"
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

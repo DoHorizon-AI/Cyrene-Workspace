@@ -43,8 +43,8 @@ MAX_CLI_OUTPUT_BYTES = 2_000_000
 MAX_PRIVATE_CONFIG_BYTES = 16_384
 CLI_TIMEOUT_SECONDS = 60
 OWNER_UID = 10001
-MAX_DISCOVERY_PAGES = 10
-MAX_DISCOVERY_ITEMS = 500
+MAX_DISCOVERY_PAGES = 20
+MAX_DISCOVERY_ITEMS = 1_000
 EXCHANGE_CLI = "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-exchange"
 INTEGRATION_DATABASE = "/data/integrations.sqlite3"
 PRIVATE_OPERATOR_CONFIG = "/run/config/office-operator.json"
@@ -75,6 +75,9 @@ _AUTHORIZATION_HOSTS = frozenset({"login.microsoftonline.com"})
 _EXCHANGE_PROVIDER_ID = "microsoft_graph"
 _MAX_OAUTH_STATE_BYTES = 512
 _MAX_OAUTH_CODE_BYTES = 8192
+_AADSTS_REDIRECT_URI_MISMATCH_RE = re.compile(
+    r"(?<![A-Z0-9])AADSTS50011(?![A-Z0-9])", re.IGNORECASE
+)
 
 
 class OfficeSetupError(ValueError):
@@ -526,7 +529,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
     identity_verified = (
         document["authStatus"] == "healthy"
         and document["accessMode"] == "actor_owned"
-        and external_subject == operator_context.external_subject
+        and isinstance(external_subject, str)
+        and external_subject.casefold() == operator_context.external_subject.casefold()
         and revision is not None
         and isinstance(target_scope, dict)
         and target_scope.get("workspaceId") == operator_context.workspace_id
@@ -838,7 +842,16 @@ class OfficeSetupService:
                 or any(ord(character) < 33 or ord(character) > 126 for character in state)
             ):
                 raise OfficeSetupError("office_callback_invalid")
-            self.callback_failed()
+            provider_error_fields = values.get("error", []) + values.get("error_description", [])
+            safe_failure = (
+                "AADSTS50011"
+                if any(
+                    _AADSTS_REDIRECT_URI_MISMATCH_RE.search(value)
+                    for value in provider_error_fields
+                )
+                else None
+            )
+            self.callback_failed(safe_failure)
             return
         if not isinstance(state, str) or not isinstance(code, str):
             raise OfficeSetupError("office_callback_invalid")
@@ -863,12 +876,16 @@ class OfficeSetupService:
         self._active_flow = None
         self._last_callback_message = "AUTHORIZATION_COMPLETE"
 
-    def callback_failed(self) -> None:
+    def callback_failed(self, safe_error_code: str | None = None) -> None:
         """Forget any pending UI flow after a provider error without retaining its query."""
 
         with self._lock:
             self._active_flow = None
-            self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+            self._last_callback_message = (
+                "AADSTS50011"
+                if safe_error_code == "AADSTS50011"
+                else "AUTHORIZATION_DID_NOT_COMPLETE"
+            )
 
     def status(self, session: SetupSession) -> dict[str, Any]:
         """Read Exchange's owner-bound profile state and expose only safe status fields."""
@@ -1209,7 +1226,9 @@ async function refresh(){
     revision=data.credentialRevision;
     statusNode.textContent=data.identityVerified
       ? `Microsoft account verified · ${data.authStatus} · credential revision ${revision}`
-      : data.message==='AUTHORIZATION_DID_NOT_COMPLETE'
+      : data.message==='AADSTS50011'
+        ? 'Microsoft rejected the registered loopback redirect (AADSTS50011). The localhost callback must match the tenant app registration.'
+        : data.message==='AUTHORIZATION_DID_NOT_COMPLETE'
         ? 'Microsoft sign-in did not complete. You can try again.'
         : `Microsoft connection status: ${data.authStatus}`;
     const ready=data.identityVerified&&!data.reauthRequired;
@@ -1254,6 +1273,10 @@ document.getElementById('save').addEventListener('click',async()=>{
       if(item.kind.toLowerCase()==='list') values.sharePointListIds.push(item.id);
       else values.sharePointDriveIds.push(item.id);
     }else if(byType[type]) values[byType[type]].push(checkbox.value);
+  }
+  if(Object.values(values).some(ids=>ids.length>100)){
+    document.getElementById('selection').textContent='Select no more than 100 targets in each category.';
+    return;
   }
   if((discovered.freebusy_subjects||[]).length&&!values.freebusySubjects.length){
     document.getElementById('selection').textContent='Keep at least one free/busy person selected for the configured calendar capability.';
