@@ -12,9 +12,12 @@ services:
       CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_ACCOUNT_CENTER_CONFIGURATION_GRAPH_JSON:?Graph OAuth host profile is required}
       CYRENE_SECRET_FILE_MAP: CYRENE_ACCOUNT_CENTER_ENCRYPTION_KEY=/run/secrets/account-center-encryption-key,CYRENE_ACCOUNT_CENTER_EXCHANGE_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_PROVIDER_HMAC_KEY=/run/secrets/account-center-github-provider-hmac-key,CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_APP_PRIVATE_KEY=/run/secrets/account-center-github-app-private-key,CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY=/run/secrets/account-center-graph-provider-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY=/run/secrets/account-center-microsoft-graph-callback-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET=/run/secrets/account-center-microsoft-graph-client-secret
     secrets:
-      - account-center-graph-provider-hmac-key
-      - account-center-microsoft-graph-callback-hmac-key
-      - account-center-microsoft-graph-client-secret
+      - source: account-center-graph-provider-hmac-key
+        target: account-center-graph-provider-hmac-key
+      - source: account-center-microsoft-graph-callback-hmac-key
+        target: account-center-microsoft-graph-callback-hmac-key
+      - source: account-center-microsoft-graph-client-secret
+        target: account-center-microsoft-graph-client-secret
     networks:
       - graph-account-center-private
 
@@ -22,8 +25,10 @@ services:
     environment:
       CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,EXCHANGE_CLOUD_AUTH_CONTEXT_HMAC_KEY=/run/secrets/cloud-management-exchange-hmac-key,EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-graph-auth-context-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY=/run/secrets/account-center-microsoft-graph-callback-hmac-key
     secrets:
-      - exchange-graph-auth-context-hmac-key
-      - account-center-microsoft-graph-callback-hmac-key
+      - source: exchange-graph-auth-context-hmac-key
+        target: exchange-graph-auth-context-hmac-key
+      - source: account-center-microsoft-graph-callback-hmac-key
+        target: account-center-microsoft-graph-callback-hmac-key
     networks:
       - graph-exchange-private
     depends_on:
@@ -44,17 +49,26 @@ services:
       CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_MICROSOFT_GRAPH_CONFIGURATION_JSON:?exact host profile is required}
       CYRENE_SECRET_FILE_MAP: EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-graph-auth-context-hmac-key,GRAPH_ACCOUNT_CENTER_PROVIDER_HMAC_KEY=/run/secrets/account-center-graph-provider-hmac-key,GRAPH_ACCOUNT_CENTER_ROOT_CERTIFICATE=/run/secrets/exchange-plugin-root-ca,GRAPH_ACCOUNT_CENTER_CLIENT_CERTIFICATE=/run/secrets/microsoft-graph-account-center-client-cert,GRAPH_ACCOUNT_CENTER_CLIENT_KEY=/run/secrets/microsoft-graph-account-center-client-key
     secrets:
-      - exchange-graph-auth-context-hmac-key
-      - account-center-graph-provider-hmac-key
-      - exchange-plugin-root-ca
+      - source: exchange-graph-auth-context-hmac-key
+        target: exchange-graph-auth-context-hmac-key
+      - source: account-center-graph-provider-hmac-key
+        target: account-center-graph-provider-hmac-key
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
       - source: exchange-plugin-client-ca
         target: microsoft-graph-client-ca
-      - microsoft-graph-server-cert
-      - microsoft-graph-server-key
-      - microsoft-graph-health-client-cert
-      - microsoft-graph-health-client-key
-      - microsoft-graph-account-center-client-cert
-      - microsoft-graph-account-center-client-key
+      - source: microsoft-graph-server-cert
+        target: microsoft-graph-server-cert
+      - source: microsoft-graph-server-key
+        target: microsoft-graph-server-key
+      - source: microsoft-graph-health-client-cert
+        target: microsoft-graph-health-client-cert
+      - source: microsoft-graph-health-client-key
+        target: microsoft-graph-health-client-key
+      - source: microsoft-graph-account-center-client-cert
+        target: microsoft-graph-account-center-client-cert
+      - source: microsoft-graph-account-center-client-key
+        target: microsoft-graph-account-center-client-key
     expose: ["7443"]
     networks:
       graph-exchange-private:

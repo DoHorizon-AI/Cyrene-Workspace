@@ -190,6 +190,146 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
         )
 
 
+def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path: Path) -> None:
+    """Render the shipped Graph overlay and verify host/provider secret joins and retention."""
+
+    docker = preflight.shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose config is required for Graph secret render validation")
+    safe_environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "DOCKER_CONFIG": str(tmp_path / "docker-config"),
+    }
+    Path(safe_environment["HOME"]).mkdir()
+    Path(safe_environment["DOCKER_CONFIG"]).mkdir()
+    version = subprocess.run(
+        [docker, "compose", "version"],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker Compose plugin is not installed")
+
+    base_template = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    graph_overlay = yaml.safe_load(
+        (DEPLOYMENT_ROOT / "compose.microsoft-graph.yaml").read_text(encoding="utf-8")
+    )
+    relevant_services = ("account-center", "exchange")
+
+    def secret_pairs(rows: list[Any]) -> list[tuple[str, str]]:
+        pairs: list[tuple[str, str]] = []
+        for row in rows:
+            if isinstance(row, str):
+                pairs.append((row, row))
+            else:
+                assert isinstance(row, dict)
+                source = row.get("source")
+                target = row.get("target", source)
+                assert isinstance(source, str) and isinstance(target, str)
+                pairs.append((source, target))
+        return pairs
+
+    old_pairs = {
+        service: secret_pairs(base_template["services"][service]["secrets"])
+        for service in relevant_services
+    }
+    overlay_pairs = {
+        service: secret_pairs(graph_overlay["services"][service]["secrets"])
+        for service in (*relevant_services, "microsoft-graph")
+    }
+    for service, pairs in overlay_pairs.items():
+        rows = graph_overlay["services"][service]["secrets"]
+        assert all(isinstance(row, dict) and set(row) == {"source", "target"} for row in rows)
+        for source, target in pairs:
+            assert target == (
+                "microsoft-graph-client-ca" if source == "exchange-plugin-client-ca" else source
+            )
+
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    all_sources = {
+        source
+        for pairs in (*old_pairs.values(), *overlay_pairs.values())
+        for source, _target in pairs
+    }
+    for name in all_sources:
+        (secrets_dir / name).write_text("render-only secret fixture\n", encoding="utf-8")
+
+    base_compose = {
+        "services": {
+            "account-center": {
+                "image": "example.invalid/account-center:test",
+                "secrets": base_template["services"]["account-center"]["secrets"],
+                "healthcheck": {"test": ["CMD", "true"]},
+            },
+            "exchange": {
+                "image": "example.invalid/exchange:test",
+                "secrets": base_template["services"]["exchange"]["secrets"],
+            },
+            "cloud-management-phase2": {
+                "image": "example.invalid/cloud-management:test",
+                "profiles": ["cloud-phase2"],
+            },
+        },
+        "secrets": {name: {"file": str(secrets_dir / name)} for name in sorted(all_sources)},
+    }
+    base_file = tmp_path / "base.yaml"
+    graph_file = DEPLOYMENT_ROOT / "compose.microsoft-graph.yaml"
+    base_file.write_text(yaml.safe_dump(base_compose), encoding="utf-8")
+    env_file = tmp_path / "graph-render.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                f"CYRENE_SECRETS_DIR={secrets_dir}",
+                "CYRENE_ACCOUNT_CENTER_CONFIGURATION_GRAPH_JSON={}",
+                "CYRENE_IMAGE_MICROSOFT_GRAPH=example.invalid/microsoft-graph:test",
+                "CYRENE_MICROSOFT_GRAPH_BINDING_ID=graph-render-test",
+                "CYRENE_MICROSOFT_GRAPH_CONFIGURATION_JSON={}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rendered = subprocess.run(
+        [
+            docker,
+            "compose",
+            "--env-file",
+            str(env_file),
+            "--file",
+            str(base_file),
+            "--file",
+            str(graph_file),
+            "--profile",
+            "cloud-phase2",
+            "config",
+            "--format",
+            "json",
+        ],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    rendered_compose = json.loads(rendered.stdout)
+
+    def rendered_pairs(service: str) -> list[tuple[str, str]]:
+        return secret_pairs(rendered_compose["services"][service]["secrets"])
+
+    for service in relevant_services:
+        actual = rendered_pairs(service)
+        expected = old_pairs[service] + overlay_pairs[service]
+        assert len(actual) == len(set(actual))
+        assert set(actual) == set(expected)
+    graph_actual = rendered_pairs("microsoft-graph")
+    assert len(graph_actual) == len(set(graph_actual))
+    assert set(graph_actual) == set(overlay_pairs["microsoft-graph"])
+
+
 @pytest.mark.parametrize("memory_mib", [3584, 3893])
 def test_nominal_four_gib_guest_reservations_do_not_block_host_recognition(
     monkeypatch: pytest.MonkeyPatch, memory_mib: int
