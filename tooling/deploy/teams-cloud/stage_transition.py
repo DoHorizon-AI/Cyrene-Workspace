@@ -8880,6 +8880,171 @@ def _validate_unissued_account_center_graph_contract(
         )
 
 
+def _account_center_expected_exchange_inventory(
+    *,
+    compose: dict[str, Any],
+    phase: str,
+    graph_unissued: bool,
+    bindings_document: dict[str, Any],
+    catalog_document: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive the AC readiness inventory from the exact rendered connector inputs."""
+
+    try:
+        candidate_provider_ids = preflight._expected_connector_providers(
+            compose, "connector-auth-readonly", phase
+        )
+        preflight._validate_connector_bindings_document(bindings_document, candidate_provider_ids)
+        preflight._validate_connector_tool_catalog_documents(
+            catalog_document,
+            bindings_document,
+            candidate_provider_ids,
+        )
+        if "computer" in candidate_provider_ids:
+            preflight._validate_computer_exchange_profile(compose)
+    except preflight.PreflightError as error:
+        raise StageTransitionError(
+            "Account Center Exchange inventory differs from its frozen provider contracts"
+        ) from error
+
+    candidate_bindings = bindings_document.get("bindings")
+    if not isinstance(candidate_bindings, list):
+        raise StageTransitionError("Account Center candidate bindings are malformed")
+    binding_counts = {
+        provider: sum(
+            isinstance(row, dict) and row.get("providerId") == provider
+            for row in candidate_bindings
+        )
+        for provider in candidate_provider_ids
+    }
+    expected_binding_counts = {
+        provider: 10 if provider == "github" else 1 for provider in candidate_provider_ids
+    }
+    if binding_counts != expected_binding_counts:
+        raise StageTransitionError(
+            "Account Center candidate binding counts differ from the frozen provider inventory"
+        )
+
+    active_provider_ids = set(candidate_provider_ids)
+    if graph_unissued:
+        active_provider_ids.discard("microsoft_graph")
+    expected_profile_counts = {provider: 1 for provider in active_provider_ids}
+    expected_connection_counts = {
+        provider: 10 if provider == "github" else 1 for provider in active_provider_ids
+    }
+    expected_binding_count = sum(binding_counts[provider] for provider in active_provider_ids)
+    return {
+        "candidateProviderIds": candidate_provider_ids,
+        "activeProviderIds": active_provider_ids,
+        "expectedProfileCounts": expected_profile_counts,
+        "expectedConnectionCounts": expected_connection_counts,
+        "expectedBindingCount": expected_binding_count,
+        "expectedProfileCount": len(expected_profile_counts),
+        "expectedConnectionCount": sum(expected_connection_counts.values()),
+    }
+
+
+def _verify_computer_exchange_readiness(
+    *,
+    compose: dict[str, Any],
+    profile: dict[str, Any],
+    connection: dict[str, Any],
+    binding: dict[str, Any],
+    catalog_item: dict[str, Any] | None,
+    include_live_catalog: bool,
+) -> None:
+    """Join Computer's live profile, connection and four canonical tools to the host config."""
+
+    try:
+        preflight._validate_computer_exchange_profile(compose)
+    except preflight.PreflightError as error:
+        raise StageTransitionError(
+            "candidate Computer host profile does not match its private mTLS workspace contract"
+        ) from error
+    exchange_service = compose.get("services", {}).get("exchange", {})
+    environment = (
+        exchange_service.get("environment", {}) if isinstance(exchange_service, dict) else {}
+    )
+    try:
+        integration = json.loads(
+            environment.get("CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON", ""),
+            object_pairs_hook=preflight._unique_json_object,
+        )
+    except (TypeError, json.JSONDecodeError, ValueError) as error:
+        raise StageTransitionError(
+            "candidate Computer host integration config is invalid"
+        ) from error
+    connector_host = integration.get("connectorHost") if isinstance(integration, dict) else None
+    runner = connector_host.get("computerRunner") if isinstance(connector_host, dict) else None
+    if not isinstance(runner, dict):
+        raise StageTransitionError("candidate Computer host profile is unavailable")
+
+    expected_scope = {
+        "maxCommandTimeoutMs": runner["maxCommandTimeoutMs"],
+        "maxDirectoryDepth": runner["maxDirectoryDepth"],
+        "maxFileBytes": runner["maxFileBytes"],
+        "maxReadBytes": runner["maxReadBytes"],
+    }
+    expected_operations = {
+        "computer.command.execute",
+        "computer.directory.list",
+        "computer.file.read",
+        "computer.file.write",
+    }
+    operation_ids = {
+        tool.get("operationId") for tool in binding.get("tools", []) if isinstance(tool, dict)
+    }
+    try:
+        preflight._validate_connector_bindings_document(
+            {"schemaVersion": 1, "bindings": [binding]}, {"computer"}
+        )
+        if include_live_catalog:
+            if not isinstance(catalog_item, dict):
+                raise StageTransitionError("live Computer tool catalog entry is missing")
+            preflight._validate_connector_tool_catalog_documents(
+                {"schemaVersion": 1, "items": [catalog_item]},
+                {"schemaVersion": 1, "bindings": [binding]},
+                {"computer"},
+            )
+    except preflight.PreflightError as error:
+        raise StageTransitionError(
+            "Computer binding or tool catalog differs from the canonical operation map"
+        ) from error
+
+    if (
+        operation_ids != expected_operations
+        or profile.get("profileRef") != runner.get("profileRef")
+        or profile.get("profileAlias") != runner.get("profileRef")
+        or profile.get("accessMode") != "workspace_operator"
+        or profile.get("targetScope") != expected_scope
+        or connection.get("connectionRef") != runner.get("connectionRef")
+        or connection.get("connectionRef") != binding.get("connectionRef")
+        or connection.get("profileRef") != runner.get("profileRef")
+        or connection.get("profileAlias") != runner.get("profileRef")
+        or connection.get("accessMode") != "workspace_operator"
+        or connection.get("readOnly") is not False
+        or binding.get("bindingId") != f"exchange-computer-{runner.get('connectionRef')}"
+        or binding.get("profileRef") != runner.get("profileRef")
+        or (
+            include_live_catalog
+            and (
+                catalog_item.get("bindingId") != binding.get("bindingId")
+                or catalog_item.get("connectionRef") != binding.get("connectionRef")
+                or catalog_item.get("profileRef") != binding.get("profileRef")
+                or {
+                    tool.get("id")
+                    for tool in catalog_item.get("tools", [])
+                    if isinstance(tool, dict)
+                }
+                != expected_operations
+            )
+        )
+    ):
+        raise StageTransitionError(
+            "live Computer identity, workspace scope, connection mode or catalog does not join to its host profile"
+        )
+
+
 def _verify_exchange_readiness_snapshot(
     *,
     snapshot: Any,
@@ -9047,10 +9212,21 @@ def _verify_exchange_readiness_snapshot(
             "candidate cloud providers require exact profile/identity refs and server-enforced read_only"
         )
 
-    expected_provider_ids = {"huggingface", *cloud_provider_ids}
     graph_service_configured = "microsoft-graph" in compose.get("services", {})
-    if graph_service_configured and not account_center_graph_unissued:
-        expected_provider_ids.add("microsoft_graph")
+    account_center_inventory: dict[str, Any] | None = None
+    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        account_center_inventory = _account_center_expected_exchange_inventory(
+            compose=compose,
+            phase=phase,
+            graph_unissued=account_center_graph_unissued,
+            bindings_document=bindings_document,
+            catalog_document=catalog_document,
+        )
+        expected_provider_ids = set(account_center_inventory["activeProviderIds"]) - {"github"}
+    else:
+        expected_provider_ids = {"huggingface", *cloud_provider_ids}
+        if graph_service_configured and not account_center_graph_unissued:
+            expected_provider_ids.add("microsoft_graph")
     bindings_by_provider: dict[str, dict[str, Any]] = {}
     provider_binding_rows = live_bindings if listener_repair else bindings_document["bindings"]
     for row in provider_binding_rows:
@@ -9072,6 +9248,23 @@ def _verify_exchange_readiness_snapshot(
     for row in snapshot["connections"]:
         if row.get("providerId") in expected_provider_ids:
             connections_by_provider.setdefault(row["providerId"], []).append(row)
+
+    if account_center_inventory is not None:
+        observed_profile_counts: dict[str, int] = {}
+        for row in snapshot["profiles"]:
+            provider = row["providerId"]
+            observed_profile_counts[provider] = observed_profile_counts.get(provider, 0) + 1
+        observed_connection_counts: dict[str, int] = {}
+        for row in snapshot["connections"]:
+            provider = row["providerId"]
+            observed_connection_counts[provider] = observed_connection_counts.get(provider, 0) + 1
+        if (
+            observed_profile_counts != account_center_inventory["expectedProfileCounts"]
+            or observed_connection_counts != account_center_inventory["expectedConnectionCounts"]
+        ):
+            raise StageTransitionError(
+                "live Account Center Exchange profiles/connections differ from the frozen provider inventory"
+            )
 
     catalog_by_binding = {row["bindingId"]: row for row in live_catalog["items"]}
     exchange_service = compose.get("services", {}).get("exchange", {})
@@ -9171,6 +9364,7 @@ def _verify_exchange_readiness_snapshot(
         profile = provider_profiles[0]
         connection = provider_connections[0]
         is_graph = provider_id == "microsoft_graph"
+        is_computer = provider_id == "computer"
         if (
             not isinstance(profile.get("profileAlias"), str)
             or (
@@ -9179,6 +9373,7 @@ def _verify_exchange_readiness_snapshot(
             )
             or (
                 not is_graph
+                and not is_computer
                 and (
                     not isinstance(connection.get("targetAlias"), str)
                     or not isinstance(connection.get("targetScope"), dict)
@@ -9246,6 +9441,16 @@ def _verify_exchange_readiness_snapshot(
                     raise StageTransitionError(
                         "live Graph catalog mutability differs from its issued operation map"
                     )
+        elif is_computer:
+            _verify_computer_exchange_readiness(
+                compose=compose,
+                profile=profile,
+                connection=connection,
+                binding=binding,
+                catalog_item=catalog_item,
+                include_live_catalog=include_live_catalog,
+            )
+        expected_connection_read_only = graph_read_only if is_graph else not is_computer
         if (
             (include_live_catalog and not isinstance(catalog_item, dict))
             or connection["connectionRef"] != binding["connectionRef"]
@@ -9254,12 +9459,12 @@ def _verify_exchange_readiness_snapshot(
             or connection["profileAlias"] != profile["profileAlias"]
             or connection["accessMode"] != profile["accessMode"]
             or (
-                include_live_catalog
-                and connection["readOnly"] is not (graph_read_only if is_graph else True)
+                include_live_catalog and connection["readOnly"] is not expected_connection_read_only
             )
             or (
                 include_live_catalog
                 and not is_graph
+                and not is_computer
                 and (
                     not catalog_item["tools"]
                     or any(tool.get("readOnly") is not True for tool in catalog_item["tools"])
@@ -9363,6 +9568,9 @@ def _verify_exchange_readiness_snapshot(
                 raise StageTransitionError(
                     "live Exchange Graph identity, credential health, or v2 target scope differs from the candidate"
                 )
+        elif provider_id == "computer":
+            # The fixed host-owned workspace profile was joined above; it is not a Cloud profile.
+            pass
         else:
             candidate_profiles = [
                 (alias, row)
@@ -9480,7 +9688,7 @@ def _verify_exchange_readiness_snapshot(
                     **{
                         provider: connection_ref
                         for provider, connection_ref in live_connection_refs.items()
-                        if provider != "microsoft_graph"
+                        if provider not in {"computer", "microsoft_graph"}
                     },
                 }
             }
@@ -9633,7 +9841,10 @@ def _record_exchange_readiness(
 
 
 def _image_update_exchange_readiness_checkpoint(
-    plan: dict[str, Any], journal: dict[str, Any]
+    plan: dict[str, Any],
+    journal: dict[str, Any],
+    *,
+    candidate_compose: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Require exact live Exchange bindings for image updates that depend on them."""
 
@@ -9645,6 +9856,10 @@ def _image_update_exchange_readiness_checkpoint(
     expected_scope_digests = plan.get("candidatePreflight", {}).get("expectedProviderScopeDigests")
     if not isinstance(expected_scope_digests, dict):
         raise StageTransitionError("candidate provider scope digests are malformed")
+    expected_verified_provider_ids = sorted(expected_scope_digests)
+    expected_binding_count = 14
+    expected_profile_count: int | None = None
+    expected_connection_count = 14
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
         connection_ref = (
             receipt.get("huggingfaceConnectionRef") if isinstance(receipt, dict) else None
@@ -9679,6 +9894,20 @@ def _image_update_exchange_readiness_checkpoint(
             raise StageTransitionError(
                 "Account Center monitor scopes must exclude the unissued Microsoft Graph profile"
             )
+        if not isinstance(candidate_compose, dict):
+            raise StageTransitionError(
+                "Account Center readiness checkpoint requires its frozen candidate Compose"
+            )
+        bindings_document = _candidate_config_json(candidate_compose, "connector-bindings")
+        catalog_document = _candidate_config_json(candidate_compose, "connector-tool-catalog")
+        graph_unissued = database_state["additionalMicrosoftProfileCount"] == 0
+        inventory = _account_center_expected_exchange_inventory(
+            compose=candidate_compose,
+            phase=plan["phase"],
+            graph_unissued=graph_unissued,
+            bindings_document=bindings_document,
+            catalog_document=catalog_document,
+        )
         expected_monitor_providers = sorted(
             (set(expected_scope_digests) & {"huggingface", "azure", "gcp", "runpod"}) | {"github"}
         )
@@ -9692,6 +9921,10 @@ def _image_update_exchange_readiness_checkpoint(
                 "Account Center readiness lacks the exact existing non-Graph connection map"
             )
         connection_refs = dict(refs)
+        expected_verified_provider_ids = sorted(inventory["activeProviderIds"])
+        expected_binding_count = inventory["expectedBindingCount"]
+        expected_profile_count = inventory["expectedProfileCount"]
+        expected_connection_count = inventory["expectedConnectionCount"]
     else:
         raise StageTransitionError(
             "Exchange readiness checkpoint is outside its closed image-update route"
@@ -9725,18 +9958,11 @@ def _image_update_exchange_readiness_checkpoint(
                 raise StageTransitionError(f"live {provider} connection reference is not canonical")
             canonical_provider_refs.append(canonical_connection_ref)
         canonical_refs[provider] = sorted(canonical_provider_refs)
-    expected_verified_provider_ids = sorted(expected_scope_digests)
     if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
         state = plan.get("accountCenterImageUpdateState")
         database_state = state.get("database") if isinstance(state, dict) else None
         _validate_account_center_database_state(database_state)
-        expected_verified = set(expected_scope_digests) | {"github"}
         graph_unissued = database_state["additionalMicrosoftProfileCount"] == 0
-        if graph_unissued:
-            expected_verified.discard("microsoft_graph")
-        else:
-            expected_verified.add("microsoft_graph")
-        expected_verified_provider_ids = sorted(expected_verified)
         if receipt.get("unverifiedProviderIds") != (
             ["microsoft_graph"] if graph_unissued else []
         ) or receipt.get("microsoftGraphStatus") != (
@@ -9752,14 +9978,18 @@ def _image_update_exchange_readiness_checkpoint(
         or receipt.get("catalogStatus") != "LIVE_VERIFIED"
         or receipt.get("exchangeContainerId") != exchange.get("containerId")
         or receipt.get("exchangeImageId") != exchange.get("imageId")
-        or receipt.get("bindingCount") != 14
-        or receipt.get("connectionCount") != 14
+        or receipt.get("bindingCount") != expected_binding_count
+        or receipt.get("connectionCount") != expected_connection_count
+        or (
+            expected_profile_count is not None
+            and receipt.get("profileCount") != expected_profile_count
+        )
         or receipt.get("verifiedProviderIds") != expected_verified_provider_ids
         or receipt.get("snapshotSha256") is None
         or SHA256_RE.fullmatch(str(receipt.get("snapshotSha256"))) is None
     ):
         raise StageTransitionError(
-            "connector image update requires live readiness for the exact 14 Exchange bindings"
+            "connector image update requires live readiness for the exact frozen Exchange inventory"
         )
     connection_ref_hashes = {
         provider: [_sha256_bytes(connection_ref.encode("utf-8")) for connection_ref in refs]
@@ -9771,6 +10001,7 @@ def _image_update_exchange_readiness_checkpoint(
         "verified": True,
         "snapshotSha256": receipt["snapshotSha256"],
         "bindingCount": receipt["bindingCount"],
+        **({"profileCount": receipt["profileCount"]} if expected_profile_count is not None else {}),
         "connectionCount": receipt["connectionCount"],
         "exchangeContainerId": receipt["exchangeContainerId"],
         "exchangeImageId": receipt["exchangeImageId"],
@@ -11927,7 +12158,7 @@ def apply_plan_file(
                     }[plan["imageUpdateTarget"]]
                     update_state = journal[update_key]
                     update_state["beforeReadiness"] = _image_update_exchange_readiness_checkpoint(
-                        plan, journal
+                        plan, journal, candidate_compose=candidate_compose
                     )
                     _write_journal(
                         journal_path,
@@ -12050,7 +12281,9 @@ def apply_plan_file(
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
                     }[plan["imageUpdateTarget"]]
                     journal[update_key]["afterReadiness"] = (
-                        _image_update_exchange_readiness_checkpoint(plan, journal)
+                        _image_update_exchange_readiness_checkpoint(
+                            plan, journal, candidate_compose=candidate_compose
+                        )
                     )
                     _write_journal(
                         journal_path,

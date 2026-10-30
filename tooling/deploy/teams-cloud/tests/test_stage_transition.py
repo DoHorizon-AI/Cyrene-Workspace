@@ -7329,21 +7329,157 @@ def _github_image_readiness_fixture(
     return snapshot, compose
 
 
+def _configure_computer_runner_readiness_fixture(
+    snapshot: dict[str, Any], compose: dict[str, Any]
+) -> None:
+    """Give the fixture the fixed host-owned Computer profile and canonical operation map."""
+
+    provider_profile = next(row for row in snapshot["profiles"] if row["providerId"] == "computer")
+    connection = next(row for row in snapshot["connections"] if row["providerId"] == "computer")
+    binding = next(row for row in snapshot["bindings"] if row["providerId"] == "computer")
+    catalog_item = next(
+        row for row in snapshot["catalog"]["items"] if row["providerId"] == "computer"
+    )
+    profile_ref = "computer-workspace-main"
+    connection_ref = connection["connectionRef"]
+    tenant_id = compose["services"]["navigator"]["environment"]["TEAMS_TENANT_ID"]
+    actor = snapshot["actor"]
+    runner = {
+        "profileRef": profile_ref,
+        "connectionRef": connection_ref,
+        "organizationId": actor["organizationId"],
+        "workspaceId": actor["workspaceId"],
+        "expectedIssuer": f"https://login.microsoftonline.com/{tenant_id}/v2.0",
+        "directPlugin": {
+            "bindingId": "computer-runtime",
+            "connectionRef": "grpcs://computer-runtime-proxy:7443",
+            "transport": "mtls",
+            "mtls": {
+                "rootCertificateRef": "tls/plugin-root",
+                "clientCertificateRef": "tls/exchange-plugin-client-cert",
+                "clientKeyRef": "tls/exchange-plugin-client-key",
+            },
+        },
+        "maxCommandTimeoutMs": 600000,
+        "maxFileBytes": 1048576,
+        "maxReadBytes": 65536,
+        "maxDirectoryDepth": 32,
+    }
+    integration = json.loads(
+        compose["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ]
+    )
+    integration["connectorHost"] = {"computerRunner": runner}
+    integration["hostSecretRefs"] = {
+        "tls/plugin-root": "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+        "tls/exchange-plugin-client-cert": "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+        "tls/exchange-plugin-client-key": "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+    }
+    exchange = compose["services"]["exchange"]
+    environment = exchange["environment"]
+    environment["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"] = json.dumps(integration)
+    secret_rows = []
+    for key, environment_name, path, secret_name in (
+        (
+            "tls/plugin-root",
+            "EXCHANGE_COMPUTER_PROXY_ROOT_CA_FILE",
+            "/run/secrets/exchange-plugin-root-ca",
+            "exchange-plugin-root-ca",
+        ),
+        (
+            "tls/exchange-plugin-client-cert",
+            "EXCHANGE_COMPUTER_PROXY_CLIENT_CERT_FILE",
+            "/run/secrets/exchange-plugin-client-cert",
+            "exchange-plugin-client-cert",
+        ),
+        (
+            "tls/exchange-plugin-client-key",
+            "EXCHANGE_COMPUTER_PROXY_CLIENT_KEY_FILE",
+            "/run/secrets/exchange-plugin-client-key",
+            "exchange-plugin-client-key",
+        ),
+    ):
+        environment[environment_name] = path
+        secret_rows.append({"source": secret_name, "target": secret_name})
+    exchange["secrets"] = secret_rows
+    exchange["networks"] = {"exchange-computer-private": {}}
+    compose["services"]["computer-runtime"] = {}
+
+    profile = {
+        "profileRef": profile_ref,
+        "profileAlias": profile_ref,
+        "providerId": "computer",
+        "accessMode": "workspace_operator",
+        "targetScope": {
+            "maxCommandTimeoutMs": runner["maxCommandTimeoutMs"],
+            "maxDirectoryDepth": runner["maxDirectoryDepth"],
+            "maxFileBytes": runner["maxFileBytes"],
+            "maxReadBytes": runner["maxReadBytes"],
+        },
+    }
+    provider_profile.clear()
+    provider_profile.update(profile)
+    connection.update(
+        {
+            "profileRef": profile_ref,
+            "profileAlias": profile_ref,
+            "accessMode": "workspace_operator",
+            "readOnly": False,
+        }
+    )
+    binding.update({"profileRef": profile_ref})
+    catalog_item.update(
+        {
+            "connectionRef": connection_ref,
+            "profileRef": profile_ref,
+        }
+    )
+    operations = (
+        "computer.command.execute",
+        "computer.directory.list",
+        "computer.file.read",
+        "computer.file.write",
+    )
+    binding["tools"] = []
+    catalog_item["tools"] = []
+    required_types = {"length": "integer", "overwrite": "boolean"}
+    for operation in operations:
+        tool_id, projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[operation]
+        arguments = preflight.CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS[operation]
+        schema = {
+            "type": "object",
+            "properties": {
+                argument: {"type": required_types.get(argument, "string")} for argument in arguments
+            },
+            "required": list(arguments),
+            "additionalProperties": False,
+        }
+        binding["tools"].append(
+            {
+                "toolId": tool_id,
+                "operationId": operation,
+                "resourceProjection": projection,
+                "mutating": mutating,
+            }
+        )
+        catalog_item["tools"].append(
+            {
+                "id": tool_id,
+                "name": f"Computer {operation.rsplit('.', 1)[-1]}",
+                "description": "Use the fixed workspace-scoped Computer profile.",
+                "readOnly": not mutating,
+                "inputSchema": schema,
+            }
+        )
+
+
 def _account_center_unissued_graph_readiness_fixture(
     tmp_path: Path, *, phase: str = "issued-connector-activation"
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, str]]:
-    """Build 14 existing non-Graph connections plus a configured but unissued Graph binding."""
+    """Build the actual 15-row non-Graph inventory plus an optional unissued Graph binding."""
 
     snapshot, compose = _github_image_readiness_fixture(tmp_path)
-    snapshot["profiles"] = [row for row in snapshot["profiles"] if row["providerId"] != "computer"]
-    snapshot["connections"] = [
-        row for row in snapshot["connections"] if row["providerId"] != "computer"
-    ]
-    snapshot["bindings"] = [row for row in snapshot["bindings"] if row["providerId"] != "computer"]
-    snapshot["catalog"]["items"] = [
-        row for row in snapshot["catalog"]["items"] if row["providerId"] != "computer"
-    ]
-    compose["services"].pop("computer-runtime", None)
 
     cloud_service = compose["services"]["cloud-management-phase2"]
     cloud_document = json.loads(
@@ -7464,6 +7600,18 @@ def _account_center_unissued_graph_readiness_fixture(
             )
         }
     }
+    compose.setdefault("secrets", {}).update(
+        {
+            secret_name: {"file": f"/fixture/{secret_name}"}
+            for secret_name in (
+                {
+                    "account-center-graph-provider-hmac-key",
+                    "exchange-graph-auth-context-hmac-key",
+                }
+                | preflight.MICROSOFT_GRAPH_OFFICE_SECRET_NAMES
+            )
+        }
+    )
     exchange_profiles["microsoft-graph.office-owner"] = {
         "provider": "microsoft_graph",
         "accessMode": "actor_owned",
@@ -7510,6 +7658,8 @@ def _account_center_unissued_graph_readiness_fixture(
                 ],
             }
         )
+
+    _configure_computer_runner_readiness_fixture(snapshot, compose)
 
     bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
     catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
@@ -8383,70 +8533,154 @@ def test_cloud_readiness_checkpoint_uses_exact_issued_provider_connections() -> 
     assert receipt["verified"] is True
 
 
-def test_account_center_image_update_readiness_pins_supported_provider_connections() -> None:
-    """Bind AC readiness to every existing non-Graph provider and mark Graph unverified."""
+def test_account_center_image_update_readiness_pins_supported_provider_connections(
+    tmp_path: Path,
+) -> None:
+    """Bind the checkpoint to the frozen 15-row inventory and exact 14 monitor refs."""
 
-    refs = {
-        "github": [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)],
-        "azure": "e5e1464b-00ec-4c85-9e71-1d52eab44a38",
-        "gcp": "8c473baa-3d22-4ab4-9d0e-f1086b54a400",
-        "huggingface": "d0b0b832-a81c-4c39-94c9-d92405f2e6c2",
-        "runpod": "f95d8e3c-8479-4b86-94ad-3aab76366d60",
-    }
-    database_state = {
-        "databasePathSha256": "1" * 64,
-        "schemaVersion": 9,
-        "schemaSha256": "2" * 64,
-        "foreignKeyViolationCount": 0,
-        "quickCheck": ["ok"],
-        "protectedProviderCount": 5,
-        "protectedProvidersSha256": "3" * 64,
-        "additionalMicrosoftProfileCount": 0,
-        "additionalMicrosoftProfileIdentitySha256": None,
-    }
+    snapshot, compose, database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(44)
     plan = {
         "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-        "phase": "issued-connector-activation",
-        "activeServices": {"exchange": {"containerId": "a" * 64, "imageId": _image_id(44)}},
-        "candidatePreflight": {
-            "expectedProviderScopeDigests": {
-                provider: f"{index:x}" * 64
-                for index, provider in enumerate(("huggingface", "azure", "gcp", "runpod"), start=1)
-            }
-        },
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
         "accountCenterImageUpdateState": {"database": database_state},
     }
-    journal = {
-        "exchangeReadiness": {
-            "receipt": {
-                "status": "LIVE_VERIFIED",
-                "catalogStatus": "LIVE_VERIFIED",
-                "exchangeContainerId": "a" * 64,
-                "exchangeImageId": _image_id(44),
-                "bindingCount": 14,
-                "connectionCount": 14,
-                "verifiedProviderIds": ["azure", "gcp", "github", "huggingface", "runpod"],
-                "unverifiedProviderIds": ["microsoft_graph"],
-                "microsoftGraphStatus": "NOT_CONNECTED_NOT_VERIFIED",
-                "snapshotSha256": "1" * 64,
-                "connectionRefByProvider": refs,
-            }
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase=plan["phase"],
+        image_update_target=plan["imageUpdateTarget"],
+        account_center_database_state=database_state,
+    )
+    receipt.update(
+        {
+            "exchangeContainerId": exchange_id,
+            "exchangeImageId": exchange_image_id,
+            "snapshotSha256": "1" * 64,
         }
-    }
+    )
+    journal = {"exchangeReadiness": {"receipt": receipt}}
 
-    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
     assert checkpoint["verified"] is True
-    assert checkpoint["bindingCount"] == 14
+    assert checkpoint["profileCount"] == 6
+    assert checkpoint["bindingCount"] == 15
+    assert checkpoint["connectionCount"] == 15
     assert checkpoint["connectionRefsSha256"] != "0" * 64
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "computer",
+        "gcp",
+        "github",
+        "huggingface",
+        "runpod",
+    ]
+    assert set(receipt["connectionRefByProvider"]) == {
+        "github",
+        "huggingface",
+        "azure",
+        "gcp",
+        "runpod",
+    }
 
     journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"]["azure"] = "invalid"
     with pytest.raises(stage_transition.StageTransitionError, match="exact selected azure"):
-        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+        stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, journal, candidate_compose=compose
+        )
 
-    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"] = dict(refs)
+    journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"] = dict(
+        receipt["connectionRefByProvider"]
+    )
     journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
     with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
-        stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+        stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, journal, candidate_compose=compose
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_profile",
+        "extra_profile",
+        "misjoined_connection",
+        "changed_scope",
+        "changed_operation",
+        "changed_catalog",
+        "changed_host_profile",
+        "computer_not_configured",
+    ],
+)
+def test_account_center_readiness_rejects_changed_computer_inventory(
+    mutation: str, tmp_path: Path
+) -> None:
+    """Reject any Computer DTO or frozen host-contract drift from the single approved row."""
+
+    snapshot, compose, database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    changed_snapshot = copy.deepcopy(snapshot)
+    changed_compose = copy.deepcopy(compose)
+    computer_profile = next(
+        row for row in changed_snapshot["profiles"] if row["providerId"] == "computer"
+    )
+    computer_connection = next(
+        row for row in changed_snapshot["connections"] if row["providerId"] == "computer"
+    )
+    computer_binding = next(
+        row for row in changed_snapshot["bindings"] if row["providerId"] == "computer"
+    )
+    computer_catalog = next(
+        row for row in changed_snapshot["catalog"]["items"] if row["providerId"] == "computer"
+    )
+
+    if mutation == "missing_profile":
+        changed_snapshot["profiles"].remove(computer_profile)
+    elif mutation == "extra_profile":
+        changed_snapshot["profiles"].append(
+            {**computer_profile, "profileRef": "computer-workspace-extra"}
+        )
+    elif mutation == "misjoined_connection":
+        computer_connection["connectionRef"] = "77777777-7777-4777-8777-777777777777"
+    elif mutation == "changed_scope":
+        computer_profile["targetScope"]["maxDirectoryDepth"] = 64
+    elif mutation == "changed_operation":
+        computer_binding["tools"].pop()
+    elif mutation == "changed_catalog":
+        computer_catalog["profileRef"] = "foreign-computer-profile"
+    elif mutation == "changed_host_profile":
+        integration = json.loads(
+            changed_compose["services"]["exchange"]["environment"][
+                "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+            ]
+        )
+        integration["connectorHost"]["computerRunner"]["maxReadBytes"] = 1048576
+        changed_compose["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ] = json.dumps(integration)
+    else:
+        changed_compose["services"].pop("computer-runtime")
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_snapshot,
+            compose=changed_compose,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+            account_center_database_state=database_state,
+        )
 
 
 def test_account_center_monitor_gate_checks_existing_non_graph_connections_readonly(
@@ -8559,7 +8793,7 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Project the native 14-connection snapshot into checkpoints and monitor gates."""
+    """Project the native 15-connection snapshot while monitoring only 14 connector refs."""
 
     snapshot, compose, database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
@@ -8625,10 +8859,12 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
         image_id=exchange_image_id,
         docker_prefix=["docker"],
     )
-    assert receipt["connectionCount"] == 14
-    assert receipt["bindingCount"] == 14
+    assert receipt["profileCount"] == 6
+    assert receipt["connectionCount"] == 15
+    assert receipt["bindingCount"] == 15
     assert receipt["verifiedProviderIds"] == [
         "azure",
+        "computer",
         "gcp",
         "github",
         "huggingface",
@@ -8644,14 +8880,19 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
         "runpod",
     }
     assert len(receipt["connectionRefByProvider"]["github"]) == 10
+    assert "computer" not in receipt["connectionRefByProvider"]
 
     journal = {
         "exchangeReadiness": {"receipt": receipt},
         "accountCenterImageUpdate": {"required": True, "monitorQuiescence": None},
     }
-    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(plan, journal)
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
     assert checkpoint["verified"] is True
-    assert checkpoint["bindingCount"] == 14
+    assert checkpoint["profileCount"] == 6
+    assert checkpoint["bindingCount"] == 15
+    assert checkpoint["connectionCount"] == 15
 
     monitor = stage_transition._verify_provider_monitor_quiescence(
         plan=plan,
@@ -8675,14 +8916,17 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
     invalid_map_journal = copy.deepcopy(journal)
     invalid_map_journal["exchangeReadiness"]["receipt"]["connectionRefByProvider"].pop("runpod")
     with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
-        stage_transition._image_update_exchange_readiness_checkpoint(plan, invalid_map_journal)
+        stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, invalid_map_journal, candidate_compose=compose
+        )
 
     current_snapshot = copy.deepcopy(snapshot)
     current_snapshot["connections"] = [
         row for row in current_snapshot["connections"] if row["providerId"] != "runpod"
     ]
     with pytest.raises(
-        stage_transition.StageTransitionError, match="exactly one profile and connection for runpod"
+        stage_transition.StageTransitionError,
+        match="profiles/connections differ from the frozen provider inventory",
     ):
         stage_transition._read_live_exchange_readiness(
             plan=plan,
@@ -8729,7 +8973,7 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
     )
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Graph bootstrap must not claim|appeared after the sealed empty Account Center baseline",
+        match="Graph bootstrap must not claim|appeared after the sealed empty Account Center baseline|profiles/connections differ from the frozen provider inventory",
     ):
         stage_transition._read_live_exchange_readiness(
             plan=plan,
