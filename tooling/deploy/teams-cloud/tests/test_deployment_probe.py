@@ -1055,7 +1055,7 @@ def test_notification_provenance_rebinds_current_workspace_source(
 def test_candidate_notification_provenance_preserves_route_and_adds_only_runpod(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Bind candidate provenance to the unchanged owner route and one issued RunPod binding."""
+    """Bind candidate provenance to the unchanged owner route and one RunPod binding reference."""
 
     active_dir = tmp_path / "active-config"
     candidate_dir = tmp_path / "candidate-config"

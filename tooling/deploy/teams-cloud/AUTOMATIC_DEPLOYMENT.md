@@ -132,16 +132,18 @@ is opt-in through `config/deployment-probe.runpod.template.json`; a real native
 RunPod probe is required before activation is accepted. `--candidate-config-dir`
 may generate notification provenance for a private candidate that preserves the
 active owner, workspace, Teams route, Exchange profile, existing bindings and
-accepted anchor, and adds exactly one Exchange-issued RunPod connection. That
-provenance is not a RunPod provider read or activation evidence.
+accepted anchor, and adds one RunPod connection reference. The formal
+stage-transition preflight verifies that reference against Exchange issuance.
+This provenance is not a RunPod provider read or activation evidence.
 
 该流程逐服务串行更新。后续目标失败时，前面已完成的目标保留；当前目标是否已回滚或需要恢复，
 以正式日志为准。配置、授权范围、工具目录契约或不兼容迁移变更须明确停下处理，不能混入普通
 镜像发布。默认策略仅包含 HF/Azure/GCP。RunPod 通过
 `config/deployment-probe.runpod.template.json` 显式启用；接受激活前必须完成真实原生 RunPod 探测。
 `--candidate-config-dir` 可为私有候选配置生成 notification provenance，但候选必须保留活动 owner、
-workspace、Teams route、Exchange profile、现有 binding 和已验 anchor，并且只能增加一个 Exchange
-签发的 RunPod connection。该 provenance 不代表已调用 RunPod provider，也不作为激活验收。
+workspace、Teams route、Exchange profile、现有 binding 和已验 anchor，并且只能增加一个 RunPod
+connection reference。正式 stage-transition preflight 会核验该引用确由 Exchange 签发。该 provenance
+不代表已调用 RunPod provider，也不作为激活验收。
 
 | State | Meaning / 含义 |
 | --- | --- |

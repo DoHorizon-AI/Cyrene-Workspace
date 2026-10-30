@@ -1687,7 +1687,7 @@ def _notification_lineage(
 def _candidate_runpod_notification_config(
     *, active: dict[str, Any], candidate_config_dir: Path
 ) -> tuple[Path, dict[str, Any]]:
-    """Accept a private notification candidate that adds only its issued RunPod binding."""
+    """Accept a private notification candidate that adds one RunPod connection reference."""
 
     candidate_dir = _validate_private_directory(
         candidate_config_dir, uid=RUNTIME_OWNER_UID, label="candidate notification config"
@@ -1789,7 +1789,7 @@ def _candidate_runpod_notification_config(
         or any(tool["mutating"] is not False for tool in candidate_runpod[0]["tools"])
     ):
         raise DeploymentProbeError(
-            "candidate bindings must preserve the active set and add its issued RunPod connection"
+            "candidate bindings must preserve the active set and match the candidate RunPod connection reference"
         )
     return candidate_path, candidate_notification
 
