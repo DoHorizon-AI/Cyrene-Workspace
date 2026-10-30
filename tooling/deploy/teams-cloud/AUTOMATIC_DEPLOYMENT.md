@@ -28,7 +28,7 @@ flowchart LR
 | `.github/workflows/teams-cloud-cd.yml`, `azure_cd.py` | Verify exact publisher attempt and immutable proof, then HMAC-forward the release / 核验精确发布尝试后签名转交 |
 | `ci/teams-cloud-cd.yml` | Azure WIF service connection and bounded VM RunCommand, followed by independent status read-back / 使用工作负载身份部署并独立回读 |
 | `release_deploy.py` | Serialize existing per-target stage-transition transactions; derive status from their journals and selector / 串行复用正式单目标事务 |
-| `deployment_probe.py` | Native, scoped, read-only acceptance through Navigator and Exchange / 通过原生链验证真实只读调用 |
+| `deployment_probe.py` | Native, scoped, read-only acceptance through Navigator and Exchange, including optional RunPod / 通过原生链验证只读调用，可选包含 RunPod |
 | `release_observation.py` | Preserve the old observation and establish a new version boundary / 保留原始观察并建立新版本边界 |
 | `cyrene-teams-release-reconcile.*` | Resume only provably safe pending work on the VM / 仅自动续做已证明安全的待完成步骤 |
 
@@ -107,19 +107,41 @@ repositories through the deployed GitHub connector. Results must match the
 requested repository identities. Acceptance receipts bind the exact selector and
 evidence byte hashes. A healthy process or exit code zero alone is insufficient.
 
+When RunPod is selected, the probe issues only `cloud.provider.health.read` and
+one `cloud.resources.list` call with the fixed `{"scope_ref":"pods"}` target and
+no cursor. The provider bounds that first page to 100 items; this confirms a
+first-page read and does not claim that the full account inventory was read.
+RunPod health must report both authentication and authorization as `VALID` for
+the configured host profile and identity. A successful transport carrying
+`INVALID`, `REAUTHORIZATION_REQUIRED`, `PERMISSION_DENIED`, `UNKNOWN`, a missing
+payload, or inconsistent structured/text projections fails acceptance.
+
 切换后回读实际镜像及健康状态，并再次调用 HF/Azure/GCP API；GitHub 则通过已部署连接器读取
-绑定仓库，逐项比对仓库身份。验收回执固定 selector 和证据文件摘要，不能仅凭进程健康或退出码。
+绑定仓库，逐项比对仓库身份。启用 RunPod 时，探针仅调用 `cloud.provider.health.read` 和一个
+固定 `{"scope_ref":"pods"}`、不带 cursor 的 `cloud.resources.list`。Provider 将第一页限制为最多
+100 项；这只证明第一页可读，不表示完整账户资源已读取。RunPod health 必须对配置的 host profile
+和 identity 同时报出 authentication 与 authorization 为 `VALID`。传输成功但 payload 为 `INVALID`、
+`REAUTHORIZATION_REQUIRED`、`PERMISSION_DENIED`、`UNKNOWN`、缺少 payload 或 structured/text 双投影不一致，均验收失败。验收回执固定 selector 和证据文件摘要，不能仅凭进程健康或退出码。
 
 This is a serial, per-service rollout. If a later target fails, earlier completed
 targets remain applied; the current target's canonical journal determines whether
 rollback completed or recovery is required. Configuration, credential scope,
 catalog-contract changes and noncompatible migrations are held rather than hidden
-inside a normal image rollout. The currently accepted HF/Azure/GCP topology is
-supported; enabling RunPod requires its own real read probe and acceptance extension.
+inside a normal image rollout. The default policy remains HF/Azure/GCP only. RunPod
+is opt-in through `config/deployment-probe.runpod.template.json`; a real native
+RunPod probe is required before activation is accepted. `--candidate-config-dir`
+may generate notification provenance for a private candidate that preserves the
+active owner, workspace, Teams route, Exchange profile, existing bindings and
+accepted anchor, and adds exactly one Exchange-issued RunPod connection. That
+provenance is not a RunPod provider read or activation evidence.
 
 该流程逐服务串行更新。后续目标失败时，前面已完成的目标保留；当前目标是否已回滚或需要恢复，
 以正式日志为准。配置、授权范围、工具目录契约或不兼容迁移变更须明确停下处理，不能混入普通
-镜像发布。当前支持已签发的 HF/Azure/GCP 拓扑；启用 RunPod 须先补齐对应真实探测验收。
+镜像发布。默认策略仅包含 HF/Azure/GCP。RunPod 通过
+`config/deployment-probe.runpod.template.json` 显式启用；接受激活前必须完成真实原生 RunPod 探测。
+`--candidate-config-dir` 可为私有候选配置生成 notification provenance，但候选必须保留活动 owner、
+workspace、Teams route、Exchange profile、现有 binding 和已验 anchor，并且只能增加一个 Exchange
+签发的 RunPod connection。该 provenance 不代表已调用 RunPod provider，也不作为激活验收。
 
 | State | Meaning / 含义 |
 | --- | --- |

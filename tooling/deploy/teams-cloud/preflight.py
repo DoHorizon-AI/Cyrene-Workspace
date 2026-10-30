@@ -94,6 +94,7 @@ CONNECTOR_AUTH_READONLY_OPERATIONS_BY_PATH = {
         "huggingface": {"huggingface.repo.get"},
         "azure": {"cloud.resources.list", "cloud.provider.health.read"},
         "gcp": {"cloud.resources.list", "cloud.provider.health.read"},
+        "runpod": {"cloud.resources.list", "cloud.provider.health.read"},
     },
 }
 CONNECTOR_AUTH_READONLY_AUTH_MODES = {

@@ -5358,6 +5358,7 @@ def test_connector_auth_readonly_evidence_is_fresh_closed_and_operation_allowlis
         "huggingface": ["huggingface.repo.get"],
         "azure": ["cloud.resources.list", "cloud.provider.health.read"],
         "gcp": ["cloud.resources.list", "cloud.provider.health.read"],
+        "runpod": ["cloud.resources.list", "cloud.provider.health.read"],
     }
     exchange_document["providers"] = [
         {
