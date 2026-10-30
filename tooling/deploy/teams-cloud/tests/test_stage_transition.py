@@ -14,6 +14,7 @@ import copy
 import hashlib
 import importlib
 import json
+import os
 import sqlite3
 import stat
 import subprocess
@@ -1824,6 +1825,346 @@ def test_memory_update_rejects_unbounded_inventory_and_non_target_selection(tmp_
             active_lock=lock,
             candidate_lock=lock,
         )
+
+
+def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Allow only the exact private Office bridge beside the existing unique ingress port."""
+
+    project = "cyrene-teams-cloud"
+    operator_dir = tmp_path / ".artifacts" / "private-office-config"
+    operator_dir.mkdir(parents=True)
+    operator_dir.chmod(0o700)
+    operator_file = operator_dir / "office-operator.json"
+    tenant = "11111111-1111-4111-8111-111111111111"
+    operator = "22222222-2222-4222-8222-222222222222"
+    organization = "33333333-3333-4333-8333-333333333333"
+    workspace = "44444444-4444-4444-8444-444444444444"
+    operator_file.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "actor": {
+                    "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+                    "subject": operator,
+                    "organizationId": organization,
+                    "workspaceId": workspace,
+                },
+                "bindingRef": "microsoft-graph.office-owner",
+                "profileIdempotencyKey": "teams-cloud-office-owner-graph",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    operator_file.chmod(0o600)
+
+    file_metadata = {
+        operator_dir: {"uid": 10001, "mode": stat.S_IFDIR | 0o700},
+        operator_file: {"uid": 10001, "mode": stat.S_IFREG | 0o600},
+    }
+    real_lstat = Path.lstat
+
+    def mocked_lstat(path: Path) -> Any:
+        observed = real_lstat(path)
+        expected = file_metadata.get(path)
+        if expected is None:
+            return observed
+        return SimpleNamespace(
+            st_uid=expected["uid"],
+            st_mode=expected["mode"],
+            st_nlink=1,
+            st_size=observed.st_size,
+        )
+
+    monkeypatch.setattr(Path, "lstat", mocked_lstat)
+
+    office_port = {
+        "host_ip": "127.0.0.1",
+        "published": "52191",
+        "target": 52191,
+        "protocol": "tcp",
+    }
+    ingress_port = {
+        "host_ip": "127.0.0.1",
+        "published": "18443",
+        "target": 443,
+        "protocol": "tcp",
+    }
+    compose = {
+        "name": project,
+        "services": {
+            "navigator": {
+                "image": "navigator:test",
+                "environment": {"TEAMS_TENANT_ID": tenant},
+            },
+            "navigator-persistence": {"image": "navigator-persistence:test"},
+            "workspace-authority": {
+                "image": "workspace-authority:test",
+                "environment": {
+                    "CYRENE_ORGANIZATION_ID": organization,
+                    "CYRENE_WORKSPACE_ID": workspace,
+                },
+            },
+            "directory-operator": {
+                "image": "directory-operator:test",
+                "environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": operator},
+            },
+            "teams-public-ingress": {
+                "image": "teams-public-ingress:test",
+                "ports": [ingress_port],
+            },
+            "exchange": {
+                "image": "exchange:test",
+                "ports": [office_port],
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str(operator_file),
+                        "target": "/run/config/office-operator.json",
+                        "read_only": True,
+                        "bind": {"create_host_path": False},
+                    }
+                ],
+            },
+        },
+    }
+
+    def run_inventory(
+        candidate: dict[str, Any],
+        *,
+        published_owner_overrides: dict[str, list[str]] | None = None,
+        port_bindings_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        services = candidate["services"]
+        container_ids = {name: f"{index:064x}" for index, name in enumerate(services, start=1)}
+        image_ids = {
+            service["image"]: _image_id(index)
+            for index, service in enumerate(services.values(), start=1)
+        }
+        rows = []
+        owner_ids_by_port: dict[str, list[str]] = {}
+        mount_identity: dict[str, list[dict[str, Any]]] = {}
+        for service_name, service in services.items():
+            port_rows = service.get("ports", [])
+            bindings = {
+                f"{port.get('target')}/{port.get('protocol', 'tcp')}": [
+                    {
+                        "HostIp": port.get("host_ip") or "0.0.0.0",
+                        "HostPort": str(port.get("published", "")),
+                    }
+                ]
+                for port in port_rows
+                if isinstance(port, dict)
+            }
+            if port_bindings_overrides and service_name in port_bindings_overrides:
+                bindings = port_bindings_overrides[service_name]
+            volumes = service.get("volumes", [])
+            mount_identity[service_name] = [
+                {
+                    "type": row["type"],
+                    "source": row["source"],
+                    "target": row["target"],
+                    "readOnly": row.get("read_only") is True,
+                }
+                for row in volumes
+                if isinstance(row, dict)
+            ]
+            rows.append(
+                {
+                    "Id": container_ids[service_name],
+                    "Image": image_ids[service["image"]],
+                    "Config": {
+                        "Image": service["image"],
+                        "Labels": {
+                            "com.docker.compose.project": project,
+                            "com.docker.compose.service": service_name,
+                        },
+                    },
+                    "State": {"Running": True},
+                    "NetworkSettings": {"Networks": {f"{project}_default": {}}},
+                    "Mounts": [
+                        {
+                            "Type": row["type"],
+                            "Source": row["source"],
+                            "Destination": row["target"],
+                            "RW": row.get("read_only") is not True,
+                        }
+                        for row in volumes
+                        if isinstance(row, dict)
+                    ],
+                    "HostConfig": {"PortBindings": bindings},
+                }
+            )
+            for port in port_rows:
+                if isinstance(port, dict):
+                    owner_ids_by_port.setdefault(str(port.get("published", "")), []).append(
+                        container_ids[service_name][:12]
+                    )
+
+        if published_owner_overrides:
+            owner_ids_by_port.update(published_owner_overrides)
+        monkeypatch.setattr(
+            stage_transition,
+            "_runtime_config_identity_for_compose",
+            lambda _compose: mount_identity,
+        )
+        monkeypatch.setattr(
+            stage_transition,
+            "_verify_runtime_config_identity_sources",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(stage_transition, "_lock_image_ids", lambda _lock: image_ids)
+
+        def checked_stdout(argv: list[str], *, label: str) -> str:
+            if argv[1] == "inspect":
+                return json.dumps(rows)
+            if argv[1] == "ps":
+                filters = [
+                    argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "--filter"
+                ]
+                publish_filter = next(
+                    (
+                        item.removeprefix("publish=")
+                        for item in filters
+                        if item.startswith("publish=")
+                    ),
+                    None,
+                )
+                if publish_filter is not None:
+                    return "\n".join(owner_ids_by_port.get(publish_filter, []))
+                return "\n".join(container_ids.values())
+            raise AssertionError(f"unexpected Docker command for {label}")
+
+        monkeypatch.setattr(runtime_update, "_checked_stdout", checked_stdout)
+        return stage_transition._live_service_inventory(
+            compose=candidate,
+            image_lock={},
+            docker_prefix=["docker"],
+        )
+
+    live = run_inventory(compose)
+    assert live["teams-public-ingress"]["containerId"] == f"{5:064x}"
+    assert live["exchange"]["containerId"] == f"{6:064x}"
+
+    ingress_mode = copy.deepcopy(compose)
+    ingress_mode["services"]["exchange"]["ports"][0]["mode"] = "ingress"
+    assert run_inventory(ingress_mode)["exchange"]["containerId"] == f"{6:064x}"
+
+    docker = preflight.shutil.which("docker")
+    if docker is not None:
+        docker_home = tmp_path / "docker-home"
+        docker_config = tmp_path / "docker-config"
+        docker_home.mkdir()
+        docker_config.mkdir()
+        safe_environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(docker_home),
+            "DOCKER_CONFIG": str(docker_config),
+        }
+        version = subprocess.run(
+            [docker, "compose", "version"],
+            capture_output=True,
+            check=False,
+            env=safe_environment,
+            text=True,
+        )
+        if version.returncode == 0:
+            render_file = tmp_path / "office-port-render.yaml"
+            render_file.write_text(
+                yaml.safe_dump(
+                    {
+                        "services": {
+                            "exchange": {
+                                "image": "example.invalid/exchange:test",
+                                "ports": [office_port],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rendered = subprocess.run(
+                [
+                    docker,
+                    "compose",
+                    "--file",
+                    str(render_file),
+                    "config",
+                    "--format",
+                    "json",
+                ],
+                capture_output=True,
+                check=False,
+                env=safe_environment,
+                text=True,
+            )
+            assert rendered.returncode == 0, rendered.stderr
+            rendered_ports = json.loads(rendered.stdout)["services"]["exchange"]["ports"]
+            assert rendered_ports in ([office_port], [{**office_port, "mode": "ingress"}])
+            compose_render = copy.deepcopy(compose)
+            compose_render["services"]["exchange"]["ports"] = rendered_ports
+            assert run_inventory(compose_render)["exchange"]["containerId"] == f"{6:064x}"
+
+    no_office_bridge = copy.deepcopy(compose)
+    no_office_bridge["services"]["exchange"]["volumes"] = []
+    no_office_bridge["services"]["exchange"]["ports"] = []
+    assert "exchange" in run_inventory(no_office_bridge)
+
+    for changed_ports in (
+        [{**office_port, "host_ip": "0.0.0.0"}],
+        [{**office_port, "published": "52192", "target": 52192}],
+        [office_port, {"host_ip": "127.0.0.1", "published": "52192", "target": 52192}],
+        [{**office_port, "mode": "host"}],
+        [{**office_port, "mode": "ingress", "publish_mode": "host"}],
+    ):
+        invalid = copy.deepcopy(compose)
+        invalid["services"]["exchange"]["ports"] = changed_ports
+        with pytest.raises(
+            stage_transition.StageTransitionError, match="Office OAuth published bridge"
+        ):
+            run_inventory(invalid)
+
+    missing_mount = copy.deepcopy(compose)
+    missing_mount["services"]["exchange"]["volumes"] = []
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="Office OAuth published bridge"
+    ):
+        run_inventory(missing_mount)
+
+    extra_publication = copy.deepcopy(compose)
+    extra_publication["services"]["unauthorized-publisher"] = {
+        "image": "unauthorized-publisher:test",
+        "ports": [
+            {
+                "host_ip": "127.0.0.1",
+                "published": "19999",
+                "target": 999,
+                "protocol": "tcp",
+            }
+        ],
+    }
+    with pytest.raises(stage_transition.StageTransitionError, match="one exact published TCP port"):
+        run_inventory(extra_publication)
+
+    with pytest.raises(stage_transition.StageTransitionError, match="not uniquely owned"):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": [f"{6:064x}"[:12], "aaaaaaaaaaaa"]},
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="published TCP 18443"):
+        run_inventory(
+            compose,
+            published_owner_overrides={"18443": [f"{5:064x}"[:12], "cccccccccccc"]},
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="non-Exchange owner"):
+        run_inventory(compose, published_owner_overrides={"52191": ["bbbbbbbbbbbb"]})
+
+    with pytest.raises(stage_transition.StageTransitionError, match="binding differs from Compose"):
+        run_inventory(compose, port_bindings_overrides={"exchange": {}})
 
 
 def test_memory_update_actual_capacity_checks_all_fourteen_live_containers(
