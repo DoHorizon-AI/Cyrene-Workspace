@@ -663,6 +663,43 @@ class AccountCenterCoreRecoveryTests(unittest.TestCase):
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt["state"], "RECOVERY_REQUIRED")
 
+    def test_inventory_ignores_mount_order_but_rejects_changed_bindings(self) -> None:
+        """Repeated Docker inspection may reorder mounts without changing the container."""
+
+        container = {
+            "Id": "a" * 64,
+            "Image": "sha256:" + "b" * 64,
+            "Config": {"Labels": {"com.docker.compose.service": "account-center"}},
+            "HostConfig": {"Memory": 96 * 1024 * 1024},
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": "/volumes/accounts",
+                    "Destination": "/data",
+                    "RW": True,
+                },
+                {
+                    "Type": "bind",
+                    "Source": "/private/key",
+                    "Destination": "/run/secrets/key",
+                    "RW": False,
+                },
+            ],
+        }
+        reordered = copy.deepcopy(container)
+        reordered["Mounts"].reverse()
+        changed = copy.deepcopy(reordered)
+        changed["Mounts"][1]["Source"] = "/volumes/another-account-store"
+        responses = []
+        for value in (container, reordered, changed):
+            responses.extend([container["Id"] + "\n", json.dumps([value])])
+        with mock.patch.object(recovery.subprocess, "check_output", side_effect=responses):
+            before = recovery._inventory("cyrene-teams-cloud", ["docker"])[0]
+            same = recovery._inventory("cyrene-teams-cloud", ["docker"])[0]
+            different = recovery._inventory("cyrene-teams-cloud", ["docker"])[0]
+        self.assertEqual(before, same)
+        self.assertNotEqual(before, different)
+
 
 if __name__ == "__main__":
     unittest.main()
