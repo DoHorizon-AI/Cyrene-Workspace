@@ -57,6 +57,296 @@ def _merge_compose_fixture(base: Any, override: Any) -> Any:
     return copy.deepcopy(override)
 
 
+def _render_full_graph_compose(
+    docker: str, tmp_path: Path, safe_environment: dict[str, str]
+) -> dict[str, Any]:
+    """Render the full Graph stack with the approved host memory override."""
+
+    relative_files = (
+        "compose.yaml",
+        "compose.computer-runtime.yaml",
+        "compose.codebuddy-acp.yaml",
+        "compose.huggingface.yaml",
+        "compose.cloud-phase2.yaml",
+        "compose.runpod.yaml",
+        "compose.credential-notifications.yaml",
+        "compose.automation-workflows.yaml",
+        "compose.microsoft-graph.yaml",
+        "compose.office-oauth-setup.yaml",
+    )
+    compose_files = [DEPLOYMENT_ROOT / filename for filename in relative_files]
+    override_file = tmp_path / "teams-ingress-memory256.override.yaml"
+    override_file.write_text(
+        yaml.safe_dump(
+            {"services": {"teams-ingress": {"mem_limit": "256m", "memswap_limit": "256m"}}}
+        ),
+        encoding="utf-8",
+    )
+    compose_files.append(override_file)
+
+    full_root = tmp_path / "full-graph-render"
+    secrets_dir = full_root / "secrets"
+    config_dir = full_root / "config"
+    codebuddy_home = secrets_dir / "codebuddy"
+    for directory in (secrets_dir, config_dir, codebuddy_home):
+        directory.mkdir(parents=True, exist_ok=True)
+    office_operator_file = config_dir / "office-operator.json"
+    tenant = "11111111-1111-4111-8111-111111111111"
+    organization = "22222222-2222-4222-8222-222222222222"
+    workspace = "33333333-3333-4333-8333-333333333333"
+    owner = "44444444-4444-4444-8444-444444444444"
+    bot_app_id = "55555555-5555-4555-8555-555555555555"
+    teams_connection = "66666666-6666-4666-8666-666666666666"
+    notification_profile = "teams-notifications-existing"
+    graph_scope = {
+        "schemaVersion": 2,
+        "tenantId": tenant,
+        "workspaceId": workspace,
+        "enabledFeatures": {
+            "plannerEnabled": False,
+            "todoEnabled": False,
+            "calendarEnabled": False,
+            "mailMetadataEnabled": False,
+            "mailDraftsEnabled": False,
+            "mailSendEnabled": False,
+            "sharePointDriveMetadataEnabled": False,
+        },
+        "targets": {
+            "plannerPlanIds": [],
+            "sharePointSiteIds": [],
+            "sharePointListIds": [],
+            "sharePointDriveIds": [],
+            "toDoTaskListIds": [],
+            "calendarIds": [],
+            "mailFolderIds": [],
+            "freebusySubjects": [],
+        },
+    }
+    teams_notification_destination = {
+        "tenantId": tenant,
+        "teamId": "team-probe",
+        "channelId": "19:teams-channel-existing",
+        "conversationId": "19:teams-conversation-existing",
+        "rootThreadId": "1712345678901",
+        "serviceUrl": "https://smba.trafficmanager.net/amer/",
+    }
+    cloud_profiles = {
+        "azure-primary": {
+            "provider": "azure",
+            "identityRef": "azure-test-identity",
+            "accessMode": "workspace_operator",
+            "targets": {"azure-read": {"targetRef": "subscription-test", "displayName": "Azure"}},
+        },
+        "gcp-primary": {
+            "provider": "gcp",
+            "identityRef": "gcp-test-identity",
+            "accessMode": "workspace_operator",
+            "targets": {"gcp-read": {"targetRef": "project-test", "displayName": "GCP"}},
+        },
+        "runpod-primary": {
+            "provider": "runpod",
+            "identityRef": "runpod-test-identity",
+            "accessMode": "workspace_operator",
+            "targets": {"runpod-read": {"targetRef": "workspace-test", "displayName": "RunPod"}},
+        },
+    }
+    exchange_integration = {
+        "authorizationCloud": {
+            "profiles": {
+                **cloud_profiles,
+                "microsoft-graph-office": {
+                    "provider": "microsoft_graph",
+                    "officeV2": graph_scope,
+                },
+            }
+        },
+        "connectorHost": {
+            "teamsMessages": {
+                "connectionRef": teams_connection,
+                "systemNotification": {
+                    "profileRef": notification_profile,
+                    "ownerSubject": owner,
+                    "fixedRoute": teams_notification_destination,
+                },
+            }
+        },
+    }
+    office_operator_file.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "actor": {
+                    "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+                    "subject": owner,
+                    "organizationId": organization,
+                    "workspaceId": workspace,
+                },
+                "bindingRef": "office-owner-binding",
+                "profileIdempotencyKey": "office-owner-profile",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    office_operator_file.chmod(0o600)
+    onboarding_dir = (
+        full_root
+        / "onboarding"
+        / "private"
+        / "provider-candidates"
+        / "0123456789abcdef0123456789abcdef"
+    )
+    onboarding_dir.mkdir(parents=True, mode=0o700)
+    hf_seed = onboarding_dir / "huggingface-oauth.json"
+    hf_seed.write_text("{}\n", encoding="utf-8")
+    hf_seed.chmod(0o400)
+    runpod_key = secrets_dir / "runpod-api-key"
+    runpod_key.write_bytes(b"synthetic-runpod-api-key")
+    runpod_key.chmod(0o400)
+
+    compose_text = "\n".join(path.read_text(encoding="utf-8") for path in compose_files)
+    variable_names = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_text))
+    fixed_values = {
+        "CYRENE_SECRETS_DIR": str(secrets_dir),
+        "CYRENE_CONFIG_DIR": str(config_dir),
+        "CYRENE_CODEBUDDY_HOME": str(codebuddy_home),
+        "CYRENE_OFFICE_OPERATOR_CONFIG_FILE": str(office_operator_file),
+        "CYRENE_RESPONSIBILITY_TARGETS_FILE": str(config_dir / "responsibility-targets.v1.json"),
+        "CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE": str(
+            config_dir / "responsibility-targets.v1.json"
+        ),
+        "CYRENE_CADDYFILE": str(DEPLOYMENT_ROOT / "Caddyfile.staging"),
+        "CYRENE_COMPUTER_CADDYFILE": str(DEPLOYMENT_ROOT / "Caddyfile.computer-runtime"),
+        "CYRENE_PUBLIC_BIND": "127.0.0.1",
+        "CYRENE_HTTPS_PORT": "18443",
+        "TEAMS_FQDN": "teams.example.invalid",
+        "TEAMS_ALLOWED_TEAM_IDS": "team-probe",
+        "CYRENE_ORGANIZATION_ID": organization,
+        "CYRENE_WORKSPACE_ID": workspace,
+        "CYRENE_AUTHORITY_AAD_TENANT_ID": tenant,
+        "CYRENE_DIRECTORY_OPERATOR_ACTOR_ID": owner,
+        "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND": "codebuddy",
+        "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL": "glm-5.3-flash",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED": "false",
+        "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP": "true",
+        "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL": "",
+        "CYRENE_HARNESS_MODEL": "",
+        "CYRENE_HARNESS_MODEL_SOURCE": "",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+        "CYRENE_WORKFLOWS_ENABLED": "false",
+        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "true",
+        "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": owner,
+        "TEAMS_BOT_APP_ID": bot_app_id,
+        "TEAMS_TENANT_ID": tenant,
+        "CYRENE_TEAMS_BOT_APP_ID": bot_app_id,
+        "CYRENE_TEAMS_EXCHANGE_CONNECTION_REF": teams_connection,
+        "CYRENE_TEAMS_EXCHANGE_PROFILE_REF": "teams-primary",
+        "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED": "true",
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_PHASE2_JSON": json.dumps(
+            exchange_integration, separators=(",", ":")
+        ),
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_PHASE3_JSON": json.dumps(
+            exchange_integration, separators=(",", ":")
+        ),
+        "CYRENE_CLOUD_MANAGEMENT_PHASE3_CONFIGURATION_JSON": json.dumps(
+            {
+                "profiles": [
+                    {
+                        "provider": "azure",
+                        "profile_ref": "azure-primary",
+                        "identity_ref": "azure-test-identity",
+                        "read_only": True,
+                        "scope": {"subscription_id": "subscription-test"},
+                        "auth": {
+                            "mode": "managed_identity",
+                            "client_id": "azure-test-identity",
+                        },
+                    },
+                    {
+                        "provider": "gcp",
+                        "profile_ref": "gcp-primary",
+                        "identity_ref": "gcp-test-identity",
+                        "read_only": True,
+                        "scope": {"project_id": "project-test"},
+                        "auth": {"mode": "workload_identity_federation"},
+                    },
+                    {
+                        "provider": "runpod",
+                        "profile_ref": "runpod-primary",
+                        "identity_ref": "runpod-test-identity",
+                        "read_only": True,
+                        "scope": {"workspace_id": "workspace-test"},
+                        "auth": {"mode": "api_key"},
+                    },
+                ]
+            },
+            separators=(",", ":"),
+        ),
+        "CYRENE_HUGGINGFACE_CONFIGURATION_JSON": '{"read_only":true}',
+        "CYRENE_MICROSOFT_GRAPH_CONFIGURATION_JSON": '{"officeV2":{}}',
+        "CYRENE_HF_ENABLED": "true",
+        "CYRENE_HF_OAUTH_BOOTSTRAP_FILE": str(hf_seed),
+        "CYRENE_RUNPOD_API_KEY_FILE": str(runpod_key),
+    }
+    values: dict[str, str] = {}
+    for name in variable_names:
+        if name in fixed_values:
+            values[name] = fixed_values[name]
+        elif name.endswith("_JSON"):
+            values[name] = "{}"
+        elif "IMAGE" in name:
+            values[name] = f"example.invalid/{name.lower()}:rendered-test"
+        elif name.endswith("_PORT"):
+            values[name] = "18443"
+        elif name.endswith("_ID"):
+            values[name] = "11111111-1111-4111-8111-111111111111"
+        elif name.endswith(("_DIR", "_FILE", "CADDYFILE")):
+            path = full_root / name.lower()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if name.endswith("_DIR"):
+                path.mkdir(exist_ok=True)
+            else:
+                path.touch(exist_ok=True)
+            values[name] = str(path)
+        else:
+            values[name] = "synthetic-value"
+
+    interpolation = re.compile(r"\$\{([A-Z][A-Z0-9_]*)(?::[^}]*)?\}")
+    for compose_file in compose_files:
+        document = yaml.safe_load(compose_file.read_text(encoding="utf-8"))
+        for section in ("secrets", "configs"):
+            for row in document.get(section, {}).values():
+                source = row.get("file") if isinstance(row, dict) else None
+                if not isinstance(source, str):
+                    continue
+                resolved = interpolation.sub(lambda match: values[match.group(1)], source)
+                path = Path(resolved)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
+
+    env_file = full_root / "compose.env"
+    env_file.write_text(
+        "".join(f"{name}={value}\n" for name, value in sorted(values.items())),
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    argv = [docker, "compose", "--env-file", str(env_file)]
+    for compose_file in compose_files:
+        argv.extend(["--file", str(compose_file)])
+    for profile in preflight.ACTIVE_COMPOSE_PROFILES:
+        argv.extend(["--profile", profile])
+    argv.extend(["config", "--format", "json"])
+    rendered = subprocess.run(
+        argv,
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    return json.loads(rendered.stdout)
+
+
 def test_private_bind_options_accept_only_closed_no_create_host_path_forms() -> None:
     mount = {"type": "bind", "read_only": True}
     assert preflight._private_bind_options_are_safe(mount)
@@ -191,6 +481,7 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
 
 
 def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopback(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Render shipped Graph and Office overlays and verify secrets plus the OAuth loopback."""
@@ -336,37 +627,14 @@ def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopba
         }
     ]
 
-    complete_graph_files = (
-        "compose.yaml",
-        "compose.computer-runtime.yaml",
-        "compose.codebuddy-acp.yaml",
-        "compose.huggingface.yaml",
-        "compose.cloud-phase2.yaml",
-        "compose.credential-notifications.yaml",
-        "compose.automation-workflows.yaml",
-        "compose.microsoft-graph.yaml",
-        "compose.office-oauth-setup.yaml",
-    )
-    complete_graph_config: dict[str, Any] = {
-        "services": {},
-        "configs": {},
-        "secrets": {},
-        "volumes": {},
-        "networks": {},
-    }
-    for filename in complete_graph_files:
-        overlay = yaml.safe_load((DEPLOYMENT_ROOT / filename).read_text(encoding="utf-8"))
-        complete_graph_config = _merge_compose_fixture(complete_graph_config, overlay)
-    active_profiles = set(preflight.ACTIVE_COMPOSE_PROFILES)
-    runtime_services = {
-        name
-        for name, service in complete_graph_config["services"].items()
-        if service.get("restart") != "no"
-        and (
-            not service.get("profiles") or active_profiles.intersection(service.get("profiles", []))
-        )
-    }
-    assert runtime_services == {
+    complete_graph_config = _render_full_graph_compose(docker, tmp_path, safe_environment)
+    assert complete_graph_config["services"]["exchange"]["ports"] == exchange_ports
+    runtime_services = preflight._active_compose_runtime_services(complete_graph_config)
+    assert len(complete_graph_config["services"]) == 16
+    assert "directory-operator" in complete_graph_config["services"]
+    assert complete_graph_config["services"]["directory-operator"]["restart"] == "no"
+    assert "directory-operator" not in runtime_services
+    assert set(runtime_services) == {
         "postgres",
         "workspace-authority",
         "account-center",
@@ -383,75 +651,341 @@ def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopba
         "cloud-management-phase2",
         "microsoft-graph",
     }
-    locked_images: set[str] = set()
-    for service_name, service in complete_graph_config["services"].items():
-        image = f"example.invalid/{service_name}:rendered-test"
-        service["image"] = image
-        locked_images.add(image)
-    complete_graph_config["services"]["exchange"]["ports"] = exchange_ports
-    caddy = complete_graph_config["services"]["teams-public-ingress"]
-    caddy["ports"] = [
-        {
-            "target": 443,
-            "published": "18443",
-            "host_ip": "127.0.0.1",
-            "protocol": "tcp",
-        }
-    ]
-    caddy["volumes"] = [
-        {
-            "type": "bind",
-            "source": str((DEPLOYMENT_ROOT / "Caddyfile.staging").resolve()),
-            "target": "/etc/caddy/Caddyfile",
-        }
-    ]
-    memory_mib, cpus = preflight._validate_compose(
-        complete_graph_config,
-        "connector-auth-readonly",
-        3584,
-        2.0,
-        locked_images,
-        ingress_exposure="host-fronted-staging",
-        connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    joined_cloud_profiles = preflight._connector_bootstrap_cloud_profiles(
+        complete_graph_config, "connector-auth-readonly"
     )
-    assert memory_mib <= 3584
-    assert cpus <= 2.0
+    assert set(joined_cloud_profiles) == {"azure", "gcp", "runpod"}
+    for missing_provider in ("azure", "gcp", "runpod"):
+        missing_cloud_provider = copy.deepcopy(complete_graph_config)
+        cloud_environment = missing_cloud_provider["services"]["cloud-management-phase2"][
+            "environment"
+        ]
+        cloud_document = json.loads(cloud_environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"])
+        cloud_document["profiles"] = [
+            row for row in cloud_document["profiles"] if row["provider"] != missing_provider
+        ]
+        cloud_environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(cloud_document)
+        with pytest.raises(
+            preflight.PreflightError,
+            match="connector bootstrap cloud providers must match the candidate phase",
+        ):
+            preflight._connector_bootstrap_cloud_profiles(
+                missing_cloud_provider, "connector-auth-readonly"
+            )
+    locked_images = {service["image"] for service in complete_graph_config["services"].values()}
+
+    def validate_graph_compose(config: dict[str, Any]) -> tuple[float, float]:
+        return preflight._validate_compose(
+            config,
+            "connector-auth-readonly",
+            3584,
+            1.95,
+            locked_images,
+            ingress_exposure="host-fronted-staging",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        )
+
+    memory_mib, cpus = validate_graph_compose(complete_graph_config)
+    assert memory_mib == 3584
+    assert cpus == 1.95
+    preflight._validate_graph_provider_bootstrap_budget(complete_graph_config, memory_mib, cpus)
+
+    extra_runtime_service = copy.deepcopy(complete_graph_config)
+    extra_runtime_service["services"]["unexpected-active-service"] = {
+        "image": "example.invalid/unexpected-active-service:rendered-test",
+        "restart": "unless-stopped",
+        "mem_limit": "64m",
+        "memswap_limit": "64m",
+        "cpus": "0.05",
+    }
+    with pytest.raises(preflight.PreflightError, match="exact 15-service"):
+        preflight._validate_graph_provider_bootstrap_budget(extra_runtime_service, memory_mib, cpus)
+
+    over_budget_memory = copy.deepcopy(complete_graph_config)
+    over_budget_memory["services"]["teams-ingress"].update(
+        {"mem_limit": "257m", "memswap_limit": "257m"}
+    )
+    with pytest.raises(preflight.PreflightError, match="memory limits total 3585 MiB"):
+        validate_graph_compose(over_budget_memory)
+
+    over_budget_cpu = copy.deepcopy(complete_graph_config)
+    over_budget_cpu["services"]["teams-ingress"]["cpus"] = "0.06"
+    with pytest.raises(preflight.PreflightError, match="CPU limits total 1.96"):
+        validate_graph_compose(over_budget_cpu)
 
     wildcard_graph_config = copy.deepcopy(complete_graph_config)
     wildcard_graph_config["services"]["exchange"]["ports"][0]["host_ip"] = "0.0.0.0"
     with pytest.raises(preflight.PreflightError, match="Graph bootstrap requires its one"):
-        preflight._validate_compose(
-            wildcard_graph_config,
-            "connector-auth-readonly",
-            3584,
-            2.0,
-            locked_images,
-            ingress_exposure="host-fronted-staging",
-            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        )
+        validate_graph_compose(wildcard_graph_config)
 
     extra_publisher_config = copy.deepcopy(complete_graph_config)
     extra_publisher_config["services"]["teams-provider"]["ports"] = exchange_ports
     with pytest.raises(preflight.PreflightError, match="only Teams ingress or the fixed"):
-        preflight._validate_compose(
-            extra_publisher_config,
-            "connector-auth-readonly",
-            3584,
-            2.0,
-            locked_images,
-            ingress_exposure="host-fronted-staging",
-            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        )
+        validate_graph_compose(extra_publisher_config)
 
     with pytest.raises(preflight.PreflightError, match="absent outside Graph provider bootstrap"):
         preflight._validate_compose(
             complete_graph_config,
             "connector-auth-readonly",
             3584,
-            2.0,
+            1.95,
             locked_images,
             ingress_exposure="host-fronted-staging",
             connector_auth_phase="issued-connector-activation",
+        )
+
+    config_dir = Path(complete_graph_config["configs"]["connector-bindings"]["file"]).parent
+    secrets_dir = Path(complete_graph_config["secrets"]["runpod-api-key"]["file"]).parent
+    notification_file = Path(
+        complete_graph_config["configs"]["teams-credential-notifications"]["file"]
+    )
+    bindings_file = Path(complete_graph_config["configs"]["connector-bindings"]["file"])
+    owner = complete_graph_config["services"]["directory-operator"]["environment"][
+        "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID"
+    ]
+    organization = complete_graph_config["services"]["workspace-authority"]["environment"][
+        "CYRENE_ORGANIZATION_ID"
+    ]
+    workspace = complete_graph_config["services"]["workspace-authority"]["environment"][
+        "CYRENE_WORKSPACE_ID"
+    ]
+    navigator_environment = complete_graph_config["services"]["navigator"]["environment"]
+    tenant = navigator_environment["TEAMS_TENANT_ID"]
+    connection_refs = {
+        "github": "10000000-0000-4000-8000-000000000001",
+        "huggingface": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "azure": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "gcp": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "runpod": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "computer": "20000000-0000-4000-8000-000000000002",
+    }
+    profiles = {
+        "github": "github-primary",
+        "huggingface": "hf-primary",
+        "azure": "azure-primary",
+        "gcp": "gcp-primary",
+        "runpod": "runpod-primary",
+        "computer": "computer-workspace-main",
+    }
+    operations = {
+        "github": "github.repository.list",
+        "huggingface": "huggingface.models.list",
+        "azure": "cloud.resources.list",
+        "gcp": "cloud.resources.list",
+        "runpod": "cloud.resources.list",
+        "computer": "computer.directory.list",
+    }
+
+    def write_json(path: Path, document: Any, mode: int = 0o600) -> None:
+        if path.exists():
+            path.chmod(0o600)
+        path.write_text(
+            json.dumps(document, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        path.chmod(mode)
+
+    binding_rows = []
+    for provider, operation in operations.items():
+        tool_id, projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[operation]
+        connection_ref = connection_refs[provider]
+        binding_rows.append(
+            {
+                "bindingId": f"exchange-{provider}-{connection_ref}",
+                "connectionRef": connection_ref,
+                "providerId": provider,
+                "profileRef": profiles[provider],
+                "tools": [
+                    {
+                        "toolId": tool_id,
+                        "operationId": operation,
+                        "resourceProjection": projection,
+                        "mutating": mutating,
+                    }
+                ],
+            }
+        )
+    bindings_document = {"schemaVersion": 1, "bindings": binding_rows}
+    write_json(bindings_file, bindings_document, 0o400)
+    exchange_document = json.loads(
+        complete_graph_config["services"]["exchange"]["environment"][
+            "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+        ]
+    )
+    destination = exchange_document["connectorHost"]["teamsMessages"]["systemNotification"][
+        "fixedRoute"
+    ]
+    notification_document = {
+        "schemaVersion": 1,
+        "organizationId": organization,
+        "workspaceId": workspace,
+        "owner": {
+            "actorAadObjectId": owner,
+            "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+            "subject": owner,
+            "tenantId": tenant,
+        },
+        "connections": [
+            {"connectionId": connection_refs[provider], "provider": short_name}
+            for provider, short_name in {
+                "huggingface": "hf",
+                "azure": "azure",
+                "gcp": "gcp",
+                "runpod": "runpod",
+            }.items()
+        ],
+        "destination": destination,
+        "exchange": {"profileRef": "teams-notifications-existing"},
+        "pollIntervalMs": 900_000,
+    }
+    write_json(notification_file, notification_document)
+
+    # Exercise the real private-config dispatch after the full shipped Compose render.
+    real_stat = Path.stat
+    real_lstat = Path.lstat
+    onboarding = secrets_dir.parent / "onboarding"
+    private = onboarding / "private"
+    candidates = private / "provider-candidates"
+    candidate = candidates / "0123456789abcdef0123456789abcdef"
+    private_directories = {
+        secrets_dir,
+        config_dir,
+        onboarding,
+        private,
+        candidates,
+        candidate,
+    }
+    runpod_key = Path(complete_graph_config["secrets"]["runpod-api-key"]["file"])
+
+    def private_metadata(path: Path, metadata: Any) -> Any:
+        if path in private_directories:
+            return SimpleNamespace(st_uid=10001, st_mode=stat.S_IFDIR | 0o700)
+        if path == notification_file:
+            return SimpleNamespace(
+                st_uid=10001,
+                st_mode=stat.S_IFREG | 0o600,
+                st_size=metadata.st_size,
+                st_nlink=1,
+            )
+        if path == runpod_key:
+            return SimpleNamespace(
+                st_uid=10001,
+                st_mode=stat.S_IFREG | 0o400,
+                st_size=metadata.st_size,
+                st_nlink=1,
+            )
+        return metadata
+
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *, follow_symlinks=True: private_metadata(
+            path, real_stat(path, follow_symlinks=follow_symlinks)
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda path: private_metadata(path, real_lstat(path)),
+    )
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    monkeypatch.setattr(preflight, "_secret_file", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_validate_runtime_config_file", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_validate_huggingface_oauth_source", lambda *_args: None)
+    for helper in (
+        "_validate_directory_database_urls",
+        "_validate_internal_service_certificates",
+        "_validate_microsoft_graph_certificates",
+        "_validate_computer_proxy_certificate",
+        "_validate_exchange_authority_identity",
+        "_validate_keyring",
+        "_validate_connector_tool_catalog",
+        "_validate_principal_configuration",
+        "_validate_responsibility_targets",
+        "_validate_connector_bootstrap_config",
+        "_validate_actor_projection",
+        "_validate_account_center_config",
+        "_validate_cloud_acceptance_mount",
+        "_validate_teams_connector_config",
+    ):
+        monkeypatch.setattr(preflight, helper, lambda *_args, **_kwargs: None)
+
+    assert preflight._expected_connector_providers(
+        complete_graph_config,
+        "connector-auth-readonly",
+        preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    ) == {"github", "huggingface", "azure", "gcp", "runpod", "computer"}
+    preflight._validate_secrets_and_configs(
+        complete_graph_config,
+        secrets_dir,
+        config_dir,
+        "connector-auth-readonly",
+        connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        candidate_runpod_key_file=runpod_key,
+    )
+    preflight._validate_codebuddy_acp_mount_boundary(
+        complete_graph_config,
+        complete_graph_config["services"]["navigator"],
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+        connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    )
+
+    invalid_notification = dict(notification_document)
+    invalid_notification["connections"] = [
+        *notification_document["connections"],
+        {
+            "connectionId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "provider": "microsoft_graph",
+        },
+    ]
+    write_json(notification_file, invalid_notification)
+    with pytest.raises(
+        preflight.PreflightError,
+        match="must pin exactly the configured issued provider connections",
+    ):
+        preflight._validate_secrets_and_configs(
+            complete_graph_config,
+            secrets_dir,
+            config_dir,
+            "connector-auth-readonly",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            candidate_runpod_key_file=runpod_key,
+        )
+    write_json(notification_file, notification_document)
+
+    graph_operation = "microsoft_graph.todo.lists.list"
+    tool_id, projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[graph_operation]
+    graph_ref = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    graph_binding = {
+        "bindingId": f"exchange-microsoft_graph-{graph_ref}",
+        "connectionRef": graph_ref,
+        "providerId": "microsoft_graph",
+        "profileRef": "office-owner-profile",
+        "tools": [
+            {
+                "toolId": tool_id,
+                "operationId": graph_operation,
+                "resourceProjection": projection,
+                "mutating": mutating,
+            }
+        ],
+    }
+    write_json(
+        bindings_file,
+        {"schemaVersion": 1, "bindings": [*binding_rows, graph_binding]},
+        0o400,
+    )
+    with pytest.raises(
+        preflight.PreflightError, match="connector binding providers must be exactly"
+    ):
+        preflight._validate_secrets_and_configs(
+            complete_graph_config,
+            secrets_dir,
+            config_dir,
+            "connector-auth-readonly",
+            connector_auth_phase=preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            candidate_runpod_key_file=runpod_key,
         )
 
     def rendered_pairs(service: str) -> list[tuple[str, str]]:
