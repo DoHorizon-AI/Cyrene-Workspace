@@ -552,9 +552,11 @@ def _implementation_preflight(
     """Run the canonical credential-read-only preflight against the fixed candidate."""
 
     runtime_services = st._runtime_service_inventory(candidate_compose)
+    declared_services = candidate_compose.get("services")
     _require(
         set(runtime_services) == set(st.OFFICE_GRAPH_RUNTIME_SERVICE_SET)
-        and len(runtime_services) == MAX_RUNTIME_SERVICES,
+        and len(runtime_services) == MAX_RUNTIME_SERVICES
+        and isinstance(declared_services, dict),
         "candidate does not render the exact 15-service Graph bootstrap topology",
     )
     _require_no_gpu(candidate_compose)
@@ -601,7 +603,7 @@ def _implementation_preflight(
         and result.get("credentialReadOnlyRuntimeReady") is True
         and result.get("fullCloudWriteDeploymentReady") is False
         and result.get("lifecycleAcceptance") == "NOT_RUN"
-        and result.get("serviceCount") == MAX_RUNTIME_SERVICES
+        and result.get("serviceCount") == len(declared_services)
         and result.get("composeCgroupMemoryLimitMiB") == MAX_MEMORY_MIB
         and result.get("composeCgroupCpuLimit") == MAX_CPUS,
         "fresh read-only preflight did not prove the fixed 15-service resource budget",
@@ -641,6 +643,8 @@ def _preflight_projection(
     return {
         "mode": result["mode"],
         "phase": result["connectorAuthPhase"],
+        "declaredComposeServiceCount": result["serviceCount"],
+        "runtimeServiceCount": len(source["runtimeConfigIdentity"]["candidate"]),
         "ingressExposure": planned_inputs["ingressExposure"],
         "hostCaddyBinary": planned_inputs["hostCaddyBinary"],
         "opensslBinary": planned_inputs["opensslBinary"],
