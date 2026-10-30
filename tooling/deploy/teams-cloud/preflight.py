@@ -5555,23 +5555,10 @@ def _validate_compose(
                 f"Compose service {name} does not use an image from the exact ARM64 lock"
             )
         ports = service.get("ports") or []
-        if ports and name != public_name:
-            expected_office_setup_port = [
-                {
-                    "host_ip": "127.0.0.1",
-                    "published": str(OFFICE_OAUTH_SETUP_PORT),
-                    "target": OFFICE_OAUTH_SETUP_PORT,
-                    "protocol": "tcp",
-                }
-            ]
-            if not (
-                name == "exchange"
-                and connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-                and ports == expected_office_setup_port
-            ):
-                raise PreflightError(
-                    f"only Teams ingress or the fixed temporary OAuth loopback may publish ports ({name})"
-                )
+        if ports and name not in {public_name, "exchange"}:
+            raise PreflightError(
+                f"only Teams ingress or the fixed temporary OAuth loopback may publish ports ({name})"
+            )
         if name == public_name:
             targets = {
                 int(row.get("target", 0)): (str(row.get("published", "")), row.get("host_ip"))
