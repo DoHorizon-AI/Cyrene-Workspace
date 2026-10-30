@@ -376,6 +376,7 @@ def test_graph_bootstrap_requires_owner_only_personal_chat_without_enabling_work
 ) -> None:
     config, config_dir, secrets_dir, documents = _fixtures(tmp_path)
     health_dir = Path(config["services"]["navigator"]["volumes"][0]["source"])
+    documents["automation-source-bindings.json"] = {"schemaVersion": 1, "targets": []}
     _patch_private_document_loader(monkeypatch, documents)
     _patch_health_directory_stat(monkeypatch, health_dir)
     bot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -420,6 +421,27 @@ def test_graph_bootstrap_requires_owner_only_personal_chat_without_enabling_work
         secrets_dir=secrets_dir,
         require_personal_delivery=True,
     )
+
+    documents["teams-actor-subjects.json"]["subjects"] = ACTORS[:-1]
+    with pytest.raises(preflight.PreflightError, match="exactly match"):
+        preflight._validate_automation_workflow_configuration(
+            config,
+            config_dir=config_dir,
+            secrets_dir=secrets_dir,
+            require_personal_delivery=True,
+        )
+    documents["teams-actor-subjects.json"]["subjects"] = ACTORS.copy()
+    documents["automation-source-bindings.json"]["targets"] = [
+        {"actorId": OWNER, "targetId": "unexpected"}
+    ]
+    with pytest.raises(preflight.PreflightError, match="source bindings empty"):
+        preflight._validate_automation_workflow_configuration(
+            config,
+            config_dir=config_dir,
+            secrets_dir=secrets_dir,
+            require_personal_delivery=True,
+        )
+    documents["automation-source-bindings.json"] = {"schemaVersion": 1, "targets": []}
 
     navigator["CYRENE_WORKFLOWS_ENABLED"] = "true"
     with pytest.raises(preflight.PreflightError, match="keep Workflows off"):

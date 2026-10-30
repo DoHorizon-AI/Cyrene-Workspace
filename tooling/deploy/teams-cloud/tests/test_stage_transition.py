@@ -921,20 +921,117 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
     candidate_dir = tmp_path / "candidate-config"
     active_dir.mkdir()
     candidate_dir.mkdir()
+    owner = "11111111-1111-4111-8111-111111111111"
+    actors = [
+        owner,
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "55555555-5555-4555-8555-555555555555",
+    ]
+    workspace = "77777777-7777-4777-8777-777777777777"
+    organization = "66666666-6666-4666-8666-666666666666"
+    tenant = "88888888-8888-4888-8888-888888888888"
+    bot = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     active_file = active_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
     candidate_file = candidate_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
-    active_file.write_text(json.dumps({"principals": [{"actor_id": "owner"}]}), encoding="utf-8")
+    session = {
+        "token_env": "NAVIGATOR_SESSION_TOKEN",
+        "actor_id": owner,
+        "workspace_ids": [workspace],
+        "organization_id": organization,
+        "can_takeover": True,
+        "can_write_harness": False,
+        "can_publish_credential_health": False,
+        "can_bind_teams_private_conversations": False,
+    }
+    old_document = {
+        "principals": [session],
+        "product_directory": [],
+        "product_service_credentials": [],
+    }
+    active_file.write_text(json.dumps(old_document), encoding="utf-8")
+    projection = {
+        "schemaVersion": 1,
+        "workspaceId": workspace,
+        "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+        "subjects": actors.copy(),
+    }
+    (active_dir / "teams-actor-subjects.json").write_text(json.dumps(projection), encoding="utf-8")
+    (candidate_dir / "teams-actor-subjects.json").write_text(
+        json.dumps(projection), encoding="utf-8"
+    )
+    token_envs = [f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}" for index in range(1, 6)]
+    actor_map = {
+        "schemaVersion": 1,
+        "workspaceId": workspace,
+        "actors": [
+            {"actorAadObjectId": actor, "tokenEnv": token_env}
+            for actor, token_env in zip(actors, token_envs, strict=True)
+        ],
+    }
+    (candidate_dir / "work-actor-token-map.json").write_text(
+        json.dumps(actor_map), encoding="utf-8"
+    )
+    (candidate_dir / "automation-source-bindings.json").write_text(
+        json.dumps({"schemaVersion": 1, "targets": []}), encoding="utf-8"
+    )
     policy = {
         "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
-        "workspace_id": "77777777-7777-4777-8777-777777777777",
-        "issuer": "https://login.microsoftonline.com/88888888-8888-4888-8888-888888888888/v2.0",
-        "tenant_id": "88888888-8888-4888-8888-888888888888",
-        "bot_app_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "workspace_id": workspace,
+        "issuer": f"https://login.microsoftonline.com/{tenant}/v2.0",
+        "tenant_id": tenant,
+        "bot_app_id": bot,
+    }
+    writers = [
+        {
+            "token_env": token_env,
+            "actor_id": actor,
+            "workspace_ids": [workspace],
+            "organization_id": organization,
+            "can_takeover": True,
+            "actor_private_scope": True,
+            "can_write_harness": True,
+            "can_publish_credential_health": False,
+            "can_bind_teams_private_conversations": False,
+        }
+        for actor, token_env in zip(actors, token_envs, strict=True)
+    ]
+    bridge = {
+        "token_env": "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+        "actor_id": "teams-private-bridge",
+        "workspace_ids": [workspace],
+        "organization_id": organization,
+        "can_takeover": False,
+        "actor_private_scope": False,
+        "can_write_harness": False,
+        "can_publish_credential_health": False,
+        "can_bind_teams_private_conversations": True,
     }
     candidate_file.write_text(
-        json.dumps({"principals": [{"actor_id": "owner"}], "teams_private_conversations": policy}),
+        json.dumps(
+            {
+                **old_document,
+                "principals": [session, *writers, bridge],
+                "teams_private_conversations": policy,
+            }
+        ),
         encoding="utf-8",
     )
+    auth_mount = {
+        "type": "bind",
+        "source": str(active_dir),
+        "target": "/run/teams-authorization",
+        "read_only": True,
+    }
+    candidate_auth_mount = {**auth_mount, "source": str(candidate_dir)}
+    teams_profile = {
+        "connectionRef": "teams-connection",
+        "directPlugin": {"connectionRef": "grpcs://teams-provider:7443", "transport": "mtls"},
+        "botAppId": bot,
+        "expectedIssuer": policy["issuer"],
+        "workspaceId": workspace,
+    }
     active = {
         "configs": {"navigator-principal": {"file": str(active_file)}},
         "services": {
@@ -946,22 +1043,57 @@ def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
                     }
                 ]
             },
-            "navigator": {"configs": []},
+            "navigator": {
+                "configs": [],
+                "volumes": [auth_mount],
+                "environment": {
+                    "CYRENE_WORKSPACE_ID": workspace,
+                    "TEAMS_TENANT_ID": tenant,
+                    "TEAMS_BOT_APP_ID": bot,
+                },
+            },
+            "exchange": {
+                "environment": {
+                    "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                        {"connectorHost": {"teamsMessages": teams_profile}}
+                    )
+                }
+            },
+            "directory-operator": {
+                "environment": {
+                    "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner,
+                    "CYRENE_ORGANIZATION_ID": organization,
+                }
+            },
         },
     }
     candidate = copy.deepcopy(active)
     candidate["configs"]["navigator-principal"]["file"] = str(candidate_file)
-    candidate["services"]["navigator"]["environment"] = {
-        "CYRENE_WORKSPACE_ID": policy["workspace_id"],
-        "TEAMS_TENANT_ID": policy["tenant_id"],
-        "TEAMS_BOT_APP_ID": policy["bot_app_id"],
-    }
+    candidate["services"]["navigator"]["volumes"] = [candidate_auth_mount]
+    candidate_profile = {**teams_profile, "personalActorSubjects": actors.copy()}
+    candidate["services"]["exchange"]["environment"][
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"
+    ] = json.dumps({"connectorHost": {"teamsMessages": candidate_profile}})
     stage_transition._validate_office_graph_private_principal_delta(active, candidate)
 
-    changed = json.loads(candidate_file.read_text(encoding="utf-8"))
-    changed["principals"][0]["can_takeover"] = True
+    candidate_document = json.loads(candidate_file.read_text(encoding="utf-8"))
+    changed = copy.deepcopy(candidate_document)
+    changed["principals"][1]["can_publish_credential_health"] = True
     candidate_file.write_text(json.dumps(changed), encoding="utf-8")
-    with pytest.raises(stage_transition.StageTransitionError, match="principal permissions"):
+    with pytest.raises(stage_transition.StageTransitionError, match="writer principals"):
+        stage_transition._validate_office_graph_private_principal_delta(active, candidate)
+    candidate_file.write_text(json.dumps(candidate_document), encoding="utf-8")
+
+    (candidate_dir / "unreviewed-config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(stage_transition.StageTransitionError, match="add only"):
+        stage_transition._validate_office_graph_private_principal_delta(active, candidate)
+    (candidate_dir / "unreviewed-config.json").unlink()
+
+    (candidate_dir / "automation-source-bindings.json").write_text(
+        json.dumps({"schemaVersion": 1, "targets": [{"kind": "host_health"}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="Directory projection"):
         stage_transition._validate_office_graph_private_principal_delta(active, candidate)
 
 
