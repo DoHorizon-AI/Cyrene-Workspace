@@ -4469,6 +4469,7 @@ def _verify_live_network_membership(
             "navigator-egress": {"navigator"},
             "account-private": {"exchange", "account-center"},
             "cloud-management-private": {"exchange", "cloud-management-phase2"},
+            "graph-exchange-private": {"exchange", "microsoft-graph"},
             "huggingface-exchange-private": {"exchange", "huggingface"},
             "exchange-authority-private": {"exchange", "workspace-authority"},
             "exchange-computer-private": {"exchange", "computer-runtime-proxy"},
@@ -4491,6 +4492,7 @@ def _verify_live_network_membership(
                 "navigator-teams-private",
                 "navigator-persistence-private",
                 "navigator-egress",
+                "graph-exchange-private",
                 "huggingface-exchange-private",
             }
             and configured_peers != allowed
