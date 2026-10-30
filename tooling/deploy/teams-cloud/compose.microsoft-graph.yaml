@@ -85,7 +85,7 @@ services:
     healthcheck:
       test: [CMD, python, /usr/local/bin/cyrene-plugin-grpc-health, --target, microsoft-graph:7443, --plugin-id, cyrene.providers.microsoft-graph, --server-ca, /run/secrets/exchange-plugin-root-ca, --client-cert, /run/secrets/microsoft-graph-health-client-cert, --client-key, /run/secrets/microsoft-graph-health-client-key]
       interval: 15s
-      timeout: 5s
+      timeout: 30s
       retries: 8
       start_period: 45s
     logging:
