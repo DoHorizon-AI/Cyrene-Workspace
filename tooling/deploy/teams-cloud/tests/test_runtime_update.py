@@ -2094,7 +2094,13 @@ def test_internal_retry_dead_route_uses_the_bounded_in_container_token_probe(
         token_path=token_path,
         token_source=token_source,
     )
-    body = {"deliveryId": "one-dead-test-row"}
+    body = {"holder": OPERATION_ID, "expected_revision": 56}
+    document = {
+        "retried_count": 1,
+        "paused": True,
+        "revision": 57,
+        "dead_count": 0,
+    }
     run_calls: list[tuple[list[str], dict[str, Any]]] = []
 
     monkeypatch.setattr(
@@ -2112,7 +2118,7 @@ def test_internal_retry_dead_route_uses_the_bounded_in_container_token_probe(
         return subprocess.CompletedProcess(
             argv,
             0,
-            json.dumps({"httpStatus": 200, "document": {"retried": True}}),
+            json.dumps({"httpStatus": 200, "document": document}),
             "",
         )
 
@@ -2127,7 +2133,7 @@ def test_internal_retry_dead_route_uses_the_bounded_in_container_token_probe(
         timeout_seconds=15,
     )
 
-    assert response == {"retried": True, "_httpStatus": 200}
+    assert response == document | {"_httpStatus": 200}
     assert len(run_calls) == 1
     argv, options = run_calls[0]
     assert argv[argv.index("--network") + 1] == f"container:{container_id}"
