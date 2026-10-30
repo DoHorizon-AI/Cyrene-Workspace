@@ -3147,6 +3147,14 @@ def _validate_office_graph_exchange_config_delta(
         != "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
     ):
         raise StageTransitionError("Graph bootstrap lacks the fixed Exchange OAuth callback signer")
+    graph_exchange_ref = "microsoft-graph/exchange-verification-key"
+    if (
+        not isinstance(refs, dict)
+        or refs.get(graph_exchange_ref) != "EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY"
+    ):
+        raise StageTransitionError(
+            "Graph bootstrap lacks the fixed Exchange Graph verification HMAC ref"
+        )
     normalized = copy.deepcopy(candidate)
     normalized_active = copy.deepcopy(active)
     normalized_account_center = normalized.get("accountCenter")
@@ -3156,6 +3164,7 @@ def _validate_office_graph_exchange_config_delta(
     normalized_refs = normalized.get("hostSecretRefs")
     if isinstance(normalized_refs, dict):
         normalized_refs.pop("account-center/caller-hmac-keys/microsoft-graph-callback", None)
+        normalized_refs.pop(graph_exchange_ref, None)
     for label, document in (("active", normalized_active), ("candidate", normalized)):
         connector_host = document.get("connectorHost")
         teams_profile = (
