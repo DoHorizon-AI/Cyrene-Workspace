@@ -149,10 +149,10 @@ def test_exchange_image_guard_joins_live_inventory_to_rendered_compose_lock() ->
         deployment_probe._verify_active_exchange_image(unresolved)
 
 
-def _policy() -> dict[str, Any]:
+def _policy(*, include_runpod: bool = False) -> dict[str, Any]:
     """Build a private-policy DTO fixture without a real owner or VM path."""
 
-    return {
+    document = {
         "schemaVersion": deployment_probe.POLICY_SCHEMA,
         "owner": {
             "issuer": "https://login.microsoftonline.com/test-tenant/v2.0",
@@ -182,9 +182,15 @@ def _policy() -> dict[str, Any]:
         },
         "notificationProvenanceRequired": True,
     }
+    if include_runpod:
+        document["probeTargets"]["runpod"] = {
+            "targetAlias": "runpod-pods",
+            "target": {"scope_ref": "pods"},
+        }
+    return document
 
 
-def _ready_snapshot() -> dict[str, Any]:
+def _ready_snapshot(*, include_runpod: bool = False) -> dict[str, Any]:
     """Build the credential-free Exchange readiness DTO shape for unit tests."""
 
     connections = [
@@ -281,7 +287,7 @@ def _ready_snapshot() -> dict[str, Any]:
                 ],
             }
         )
-    return {
+    snapshot = {
         "schemaVersion": 1,
         "actor": _policy()["owner"],
         "profiles": profiles,
@@ -289,9 +295,59 @@ def _ready_snapshot() -> dict[str, Any]:
         "bindings": bindings,
         "catalog": {"schemaVersion": 1, "items": catalog_items},
     }
+    if include_runpod:
+        connection_ref = _uuid(13)
+        binding_id = _uuid(23)
+        target_ref = "runpod-account-pods"
+        snapshot["connections"].append(
+            {
+                "connectionRef": connection_ref,
+                "providerId": "runpod",
+                "profileRef": "runpod-primary",
+                "profileAlias": "runpod",
+                "accessMode": "workspace_operator",
+                "readOnly": True,
+                "targetAlias": "runpod-pods",
+                "targetScope": {"targetAlias": "runpod-pods", "targetRef": target_ref},
+            }
+        )
+        snapshot["profiles"].append(
+            {
+                "providerId": "runpod",
+                "profileRef": "runpod-primary",
+                "authMode": "api_key",
+                "targetScope": {"targets": {"runpod-pods": {"targetRef": target_ref}}},
+            }
+        )
+        operation_ids = ["cloud.resources.list", "cloud.provider.health.read"]
+        snapshot["bindings"].append(
+            {
+                "bindingId": binding_id,
+                "connectionRef": connection_ref,
+                "providerId": "runpod",
+                "profileRef": "runpod-primary",
+                "tools": [
+                    {"operationId": operation_id, "mutating": False}
+                    for operation_id in operation_ids
+                ],
+            }
+        )
+        snapshot["catalog"]["items"].append(
+            {
+                "bindingId": binding_id,
+                "tools": [
+                    {
+                        "id": preflight.CONNECTOR_OPERATION_POLICIES[operation_id][0],
+                        "readOnly": True,
+                    }
+                    for operation_id in operation_ids
+                ],
+            }
+        )
+    return snapshot
 
 
-def _compose_scope() -> dict[str, Any]:
+def _compose_scope(*, include_runpod: bool = False) -> dict[str, Any]:
     """Build rendered Compose profile scopes matching the readiness fixture."""
 
     cloud = {
@@ -321,6 +377,17 @@ def _compose_scope() -> dict[str, Any]:
             },
         ]
     }
+    if include_runpod:
+        cloud["profiles"].append(
+            {
+                "provider": "runpod",
+                "profile_ref": "runpod-primary",
+                "identity_ref": "runpod-identity",
+                "auth": {"mode": "api_key"},
+                "read_only": True,
+                "scope": {},
+            }
+        )
     return {
         "services": {
             "cloud-management-phase2": {
@@ -425,6 +492,26 @@ def test_policy_schema_is_closed_and_never_accepts_operations_from_input() -> No
     with pytest.raises(deployment_probe.DeploymentProbeError):
         deployment_probe._validate_policy_document(expanded)
 
+    runpod = _policy(include_runpod=True)
+    assert deployment_probe._validate_policy_document(runpod) is runpod
+    expanded = json.loads(json.dumps(runpod))
+    expanded["probeTargets"]["runpod"]["target"] = {"scope_ref": "custom-url"}
+    with pytest.raises(deployment_probe.DeploymentProbeError):
+        deployment_probe._validate_policy_document(expanded)
+
+
+def test_runpod_probe_template_declares_only_the_fixed_pods_scope() -> None:
+    """Keep the shipped optional RunPod policy template aligned with validation."""
+
+    template_path = Path(deployment_probe.__file__).resolve().parent / (
+        "config/deployment-probe.runpod.template.json"
+    )
+    document = json.loads(template_path.read_text(encoding="utf-8"))
+    document["probeTargets"]["huggingface"]["repoId"] = "owner/model"
+    document["probeTargets"]["azure"]["target"]["resource_group"] = "resource-group-a"
+    document["probeTargets"]["gcp"]["target"]["zone"] = "region-a"
+    assert deployment_probe._validate_policy_document(document) is document
+
 
 def test_probe_plan_uses_exact_five_read_only_operations_and_scoped_arguments() -> None:
     """Join the root policy targets to the live readiness and rendered cloud scopes."""
@@ -459,6 +546,142 @@ def test_probe_plan_uses_exact_five_read_only_operations_and_scoped_arguments() 
         "azure": "managed_identity",
         "gcp": "workload_identity_federation",
     }
+
+
+def test_runpod_probe_plan_uses_only_the_fixed_first_page_pods_scope() -> None:
+    """Use the Plugins RunPod scope contract without caller-supplied paging or URLs."""
+
+    policy = _policy(include_runpod=True)
+    operations, auth_modes = deployment_probe._build_probe_operations(
+        snapshot=_ready_snapshot(include_runpod=True),
+        compose=_compose_scope(include_runpod=True),
+        targets=policy["probeTargets"],
+    )
+    runpod_operations = [row for row in operations if row["providerId"] == "runpod"]
+    assert len(runpod_operations) == 2
+    assert {row["operationId"] for row in runpod_operations} == {
+        "cloud.resources.list",
+        "cloud.provider.health.read",
+    }
+    listing = next(row for row in runpod_operations if row["operationId"] == "cloud.resources.list")
+    assert listing["arguments"] == {
+        "profile_ref": "runpod-primary",
+        "target": {"scope_ref": "pods"},
+    }
+    assert listing["targetProjection"] == {"scope_ref": "pods"}
+    assert "cursor" not in listing["arguments"]
+    assert "limit" not in listing["arguments"]
+    assert auth_modes["runpod"] == "api_key"
+    health = next(
+        row for row in runpod_operations if row["operationId"] == "cloud.provider.health.read"
+    )
+    assert health["profileRef"] == "runpod-primary"
+    assert health["arguments"]["profile_ref"] == "runpod-primary"
+    assert health["providerIdentityRef"] == "runpod-identity"
+
+    expanded_snapshot = _ready_snapshot(include_runpod=True)
+    runpod_binding = next(
+        row for row in expanded_snapshot["bindings"] if row["providerId"] == "runpod"
+    )
+    runpod_binding["tools"].append(
+        {
+            "operationId": "cloud.resource.get",
+            "mutating": False,
+        }
+    )
+    runpod_catalog = next(
+        row
+        for row in expanded_snapshot["catalog"]["items"]
+        if row["bindingId"] == runpod_binding["bindingId"]
+    )
+    runpod_catalog["tools"].append(
+        {
+            "id": preflight.CONNECTOR_OPERATION_POLICIES["cloud.resource.get"][0],
+            "readOnly": True,
+        }
+    )
+    operations, _auth_modes = deployment_probe._build_probe_operations(
+        snapshot=expanded_snapshot,
+        compose=_compose_scope(include_runpod=True),
+        targets=policy["probeTargets"],
+    )
+    assert len([row for row in operations if row["providerId"] == "runpod"]) == 2
+
+    runpod_binding["tools"].append({"operationId": "cloud.resource.create", "mutating": True})
+    with pytest.raises(deployment_probe.DeploymentProbeError, match="RunPod binding"):
+        deployment_probe._build_probe_operations(
+            snapshot=expanded_snapshot,
+            compose=_compose_scope(include_runpod=True),
+            targets=policy["probeTargets"],
+        )
+
+
+def test_runpod_health_invalid_http_200_payload_cannot_pass_probe() -> None:
+    """Require the provider's semantic health state even when the HTTP call succeeded."""
+
+    observed_at = deployment_probe._utc_now()
+    payload = {
+        "profile_ref": "runpod-primary",
+        "provider": "runpod",
+        "identity_ref": "runpod-identity",
+        "authentication_state": "INVALID",
+        "authorization_state": "REAUTHORIZATION_REQUIRED",
+        "scope_refs": ["runpod:runpod-primary"],
+        "checked_at": observed_at,
+        "expires_at": None,
+        "reason_code": "AUTHENTICATION_FAILED",
+    }
+    operation = {
+        "providerId": "runpod",
+        "operationId": "cloud.provider.health.read",
+        "profileRef": "runpod-primary",
+        "arguments": {"profile_ref": "runpod-primary"},
+        "providerIdentityRef": "runpod-identity",
+    }
+    envelope = {
+        "status": "PASS",
+        "results": [
+            {
+                "providerId": "runpod",
+                "operationId": "cloud.provider.health.read",
+                "outcome": "verified",
+                "observedAt": observed_at,
+                "result": {
+                    "isError": False,
+                    "structuredContent": payload,
+                    "content": [{"type": "text", "text": json.dumps(payload)}],
+                },
+            }
+        ],
+    }
+    succeeded, rows, _verified_at = deployment_probe._validate_native_results(envelope, [operation])
+    assert succeeded is False
+    assert rows[0]["outcome"] == "FAILED"
+    assert rows[0]["failure"] == {"errorType": "RUNPOD_HEALTH_INVALID"}
+
+    payload["authentication_state"] = "VALID"
+    payload["authorization_state"] = "VALID"
+    payload["reason_code"] = None
+    envelope["results"][0]["result"]["structuredContent"] = payload
+    envelope["results"][0]["result"]["content"][0]["text"] = json.dumps(payload)
+    succeeded, rows, _verified_at = deployment_probe._validate_native_results(envelope, [operation])
+    assert succeeded is True
+
+    payload["scope_refs"] = ["pods"]
+    envelope["results"][0]["result"]["structuredContent"] = payload
+    envelope["results"][0]["result"]["content"][0]["text"] = json.dumps(payload)
+    succeeded, rows, _verified_at = deployment_probe._validate_native_results(envelope, [operation])
+    assert succeeded is False
+    assert rows[0]["outcome"] == "FAILED"
+
+    payload["scope_refs"] = ["runpod:runpod-primary"]
+    envelope["results"][0]["result"]["structuredContent"] = payload
+    envelope["results"][0]["result"]["content"][0]["text"] = json.dumps(
+        {**payload, "identity_ref": "different-identity"}
+    )
+    succeeded, rows, _verified_at = deployment_probe._validate_native_results(envelope, [operation])
+    assert succeeded is False
+    assert rows[0]["outcome"] == "FAILED"
 
 
 def test_probe_plan_blocks_target_or_permission_drift_before_provider_calls() -> None:
@@ -556,6 +779,7 @@ def test_evidence_builder_emits_only_the_preflight_exchange_api_dto() -> None:
             "resultDigestSha256": "a" * 64,
         }
         for provider, operation_ids in deployment_probe.PROBE_OPERATIONS.items()
+        if provider in digests
         for operation_id in operation_ids
     ]
     evidence = deployment_probe._make_evidence(
@@ -589,6 +813,44 @@ def test_evidence_builder_emits_only_the_preflight_exchange_api_dto() -> None:
     } == {
         provider: set(operations)
         for provider, operations in deployment_probe.PROBE_OPERATIONS.items()
+        if provider in digests
+    }
+
+
+def test_evidence_builder_includes_optional_runpod_read_operations() -> None:
+    """Keep RunPod evidence in the same strict Exchange API envelope."""
+
+    observed_at = deployment_probe._utc_now()
+    providers = ("huggingface", "azure", "gcp", "runpod")
+    digests = {provider: f"{index:064x}" for index, provider in enumerate(providers, start=1)}
+    rows = [
+        {
+            "providerId": provider,
+            "operationId": operation_id,
+            "outcome": "SUCCEEDED",
+            "observedAt": observed_at,
+            "resultDigestSha256": "a" * 64,
+        }
+        for provider in providers
+        for operation_id in deployment_probe.PROBE_OPERATIONS[provider]
+    ]
+    evidence = deployment_probe._make_evidence(
+        task_id="deployment-probe-runpod-fixture",
+        owner=_policy()["owner"]["subject"],
+        verified_at=observed_at,
+        scope_digests=digests,
+        auth_modes={
+            "huggingface": "device_oauth",
+            "azure": "managed_identity",
+            "gcp": "workload_identity_federation",
+            "runpod": "api_key",
+        },
+        rows=rows,
+    )
+    runpod_row = next(row for row in evidence["providers"] if row["providerId"] == "runpod")
+    assert {row["operationId"] for row in runpod_row["readOperations"]} == {
+        "cloud.resources.list",
+        "cloud.provider.health.read",
     }
 
 
@@ -718,6 +980,19 @@ def test_readonly_health_window_returns_bounded_state_for_service_targets(
     )
 
 
+def test_health_window_selects_runpod_only_when_explicitly_requested() -> None:
+    """Keep a RunPod connection inside the same actor-scoped monitor query."""
+
+    bindings = [_binding("runpod", 23)]
+    with pytest.raises(
+        deployment_probe.DeploymentProbeError, match="explicit RunPod health target"
+    ):
+        deployment_probe._select_health_connections(bindings, targets=["huggingface"])
+    selected, refs = deployment_probe._select_health_connections(bindings, targets=["runpod"])
+    assert selected == [{"providerId": "runpod", "connectionRef": _uuid(2023)}]
+    assert refs == [_uuid(2023)]
+
+
 def test_notification_provenance_rebinds_current_workspace_source(
     tmp_path: Path,
 ) -> None:
@@ -775,6 +1050,179 @@ def test_notification_provenance_rebinds_current_workspace_source(
     )
     assert provenance["exchangeConnectionRef"] == "teams-notification-connection"
     assert provenance["exchangeProfileRef"] == "teams-notification-profile"
+
+
+def test_candidate_notification_provenance_preserves_route_and_adds_only_runpod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bind candidate provenance to the unchanged owner route and one RunPod binding reference."""
+
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    monkeypatch.setattr(
+        deployment_probe,
+        "_validate_private_directory",
+        lambda path, *, uid, label: path,
+    )
+    connection_rows = [
+        {"provider": provider, "connectionId": _uuid(index)}
+        for index, provider in enumerate(("hf", "azure", "gcp"), start=20)
+    ]
+    destination = {
+        "tenantId": _uuid(2),
+        "teamId": "team-a",
+        "channelId": "channel-a",
+        "conversationId": "conversation-a",
+        "rootThreadId": "12345",
+        "serviceUrl": "https://smba.trafficmanager.net/amer/teams",
+    }
+    active_notification = {
+        "schemaVersion": 1,
+        "organizationId": _uuid(2),
+        "workspaceId": _uuid(3),
+        "owner": {"subject": _uuid(1)},
+        "connections": connection_rows,
+        "destination": destination,
+        "exchange": {"profileRef": "teams-notification-profile"},
+    }
+    candidate_notification = json.loads(json.dumps(active_notification))
+    runpod_connection = _uuid(23)
+    candidate_notification["connections"].append(
+        {"provider": "runpod", "connectionId": runpod_connection}
+    )
+    (active_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(active_notification), encoding="utf-8"
+    )
+    (candidate_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(candidate_notification), encoding="utf-8"
+    )
+    runpod_binding = {
+        "bindingId": _uuid(123),
+        "connectionRef": runpod_connection,
+        "providerId": "runpod",
+        "profileRef": "runpod-primary",
+        "tools": [
+            {
+                "toolId": "cloud_provider_health",
+                "operationId": "cloud.provider.health.read",
+                "resourceProjection": "profile",
+                "mutating": False,
+            },
+            {
+                "toolId": "cloud_resources_list",
+                "operationId": "cloud.resources.list",
+                "resourceProjection": "cloud_target",
+                "mutating": False,
+            },
+            {
+                "toolId": "cloud_resource_get",
+                "operationId": "cloud.resource.get",
+                "resourceProjection": "cloud_target",
+                "mutating": False,
+            },
+        ],
+    }
+    (active_dir / "connector-bindings.json").write_text(
+        json.dumps({"bindings": []}), encoding="utf-8"
+    )
+    (candidate_dir / "connector-bindings.json").write_text(
+        json.dumps({"bindings": [runpod_binding]}), encoding="utf-8"
+    )
+    active = {
+        "selector": {"configDir": str(active_dir)},
+        "compose": {
+            "configs": {
+                "teams-credential-notifications": {
+                    "file": str(active_dir / "teams-credential-notifications.json")
+                },
+                "connector-bindings": {"file": str(active_dir / "connector-bindings.json")},
+            },
+            "services": {
+                "exchange": {
+                    "environment": {
+                        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": json.dumps(
+                            {
+                                "connectorHost": {
+                                    "teamsMessages": {
+                                        "connectionRef": "teams-connection",
+                                        "systemNotification": {
+                                            "profileRef": "teams-notification-profile"
+                                        },
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            },
+        },
+    }
+    anchor_path = tmp_path / "accepted-anchor.json"
+    anchor_path.write_text(json.dumps({"taskId": "accepted-source-task"}), encoding="utf-8")
+    provenance = deployment_probe._build_notification_provenance(
+        active=active,
+        anchor_path=anchor_path,
+        anchor={"taskId": "accepted-source-task"},
+        old_provenance={
+            "sourceTaskId": "accepted-source-task",
+            "sourceWorkspaceCommit": "a" * 40,
+        },
+        workspace_source_commit="b" * 40,
+        candidate_config_dir=candidate_dir,
+    )
+    assert provenance["candidateConfigSha256"] == deployment_probe._sha256_bytes(
+        (candidate_dir / "teams-credential-notifications.json").read_bytes()
+    )
+    assert provenance["sourceAnchorSha256"] == deployment_probe._sha256_bytes(
+        anchor_path.read_bytes()
+    )
+
+    candidate_notification["destination"]["channelId"] = "other-channel"
+    (candidate_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(candidate_notification), encoding="utf-8"
+    )
+    with pytest.raises(
+        deployment_probe.DeploymentProbeError, match="owner, workspace, route, and profile"
+    ):
+        deployment_probe._build_notification_provenance(
+            active=active,
+            anchor_path=anchor_path,
+            anchor={"taskId": "accepted-source-task"},
+            old_provenance={
+                "sourceTaskId": "accepted-source-task",
+                "sourceWorkspaceCommit": "a" * 40,
+            },
+            workspace_source_commit="b" * 40,
+            candidate_config_dir=candidate_dir,
+        )
+
+    (candidate_dir / "teams-credential-notifications.json").write_text(
+        json.dumps(
+            {
+                **active_notification,
+                "connections": candidate_notification["connections"][:3]
+                + [{"provider": "runpod", "connectionId": runpod_connection}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (active_dir / "connector-bindings.json").write_text(
+        json.dumps({"bindings": [runpod_binding]}), encoding="utf-8"
+    )
+    with pytest.raises(deployment_probe.DeploymentProbeError, match="active bindings"):
+        deployment_probe._build_notification_provenance(
+            active=active,
+            anchor_path=anchor_path,
+            anchor={"taskId": "accepted-source-task"},
+            old_provenance={
+                "sourceTaskId": "accepted-source-task",
+                "sourceWorkspaceCommit": "a" * 40,
+            },
+            workspace_source_commit="b" * 40,
+            candidate_config_dir=candidate_dir,
+        )
 
 
 def test_probe_receipt_exposes_only_the_accepted_notification_anchor_path() -> None:

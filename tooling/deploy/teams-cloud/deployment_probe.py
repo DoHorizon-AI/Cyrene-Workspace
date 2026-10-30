@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -49,12 +50,16 @@ PROBE_OPERATIONS: dict[str, tuple[str, ...]] = {
     "huggingface": ("huggingface.repo.get",),
     "azure": ("cloud.resources.list", "cloud.provider.health.read"),
     "gcp": ("cloud.resources.list", "cloud.provider.health.read"),
+    "runpod": ("cloud.resources.list", "cloud.provider.health.read"),
 }
-EXPECTED_PROVIDERS = frozenset(PROBE_OPERATIONS)
+REQUIRED_PROVIDERS = frozenset({"huggingface", "azure", "gcp"})
+EXPECTED_PROVIDERS = REQUIRED_PROVIDERS
+OPTIONAL_PROVIDERS = frozenset({"runpod"})
 HEALTH_TARGET_PROVIDERS = {
     "github-issues": frozenset({"github"}),
     "huggingface": frozenset({"huggingface"}),
     "cloud-management-phase2": frozenset({"azure", "gcp"}),
+    "runpod": frozenset({"runpod"}),
 }
 NODE_PROBE = r"""
 import { randomUUID } from 'node:crypto';
@@ -281,8 +286,11 @@ def _validate_policy_document(document: Any) -> dict[str, Any]:
             raise DeploymentProbeError(f"deployment probe {key} must be an absolute path")
 
     targets = document.get("probeTargets")
-    if not isinstance(targets, dict) or set(targets) != EXPECTED_PROVIDERS:
-        raise DeploymentProbeError("deployment probe must select exactly HF, Azure, and GCP")
+    target_providers = frozenset(targets) if isinstance(targets, dict) else frozenset()
+    if target_providers not in {REQUIRED_PROVIDERS, REQUIRED_PROVIDERS | OPTIONAL_PROVIDERS}:
+        raise DeploymentProbeError(
+            "deployment probe must select HF/Azure/GCP and may add only RunPod"
+        )
     hf = targets.get("huggingface")
     if (
         not isinstance(hf, dict)
@@ -313,6 +321,16 @@ def _validate_policy_document(document: Any) -> dict[str, Any]:
         or not _valid_text(gcp["target"].get("zone"), 256)
     ):
         raise DeploymentProbeError("GCP read target must select one zone")
+    runpod = targets.get("runpod")
+    if runpod is not None and (
+        not isinstance(runpod, dict)
+        or set(runpod) != {"targetAlias", "target"}
+        or not _valid_text(runpod.get("targetAlias"), 128)
+        or not isinstance(runpod.get("target"), dict)
+        or set(runpod["target"]) != {"scope_ref"}
+        or runpod["target"].get("scope_ref") != "pods"
+    ):
+        raise DeploymentProbeError("RunPod read target must use the fixed pods scope")
     return document
 
 
@@ -529,9 +547,14 @@ def _load_active_runtime(policy: dict[str, Any]) -> dict[str, Any]:
         ),
     )
     scope_digests = scopes.get("expectedProviderScopeDigests")
-    if not isinstance(scope_digests, dict) or set(scope_digests) != EXPECTED_PROVIDERS:
+    if (
+        not isinstance(scope_digests, dict)
+        or frozenset(scope_digests)
+        not in {REQUIRED_PROVIDERS, REQUIRED_PROVIDERS | OPTIONAL_PROVIDERS}
+        or set(policy["probeTargets"]) != set(scope_digests)
+    ):
         raise DeploymentProbeError(
-            "active profile set differs from the closed HF/Azure/GCP probe contract"
+            "active profile set differs from the selected HF/Azure/GCP/optional-RunPod probe contract"
         )
     if any(
         not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
@@ -660,7 +683,7 @@ def _unique_provider_row(rows: Any, provider: str, label: str) -> dict[str, Any]
 
 
 def _cloud_profile_by_provider(compose: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Read the closed active Azure/GCP profile scopes from rendered Compose."""
+    """Read active Azure/GCP profiles and the optional read-only RunPod profile."""
 
     service = compose.get("services", {}).get("cloud-management-phase2", {})
     document = preflight._json_environment_object(
@@ -671,14 +694,22 @@ def _cloud_profile_by_provider(compose: dict[str, Any]) -> dict[str, dict[str, A
         raise DeploymentProbeError("active cloud profiles are malformed")
     profiles: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if not isinstance(row, dict) or row.get("provider") not in {"azure", "gcp"}:
+        if not isinstance(row, dict) or row.get("provider") not in {
+            "azure",
+            "gcp",
+            "runpod",
+        }:
             raise DeploymentProbeError("active cloud provider set contains an unsupported profile")
         provider = row["provider"]
         if provider in profiles:
             raise DeploymentProbeError(f"active cloud configuration duplicates {provider}")
         profiles[provider] = row
-    if set(profiles) != {"azure", "gcp"}:
-        raise DeploymentProbeError("active cloud configuration must include exactly Azure and GCP")
+    if set(profiles) not in ({"azure", "gcp"}, {"azure", "gcp", "runpod"}):
+        raise DeploymentProbeError(
+            "active cloud configuration must include Azure/GCP and optional RunPod"
+        )
+    if "runpod" in profiles and profiles["runpod"].get("read_only") is not True:
+        raise DeploymentProbeError("active RunPod profile must enforce read_only=true")
     return profiles
 
 
@@ -688,12 +719,14 @@ def _build_probe_operations(
     compose: dict[str, Any],
     targets: dict[str, dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Build the fixed five read calls after joining policy targets to active scope."""
+    """Build the fixed read calls after joining policy targets to active scopes."""
 
     cloud_profiles = _cloud_profile_by_provider(compose)
     operations: list[dict[str, Any]] = []
     auth_modes: dict[str, str] = {}
-    for provider in ("huggingface", "azure", "gcp"):
+    for provider in ("huggingface", "azure", "gcp", "runpod"):
+        if provider not in targets:
+            continue
         connection = _unique_provider_row(snapshot.get("connections"), provider, "connection")
         profile = _unique_provider_row(snapshot.get("profiles"), provider, "profile")
         binding = _unique_provider_row(snapshot.get("bindings"), provider, "binding")
@@ -718,6 +751,23 @@ def _build_probe_operations(
         tools = binding.get("tools")
         if not isinstance(tools, list):
             raise DeploymentProbeError(f"active {provider} binding tool list is malformed")
+        if provider == "runpod":
+            runpod_operation_ids = [
+                row.get("operationId") for row in tools if isinstance(row, dict)
+            ]
+            runpod_read_operations = preflight.CONNECTOR_MODEL_READONLY_OPERATIONS["runpod"]
+            if (
+                len(runpod_operation_ids) != len(tools)
+                or len(set(runpod_operation_ids)) != len(runpod_operation_ids)
+                or not set(PROBE_OPERATIONS[provider]) <= set(runpod_operation_ids)
+                or not set(runpod_operation_ids) <= runpod_read_operations
+                or any(
+                    not isinstance(row, dict) or row.get("mutating") is not False for row in tools
+                )
+            ):
+                raise DeploymentProbeError(
+                    "RunPod binding must contain the fixed probe reads and only supported read operations"
+                )
         catalog = snapshot.get("catalog")
         catalog_rows = catalog.get("items") if isinstance(catalog, dict) else None
         if not isinstance(catalog_rows, list):
@@ -768,11 +818,21 @@ def _build_probe_operations(
                 raise DeploymentProbeError(
                     f"active {provider} rendered profile has an unsupported authentication mode"
                 )
-            scope = active_profile.get("scope")
-            if not isinstance(scope, dict):
-                raise DeploymentProbeError(f"active {provider} scope is malformed")
             target = target_policy["target"]
-            if provider == "azure":
+            scope = active_profile.get("scope")
+            if provider == "runpod":
+                if (
+                    target != {"scope_ref": "pods"}
+                    or active_profile.get("read_only") is not True
+                    or not _valid_text(active_profile.get("identity_ref"), 256)
+                    or not _valid_text(active_profile.get("profile_ref"), 256)
+                ):
+                    raise DeploymentProbeError(
+                        "RunPod probe must use its fixed read-only pods scope"
+                    )
+            elif not isinstance(scope, dict):
+                raise DeploymentProbeError(f"active {provider} scope is malformed")
+            elif provider == "azure":
                 groups = scope.get("resource_groups")
                 if (
                     not isinstance(scope.get("subscription_id"), str)
@@ -857,6 +917,28 @@ def _build_probe_operations(
                     f"active {provider} catalog binding is missing or duplicate"
                 )
             catalog_tools = matching_catalog[0].get("tools")
+            if provider == "runpod":
+                expected_tool_ids = {
+                    preflight.CONNECTOR_OPERATION_POLICIES[operation][0]
+                    for operation in runpod_operation_ids
+                }
+                if (
+                    not isinstance(catalog_tools, list)
+                    or len(catalog_tools) != len(expected_tool_ids)
+                    or {
+                        row.get("id")
+                        for row in catalog_tools
+                        if isinstance(row, dict) and row.get("readOnly") is True
+                    }
+                    != expected_tool_ids
+                    or any(
+                        not isinstance(row, dict) or row.get("readOnly") is not True
+                        for row in catalog_tools
+                    )
+                ):
+                    raise DeploymentProbeError(
+                        "RunPod catalog must expose only its authorized read-only operations"
+                    )
             tool_id = operation_policy[0]
             tool_rows = (
                 [row for row in catalog_tools if isinstance(row, dict) and row.get("id") == tool_id]
@@ -872,15 +954,18 @@ def _build_probe_operations(
                     "providerId": provider,
                     "connectionRef": connection_ref,
                     "profileRef": profile_ref,
+                    **(
+                        {"providerIdentityRef": active_profile["identity_ref"]}
+                        if provider == "runpod"
+                        else {}
+                    ),
                     "operationId": operation_id,
                     "arguments": arguments,
                     "targetProjection": target_projection,
                 }
             )
     expected = {
-        (provider, operation)
-        for provider, operation_ids in PROBE_OPERATIONS.items()
-        for operation in operation_ids
+        (provider, operation) for provider in targets for operation in PROBE_OPERATIONS[provider]
     }
     if (
         len(operations) != len(expected)
@@ -1183,6 +1268,96 @@ def _extract_github_repository_projection(value: Any) -> dict[str, Any]:
     return projection
 
 
+def _extract_runpod_health_projection(value: Any) -> dict[str, Any]:
+    """Read one RunPod health payload from a consistent typed MCP result."""
+
+    expected_fields = {
+        "profile_ref",
+        "provider",
+        "identity_ref",
+        "authentication_state",
+        "authorization_state",
+        "scope_refs",
+        "checked_at",
+        "expires_at",
+        "reason_code",
+    }
+    candidates: list[dict[str, Any]] = []
+    if isinstance(value, dict) and set(value) == expected_fields:
+        candidates.append(value)
+    elif isinstance(value, dict):
+        if value.get("isError") is True or set(value) - {
+            "content",
+            "isError",
+            "structuredContent",
+        }:
+            raise DeploymentProbeError("RunPod health result envelope is unsupported")
+        structured = value.get("structuredContent")
+        if structured is not None:
+            if not isinstance(structured, dict) or set(structured) != expected_fields:
+                raise DeploymentProbeError("RunPod structured health result is malformed")
+            candidates.append(structured)
+        content = value.get("content")
+        if content is not None:
+            if not isinstance(content, list) or len(content) != 1:
+                raise DeploymentProbeError(
+                    "RunPod health result must contain one JSON content block"
+                )
+            block = content[0]
+            if (
+                not isinstance(block, dict)
+                or set(block) != {"type", "text"}
+                or block["type"] != "text"
+            ):
+                raise DeploymentProbeError("RunPod health result content block is unsupported")
+            try:
+                parsed = json.loads(
+                    block["text"],
+                    object_pairs_hook=preflight._unique_json_object,
+                    parse_constant=runtime_update._reject_json_constant,
+                )
+            except (TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                raise DeploymentProbeError("RunPod health JSON content is malformed") from error
+            if not isinstance(parsed, dict) or set(parsed) != expected_fields:
+                raise DeploymentProbeError("RunPod health JSON projection is malformed")
+            candidates.append(parsed)
+        if not candidates:
+            raise DeploymentProbeError("RunPod health result contains no typed payload")
+    else:
+        raise DeploymentProbeError("RunPod health result is malformed")
+    if any(candidate != candidates[0] for candidate in candidates[1:]):
+        raise DeploymentProbeError("RunPod health projections disagree")
+    return candidates[0]
+
+
+def _runpod_health_succeeded(result: Any, operation: dict[str, Any]) -> bool:
+    """Require a fresh, owner-bound RunPod health receipt with both states valid."""
+
+    try:
+        projection = _extract_runpod_health_projection(result)
+        if (
+            projection["provider"] != "runpod"
+            or projection["profile_ref"] != operation.get("profileRef")
+            or projection["identity_ref"] != operation.get("providerIdentityRef")
+            or projection["authentication_state"] != "VALID"
+            or projection["authorization_state"] != "VALID"
+            or projection["scope_refs"] != [f"runpod:{operation.get('profileRef')}"]
+            or projection["reason_code"] is not None
+            or not isinstance(projection["checked_at"], str)
+        ):
+            return False
+        preflight._read_timestamp(projection["checked_at"], "RunPod health checked_at")
+        expires_at = projection["expires_at"]
+        if expires_at is not None:
+            if not isinstance(expires_at, str):
+                return False
+            if _parse_utc_timestamp(expires_at, "RunPod health expires_at") < datetime.now(UTC):
+                return False
+    except (DeploymentProbeError, preflight.PreflightError, KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _validate_github_native_results(
     envelope: dict[str, Any], operations: list[dict[str, Any]]
 ) -> tuple[bool, list[dict[str, Any]], str]:
@@ -1270,7 +1445,7 @@ def _write_attempt_marker(
     count = (
         operation_count
         if operation_count is not None
-        else sum(len(value) for value in PROBE_OPERATIONS.values())
+        else sum(len(PROBE_OPERATIONS[provider]) for provider in providers)
     )
     marker = output_dir / f"{name_prefix}-{run_id}.started.private.json"
     _write_private_json(
@@ -1375,7 +1550,8 @@ def _validate_native_results(
 ) -> tuple[bool, list[dict[str, Any]], str]:
     """Require exactly one bounded response for each selected read operation."""
 
-    expected_pairs = {(row["providerId"], row["operationId"]) for row in expected_operations}
+    expected_by_pair = {(row["providerId"], row["operationId"]): row for row in expected_operations}
+    expected_pairs = set(expected_by_pair)
     rows = envelope.get("results")
     if not isinstance(rows, list) or len(rows) != len(expected_pairs):
         raise DeploymentProbeError("native response count differs from the fixed operation plan")
@@ -1406,6 +1582,14 @@ def _validate_native_results(
             digest = _sha256_bytes(_canonical_json(result))
             succeeded = result.get("isError") is not True
             failure = None
+            operation = expected_by_pair[pair]
+            if (
+                provider == "runpod"
+                and operation_id == "cloud.provider.health.read"
+                and not _runpod_health_succeeded(result, operation)
+            ):
+                succeeded = False
+                failure = {"errorType": "RUNPOD_HEALTH_INVALID"}
         elif row.get("outcome") == "failed":
             failure = row.get("failure")
             if not isinstance(failure, dict) or set(failure) - {
@@ -1500,6 +1684,116 @@ def _notification_lineage(
     return anchor_path, anchor, old_provenance
 
 
+def _candidate_runpod_notification_config(
+    *, active: dict[str, Any], candidate_config_dir: Path
+) -> tuple[Path, dict[str, Any]]:
+    """Accept a private notification candidate that adds one RunPod connection reference."""
+
+    candidate_dir = _validate_private_directory(
+        candidate_config_dir, uid=RUNTIME_OWNER_UID, label="candidate notification config"
+    )
+    active_dir = Path(active["selector"]["configDir"])
+    if candidate_dir == active_dir:
+        raise DeploymentProbeError(
+            "candidate notification config must be separate from active config"
+        )
+    active_path = active_dir / "teams-credential-notifications.json"
+    candidate_path = candidate_dir / "teams-credential-notifications.json"
+    active_notification, _active_bytes = _read_json(
+        active_path, "active credential notification config", maximum_bytes=1024 * 1024
+    )
+    candidate_notification, _candidate_bytes = _read_json(
+        candidate_path, "candidate credential notification config", maximum_bytes=1024 * 1024
+    )
+    active_base = {key: value for key, value in active_notification.items() if key != "connections"}
+    candidate_base = {
+        key: value for key, value in candidate_notification.items() if key != "connections"
+    }
+    if active_base != candidate_base:
+        raise DeploymentProbeError(
+            "candidate notification owner, workspace, route, and profile must match active config"
+        )
+
+    def _connections_by_provider(document: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
+        rows = document.get("connections")
+        if not isinstance(rows, list):
+            raise DeploymentProbeError(f"{label} notification connections are malformed")
+        mapped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"connectionId", "provider"}
+                or not isinstance(row.get("provider"), str)
+                or not isinstance(row.get("connectionId"), str)
+                or row["provider"] in mapped
+            ):
+                raise DeploymentProbeError(f"{label} notification connections are malformed")
+            mapped[row["provider"]] = row
+        return mapped
+
+    active_connections = _connections_by_provider(active_notification, "active")
+    candidate_connections = _connections_by_provider(candidate_notification, "candidate")
+    if "runpod" in active_connections or set(candidate_connections) != set(active_connections) | {
+        "runpod"
+    }:
+        raise DeploymentProbeError(
+            "candidate notification config must add exactly one RunPod connection"
+        )
+    if any(
+        candidate_connections[provider] != active_connections[provider]
+        for provider in active_connections
+    ):
+        raise DeploymentProbeError(
+            "candidate notification config changed an existing provider route"
+        )
+    try:
+        runpod_connection_id = str(uuid.UUID(candidate_connections["runpod"]["connectionId"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise DeploymentProbeError(
+            "candidate RunPod notification connection ID is malformed"
+        ) from error
+    if runpod_connection_id != candidate_connections["runpod"]["connectionId"]:
+        raise DeploymentProbeError("candidate RunPod notification connection ID is noncanonical")
+
+    active_binding_document = stage_transition._candidate_config_json(
+        active["compose"], "connector-bindings"
+    )
+    active_bindings = stage_transition._sorted_exchange_bindings(
+        active_binding_document.get("bindings")
+    )
+    candidate_binding_document, _binding_bytes = _read_json(
+        candidate_dir / "connector-bindings.json",
+        "candidate connector bindings",
+        maximum_bytes=1024 * 1024,
+    )
+    candidate_bindings = stage_transition._sorted_exchange_bindings(
+        candidate_binding_document.get("bindings")
+    )
+    active_non_runpod = [row for row in active_bindings if row["providerId"] != "runpod"]
+    candidate_non_runpod = [row for row in candidate_bindings if row["providerId"] != "runpod"]
+    candidate_runpod = [row for row in candidate_bindings if row["providerId"] == "runpod"]
+    if any(row["providerId"] == "runpod" for row in active_bindings):
+        raise DeploymentProbeError("active bindings already contain a RunPod connection")
+    candidate_runpod_operations = (
+        {tool["operationId"] for tool in candidate_runpod[0]["tools"]}
+        if candidate_runpod
+        else set()
+    )
+    if (
+        len(candidate_runpod) != 1
+        or active_non_runpod != candidate_non_runpod
+        or candidate_runpod[0]["connectionRef"] != runpod_connection_id
+        or not set(PROBE_OPERATIONS["runpod"]) <= candidate_runpod_operations
+        or not candidate_runpod_operations
+        <= preflight.CONNECTOR_MODEL_READONLY_OPERATIONS["runpod"]
+        or any(tool["mutating"] is not False for tool in candidate_runpod[0]["tools"])
+    ):
+        raise DeploymentProbeError(
+            "candidate bindings must preserve the active set and match the candidate RunPod connection reference"
+        )
+    return candidate_path, candidate_notification
+
+
 def _build_notification_provenance(
     *,
     active: dict[str, Any],
@@ -1507,23 +1801,24 @@ def _build_notification_provenance(
     anchor: dict[str, Any],
     old_provenance: dict[str, Any],
     workspace_source_commit: str | None,
+    candidate_config_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Rebind the accepted source anchor to the selected notification configuration."""
 
     compose = active["compose"]
-    config_dir = Path(active["selector"]["configDir"])
-    notification_path = config_dir / "teams-credential-notifications.json"
-    if notification_path.is_symlink() or not notification_path.is_file():
-        raise DeploymentProbeError("active credential notification config is unavailable")
-    try:
-        notification = json.loads(
-            notification_path.read_text(encoding="utf-8"),
-            object_pairs_hook=preflight._unique_json_object,
+    if candidate_config_dir is None:
+        config_dir = Path(active["selector"]["configDir"])
+        notification_path = config_dir / "teams-credential-notifications.json"
+        notification, _notification_bytes = _read_json(
+            notification_path, "active credential notification config", maximum_bytes=1024 * 1024
         )
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise DeploymentProbeError("active credential notification config is invalid") from error
-    if not isinstance(notification, dict):
-        raise DeploymentProbeError("active credential notification config is malformed")
+    else:
+        config_dir = _validate_private_directory(
+            candidate_config_dir, uid=RUNTIME_OWNER_UID, label="candidate notification config"
+        )
+        notification_path, notification = _candidate_runpod_notification_config(
+            active=active, candidate_config_dir=config_dir
+        )
     exchange_service = compose.get("services", {}).get("exchange", {})
     exchange_document = preflight._json_environment_object(
         exchange_service,
@@ -1576,13 +1871,26 @@ def _run_notification_validation(
     anchor_path: Path,
     provenance_path: Path,
     provider_ids: set[str],
+    candidate_config_dir: Path | None = None,
 ) -> dict[str, str]:
     """Apply the official preflight notification validator to a fresh private receipt."""
 
     try:
+        config_dir = (
+            candidate_config_dir
+            if candidate_config_dir is not None
+            else Path(active["selector"]["configDir"])
+        )
+        compose = active["compose"]
+        if candidate_config_dir is not None:
+            compose = copy.deepcopy(compose)
+            config_row = compose.get("configs", {}).get("teams-credential-notifications")
+            if not isinstance(config_row, dict):
+                raise DeploymentProbeError("candidate notification Compose config is unavailable")
+            config_row["file"] = str(config_dir / "teams-credential-notifications.json")
         return preflight._validate_credential_notification_activation(
-            active["compose"],
-            config_dir=Path(active["selector"]["configDir"]),
+            compose,
+            config_dir=config_dir,
             anchor_file=anchor_path,
             provenance_file=provenance_path,
             expected_provider_ids=provider_ids,
@@ -1604,7 +1912,13 @@ def _make_evidence(
 ) -> dict[str, Any]:
     """Build the exact preflight-accepted Exchange connector probe envelope."""
 
-    by_provider: dict[str, list[dict[str, Any]]] = {provider: [] for provider in EXPECTED_PROVIDERS}
+    providers = set(scope_digests)
+    if frozenset(providers) not in {
+        REQUIRED_PROVIDERS,
+        REQUIRED_PROVIDERS | OPTIONAL_PROVIDERS,
+    }:
+        raise DeploymentProbeError("evidence provider set is outside the closed probe contract")
+    by_provider: dict[str, list[dict[str, Any]]] = {provider: [] for provider in providers}
     for row in rows:
         by_provider[row["providerId"]].append(row)
     return {
@@ -1631,7 +1945,8 @@ def _make_evidence(
                     for operation in by_provider[provider]
                 ],
             }
-            for provider in ("huggingface", "azure", "gcp")
+            for provider in ("huggingface", "azure", "gcp", "runpod")
+            if provider in providers
         ],
     }
 
@@ -1686,6 +2001,7 @@ def _run_deployment_probe_impl(
     *,
     run_id: str | None = None,
     workspace_source_commit: str | None = None,
+    candidate_config_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run one fresh native read-only probe against the exact active selection.
 
@@ -1730,6 +2046,10 @@ def _run_deployment_probe_impl(
         )
 
     active = _load_active_runtime(policy)
+    if candidate_config_dir is not None and not policy["notificationProvenanceRequired"]:
+        raise DeploymentProbeError(
+            "candidate notification config requires active notification provenance policy"
+        )
     snapshot, readiness_source_sha256 = _read_exchange_readiness(active)
     operations, auth_modes = _build_probe_operations(
         snapshot=snapshot,
@@ -1737,7 +2057,14 @@ def _run_deployment_probe_impl(
         targets=policy["probeTargets"],
     )
     _check_policy_unchanged(policy_path, policy_sha256)
-    _write_attempt_marker(output_dir, selected_run_id, policy_sha256)
+    selected_providers = sorted(active["scopeDigests"])
+    _write_attempt_marker(
+        output_dir,
+        selected_run_id,
+        policy_sha256,
+        provider_ids=selected_providers,
+        operation_count=sum(len(PROBE_OPERATIONS[provider]) for provider in selected_providers),
+    )
     readiness_document = {
         "schemaVersion": READINESS_SCHEMA,
         "activeOperationId": active["selector"]["operationId"],
@@ -1824,6 +2151,7 @@ def _run_deployment_probe_impl(
                 anchor=anchor,
                 old_provenance=old_provenance,
                 workspace_source_commit=workspace_source_commit,
+                candidate_config_dir=candidate_config_dir,
             )
             provenance_sha256 = _write_private_json(paths["provenance"], provenance_document)
             try:
@@ -1831,7 +2159,12 @@ def _run_deployment_probe_impl(
                     active=active,
                     anchor_path=anchor_path,
                     provenance_path=paths["provenance"],
-                    provider_ids=set(active["scopeDigests"]),
+                    provider_ids=(
+                        set(active["scopeDigests"]) | {"runpod"}
+                        if candidate_config_dir is not None
+                        else set(active["scopeDigests"])
+                    ),
+                    candidate_config_dir=candidate_config_dir,
                 )
             except BaseException:
                 paths["provenance"].unlink(missing_ok=True)
@@ -1979,6 +2312,7 @@ def run_deployment_probe(
     *,
     run_id: str | None = None,
     workspace_source_commit: str | None = None,
+    candidate_config_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run one probe and convert unexpected runtime faults to a sanitized hold."""
 
@@ -1987,6 +2321,7 @@ def run_deployment_probe(
             policy_path,
             run_id=run_id,
             workspace_source_commit=workspace_source_commit,
+            candidate_config_dir=candidate_config_dir,
         )
     except DeploymentProbeError:
         raise
@@ -2314,9 +2649,14 @@ def _select_health_connections(
         normalized = stage_transition._sorted_exchange_bindings(bindings)
     except stage_transition.StageTransitionError as error:
         raise DeploymentProbeError("active connector binding inventory is malformed") from error
-    if any(binding.get("providerId") == "runpod" for binding in normalized):
-        raise DeploymentProbeError("active RunPod bindings are outside the health-window contract")
     providers = set().union(*(HEALTH_TARGET_PROVIDERS[target] for target in targets))
+    if (
+        any(binding.get("providerId") == "runpod" for binding in normalized)
+        and "runpod" not in providers
+    ):
+        raise DeploymentProbeError(
+            "active RunPod bindings require an explicit RunPod health target"
+        )
     refs_by_provider: dict[str, list[str]] = {provider: [] for provider in providers}
     for binding in normalized:
         provider = binding.get("providerId")
@@ -2356,8 +2696,8 @@ def _readonly_health_window_impl(
 ) -> dict[str, Any]:
     """Read selected provider monitor metadata once without rescheduling it.
 
-    Targets are the closed service names github-issues, huggingface, and
-    cloud-management-phase2. Their current connection references are derived
+    Targets are the closed service names github-issues, huggingface,
+    cloud-management-phase2, and runpod. Their current connection references are derived
     from the active binding config and then checked against Exchange's read-only
     connection and monitor tables.
 
@@ -2507,12 +2847,14 @@ def main() -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--run-id")
     parser.add_argument("--workspace-source-commit")
+    parser.add_argument("--candidate-config-dir", type=Path)
     args = parser.parse_args()
     try:
         result = run_deployment_probe(
             args.policy,
             run_id=args.run_id,
             workspace_source_commit=args.workspace_source_commit,
+            candidate_config_dir=args.candidate_config_dir,
         )
     except (
         OSError,

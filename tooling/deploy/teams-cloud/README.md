@@ -42,6 +42,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `build_arm64.py` | Fetch exact remote commits, build ARM64 images, and record image IDs and materialized disk footprints / 获取精确远端提交、构建 ARM64 镜像并记录镜像 ID 与落盘占用 |
 | `transfer_arm64.py` | Enforce strict SSH/capacity gates and stream locked images directly into Docker / 严格核验 SSH 和容量门槛，并将锁定镜像直接流式导入 Docker |
 | `preflight.py` | Read-only host, image, config, secret, stage-evidence, tool-catalog, and ingress checks / 只读核验主机、镜像、配置、密钥、阶段回执、工具目录和入口 |
+| `deployment_probe.py`, `config/deployment-probe*.template.json` | Native Exchange API read probes for HF/Azure/GCP and optional RunPod Pods, with a fixed first page / 通过原生 Exchange API 探测 HF/Azure/GCP 与可选 RunPod Pods，只读第一页 |
 | `runtime_update.py` | Owner-confirmed, drain-aware Navigator/Exchange update plan, apply, rollback recovery, and status / 需 owner 明确应用的 Navigator/Exchange 排空热更新计划、回滚恢复与状态查询 |
 | `persistence_forward_recovery.py`, [`PERSISTENCE_FORWARD_RECOVERY.md`](PERSISTENCE_FORWARD_RECOVERY.md) | One-shot, exact-image/source migration proof and explicit forward-only recovery for the pinned Persistence schema-gate failure / 针对固定 Persistence schema 门禁故障的一次性精确镜像/源码迁移证明与显式向前恢复 |
 | `host_fronted_canary.py` | Read-only readiness gate for an existing host Caddy front and the private locked ingress / 现有宿主机 Caddy 与锁定私有 ingress 的只读就绪门禁 |
