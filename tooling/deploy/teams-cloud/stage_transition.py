@@ -2374,7 +2374,7 @@ def _validate_office_graph_oauth_setup_delta(
     if (
         candidate_rows[0].get("type") != "bind"
         or candidate_rows[0].get("read_only") is not True
-        or candidate_rows[0].get("bind") != {"create_host_path": False}
+        or not preflight._private_bind_options_are_safe(candidate_rows[0])
         or not isinstance(candidate_rows[0].get("source"), str)
         or set(candidate_rows[0]) - {"type", "source", "target", "read_only", "bind"}
     ):
@@ -2858,7 +2858,7 @@ def _validate_office_graph_personal_route_compose_delta(
             if (
                 row.get("type") != "bind"
                 or row.get("read_only") is not True
-                or row.get("bind") != {"create_host_path": False}
+                or not preflight._private_bind_options_are_safe(row)
                 or not isinstance(row.get("source"), str)
                 or not Path(row["source"]).is_absolute()
             ):

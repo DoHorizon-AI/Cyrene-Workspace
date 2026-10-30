@@ -1432,7 +1432,7 @@ def _validate_automation_personal_delivery(
         or len(mounts) != 1
         or mounts[0].get("type") != "bind"
         or mounts[0].get("read_only") is not True
-        or mounts[0].get("bind") != {"create_host_path": False}
+        or not _private_bind_options_are_safe(mounts[0])
         or Path(str(mounts[0].get("source", ""))).resolve() != config_dir.resolve()
     ):
         raise PreflightError("private Work policy requires the current read-only actor projection")
@@ -1497,7 +1497,6 @@ def _validate_automation_health_mount(config: dict[str, Any], source_bindings: A
         )
     mount = matches[0]
     source = mount.get("source")
-    bind = mount.get("bind")
     try:
         path = Path(source) if isinstance(source, str) else Path("")
         metadata = path.lstat()
@@ -1506,7 +1505,7 @@ def _validate_automation_health_mount(config: dict[str, Any], source_bindings: A
     if (
         mount.get("type") != "bind"
         or mount.get("read_only") is not True
-        or bind != {"create_host_path": False}
+        or not _private_bind_options_are_safe(mount)
         or not path.is_absolute()
         or stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISDIR(metadata.st_mode)
@@ -2371,6 +2370,24 @@ def _json_environment_object(service: dict[str, Any], variable: str, label: str)
     if not isinstance(value, dict) or PLACEHOLDER_RE.search(json.dumps(value, sort_keys=True)):
         raise PreflightError(f"{label} configuration is incomplete or contains a placeholder")
     return value
+
+
+def _private_bind_options_are_safe(mount: Any) -> bool:
+    """Accept only safe Compose shapes for private bind mount options.
+
+    中文：Compose 可省略默认选项、渲染空对象或保留显式 false；显式 null 不等同缺省。
+    """
+
+    if not isinstance(mount, dict):
+        return False
+    if "bind" not in mount:
+        return True
+    value = mount["bind"]
+    if not isinstance(value, dict):
+        return False
+    return not value or (
+        set(value) == {"create_host_path"} and value.get("create_host_path") is False
+    )
 
 
 def _hf_seed_path(config: dict[str, Any]) -> Path:
@@ -3282,7 +3299,7 @@ def _validate_office_oauth_setup_mount(
         len(mounted) != 1
         or mounted[0].get("type") != "bind"
         or mounted[0].get("read_only") is not True
-        or mounted[0].get("bind") != {"create_host_path": False}
+        or not _private_bind_options_are_safe(mounted[0])
         or set(mounted[0]) - {"type", "source", "target", "read_only", "bind"}
     ):
         raise PreflightError("Graph bootstrap requires one read-only owner config bind in Exchange")

@@ -31,6 +31,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 preflight = importlib.import_module("preflight")
+stage_transition = importlib.import_module("stage_transition")
 transfer = importlib.import_module("transfer_arm64")
 
 
@@ -54,6 +55,139 @@ def _merge_compose_fixture(base: Any, override: Any) -> Any:
     if isinstance(base, list) and isinstance(override, list):
         return copy.deepcopy(base) + copy.deepcopy(override)
     return copy.deepcopy(override)
+
+
+def test_private_bind_options_accept_only_closed_no_create_host_path_forms() -> None:
+    mount = {"type": "bind", "read_only": True}
+    assert preflight._private_bind_options_are_safe(mount)
+    assert preflight._private_bind_options_are_safe({**mount, "bind": {}})
+    assert preflight._private_bind_options_are_safe({**mount, "bind": {"create_host_path": False}})
+
+    for invalid in (
+        {**mount, "bind": None},
+        {**mount, "bind": False},
+        {**mount, "bind": True},
+        {**mount, "bind": 0},
+        {**mount, "bind": "false"},
+        {**mount, "bind": []},
+        {**mount, "bind": {"create_host_path": True}},
+        {**mount, "bind": {"create_host_path": 0}},
+        {**mount, "bind": {"create_host_path": "false"}},
+        {**mount, "bind": {"create_host_path": False, "propagation": "rshared"}},
+    ):
+        assert not preflight._private_bind_options_are_safe(invalid)
+
+
+def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path) -> None:
+    """Render long bind syntax with the installed Compose CLI, without starting containers."""
+
+    docker = preflight.shutil.which("docker")
+    if docker is None:
+        pytest.skip("Docker Compose config is required for bind normalization validation")
+    safe_environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(tmp_path / "home"),
+        "DOCKER_CONFIG": str(tmp_path / "docker-config"),
+    }
+    Path(safe_environment["HOME"]).mkdir()
+    Path(safe_environment["DOCKER_CONFIG"]).mkdir()
+    version = subprocess.run(
+        [docker, "compose", "version"],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker Compose plugin is not installed")
+
+    source = tmp_path / "office-operator.json"
+    source.write_text("{}\n", encoding="utf-8")
+    source.chmod(0o600)
+    empty_bind_source = tmp_path / "empty-bind-probe.json"
+    empty_bind_source.write_text("{}\n", encoding="utf-8")
+    empty_bind_source.chmod(0o600)
+    actor_config = tmp_path / "actor-config"
+    actor_config.mkdir()
+    compose_file = tmp_path / "compose.yaml"
+    compose_file.write_text(
+        yaml.safe_dump(
+            {
+                "services": {
+                    "office-bind-probe": {
+                        "image": "example.invalid/compose-bind-probe:latest",
+                        "volumes": [
+                            {
+                                "type": "bind",
+                                "source": str(source),
+                                "target": "/run/config/office-operator.json",
+                                "read_only": True,
+                                "bind": {"create_host_path": False},
+                            }
+                        ],
+                    },
+                    "actor-config-bind-probe": {
+                        "image": "example.invalid/compose-bind-probe:latest",
+                        "volumes": [
+                            {
+                                "type": "bind",
+                                "source": str(actor_config),
+                                "target": "/run/teams-authorization",
+                                "read_only": True,
+                            }
+                        ],
+                    },
+                    "empty-bind-probe": {
+                        "image": "example.invalid/compose-bind-probe:latest",
+                        "volumes": [
+                            {
+                                "type": "bind",
+                                "source": str(empty_bind_source),
+                                "target": "/run/config/office-operator.json",
+                                "read_only": True,
+                                "bind": {},
+                            }
+                        ],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    rendered = subprocess.run(
+        [docker, "compose", "--file", str(compose_file), "config", "--format", "json"],
+        capture_output=True,
+        check=False,
+        env=safe_environment,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    compose = json.loads(rendered.stdout)
+    office_mount = compose["services"]["office-bind-probe"]["volumes"][0]
+    assert office_mount["type"] == "bind"
+    assert office_mount["source"] == str(source)
+    assert office_mount["target"] == "/run/config/office-operator.json"
+    assert office_mount["read_only"] is True
+    assert office_mount.get("bind", {}) in ({}, {"create_host_path": False})
+    assert preflight._private_bind_options_are_safe(office_mount)
+
+    actor_mount = compose["services"]["actor-config-bind-probe"]["volumes"][0]
+    assert actor_mount["type"] == "bind"
+    assert actor_mount["source"] == str(actor_config)
+    assert actor_mount["target"] == "/run/teams-authorization"
+    assert actor_mount["read_only"] is True
+    assert "bind" not in actor_mount
+    assert preflight._private_bind_options_are_safe(actor_mount)
+
+    empty_bind_mount = compose["services"]["empty-bind-probe"]["volumes"][0]
+    assert empty_bind_mount.get("bind", {}) in ({}, {"create_host_path": False})
+    assert preflight._private_bind_options_are_safe(empty_bind_mount)
+
+    for candidate_mount in (office_mount, empty_bind_mount):
+        stage_transition._validate_office_graph_oauth_setup_delta(
+            {"exchange": {"volumes": []}},
+            {"exchange": {"volumes": [candidate_mount]}},
+        )
 
 
 @pytest.mark.parametrize("memory_mib", [3584, 3893])
