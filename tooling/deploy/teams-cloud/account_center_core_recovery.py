@@ -88,7 +88,9 @@ def _inventory(project: str, docker: list[str]) -> tuple[dict[str, Any], dict[st
             "id": container["Id"],
             "imageId": container["Image"],
             "configSha256": _digest(container["Config"]),
-            "mountsSha256": _digest(container["Mounts"]),
+            # Docker inspect does not promise mount ordering; every binding still participates.
+            # 中文：仅规范展示顺序，源、目标、模式等字段仍全部参与校验。
+            "mountsSha256": _digest(sorted(container["Mounts"], key=st._canonical_json)),
             "hostConfigSha256": _digest(container["HostConfig"]),
         }
         containers[name] = container
