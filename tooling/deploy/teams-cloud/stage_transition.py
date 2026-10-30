@@ -774,6 +774,42 @@ def _lock_image_ids(lock: dict[str, Any]) -> dict[str, str]:
         raise StageTransitionError("active or candidate image lock is invalid") from error
 
 
+def _office_oauth_setup_bridge_enabled(compose: dict[str, Any]) -> bool:
+    """Recognize only the private Office operator mount and its fixed loopback port."""
+
+    services = compose.get("services", {})
+    exchange = services.get("exchange", {}) if isinstance(services, dict) else {}
+    volumes = exchange.get("volumes", []) if isinstance(exchange, dict) else []
+    mounted = isinstance(volumes, list) and any(
+        isinstance(row, dict) and row.get("target") == "/run/config/office-operator.json"
+        for row in volumes
+    )
+    phase = preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE if mounted else None
+    ports = exchange.get("ports", []) if isinstance(exchange, dict) else []
+    try:
+        preflight._validate_office_oauth_setup_mount(compose, phase)
+        preflight._validate_office_oauth_loopback_ports(ports, phase)
+    except preflight.PreflightError as error:
+        raise StageTransitionError(
+            "Exchange Office OAuth published bridge is not the exact private loopback setup"
+        ) from error
+    if not mounted:
+        return False
+    expected_ports = [
+        {
+            "host_ip": "127.0.0.1",
+            "published": str(preflight.OFFICE_OAUTH_SETUP_PORT),
+            "target": preflight.OFFICE_OAUTH_SETUP_PORT,
+            "protocol": "tcp",
+        }
+    ]
+    if ports != expected_ports:
+        raise StageTransitionError(
+            "Exchange Office OAuth published bridge must be the exact loopback TCP port"
+        )
+    return True
+
+
 def _service_image(compose: dict[str, Any], image_ids: dict[str, str], name: str) -> dict[str, str]:
     """Resolve one Compose service to its exact locked immutable image reference and ID."""
 
@@ -5330,6 +5366,7 @@ def _live_service_inventory(
     )
     _verify_runtime_config_identity_sources(expected_mount_identity, "runtime configuration")
     locked_ids = _lock_image_ids(image_lock)
+    office_oauth_setup_enabled = _office_oauth_setup_bridge_enabled(compose)
     output = runtime_update._checked_stdout(
         [
             *docker_prefix,
@@ -5354,6 +5391,8 @@ def _live_service_inventory(
         raise StageTransitionError("Docker returned an incomplete project inspection")
     by_service: dict[str, dict[str, Any]] = {}
     published_container_ids: list[str] = []
+    office_oauth_container_ids: list[str] = []
+    published_values: set[str] = set()
     for row in rows:
         config_row = row.get("Config")
         labels = config_row.get("Labels") if isinstance(config_row, dict) else None
@@ -5432,19 +5471,21 @@ def _live_service_inventory(
                 raise StageTransitionError(
                     "active Teams ingress host port binding differs from Compose"
                 )
-            published_container_ids.append(row["Id"])
+            if office_oauth_setup_enabled and service_name == "exchange":
+                office_oauth_container_ids.append(row["Id"])
+            else:
+                published_container_ids.append(row["Id"])
+                published_values.update(
+                    str(item.get("published", ""))
+                    for item in expected_port_rows
+                    if isinstance(item, dict)
+                )
     if set(by_service) != set(expected):
         missing = sorted(set(expected) - set(by_service))
         raise StageTransitionError(
             "project live service inventory is incomplete: " + ", ".join(missing)
         )
-    if published_container_ids:
-        published_values = {
-            str(item.get("published", ""))
-            for service in expected.values()
-            for item in service.get("ports", [])
-            if isinstance(item, dict)
-        }
+    if published_container_ids or office_oauth_setup_enabled:
         if (
             len(published_container_ids) != 1
             or len(published_values) != 1
@@ -5472,6 +5513,30 @@ def _live_service_inventory(
             )
         if not port_ids[0].startswith(published_container_ids[0][:12]):
             raise StageTransitionError(f"published TCP {published_port} has a non-project owner")
+    if office_oauth_setup_enabled:
+        office_port = str(preflight.OFFICE_OAUTH_SETUP_PORT)
+        if len(office_oauth_container_ids) != 1:
+            raise StageTransitionError("Exchange Office OAuth port has no unique project container")
+        published = runtime_update._checked_stdout(
+            [
+                *docker_prefix,
+                "ps",
+                "--filter",
+                f"publish={office_port}",
+                "--format",
+                "{{.ID}}",
+            ],
+            label="Exchange Office OAuth published port ownership",
+        )
+        port_ids = [value.strip() for value in published.splitlines() if value.strip()]
+        if len(port_ids) != 1:
+            raise StageTransitionError(
+                f"published Exchange Office OAuth TCP {office_port} is not uniquely owned"
+            )
+        if not port_ids[0].startswith(office_oauth_container_ids[0][:12]):
+            raise StageTransitionError(
+                f"published Exchange Office OAuth TCP {office_port} has a non-Exchange owner"
+            )
     return by_service
 
 
