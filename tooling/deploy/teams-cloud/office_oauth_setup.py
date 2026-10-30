@@ -29,7 +29,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 52191
@@ -1361,7 +1361,16 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
             self.headers.get("Host", ""),
         )
 
-    def _send(self, status: int, payload: bytes, content_type: str) -> None:
+    def _send(
+        self,
+        status: int,
+        payload: bytes,
+        content_type: str,
+        *,
+        referrer_policy: Literal["no-referrer", "same-origin"] = "no-referrer",
+    ) -> None:
+        """Apply safe response headers, keeping non-page responses no-referrer by default."""
+
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
@@ -1369,7 +1378,7 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
         self.send_header("Pragma", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", referrer_policy)
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("Content-Security-Policy", self._csp())
         self.end_headers()
@@ -1379,7 +1388,7 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
         return (
             "default-src 'none'; connect-src 'self'; "
             f"script-src 'nonce-{self.server.server_nonce}'; "
-            "style-src 'none'; form-action 'self'; base-uri 'none'; "
+            "style-src 'none'; form-action 'self' https://login.microsoftonline.com; base-uri 'none'; "
             "object-src 'none'; frame-ancestors 'none'"
         )
 
@@ -1513,7 +1522,7 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
-                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Referrer-Policy", "same-origin")
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("Content-Security-Policy", self._csp())
                 self.send_header(
@@ -1524,7 +1533,12 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                 self.wfile.write(page)
                 return
             page = _page(nonce=self.server.server_nonce, csrf=session.csrf_token)
-            self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
+            self._send(
+                HTTPStatus.OK,
+                page,
+                "text/html; charset=utf-8",
+                referrer_policy="same-origin",
+            )
             return
         if parsed.path == "/api/status" and not parsed.query and not parsed.fragment:
             try:
