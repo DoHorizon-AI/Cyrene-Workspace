@@ -2076,6 +2076,110 @@ def test_internal_control_post_http_200_returns_validated_envelope(
     assert run_options[0]["input_data"] == json.dumps(body, sort_keys=True, separators=(",", ":"))
 
 
+def test_internal_retry_dead_route_uses_the_bounded_in_container_token_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow only the fixed DLQ retry route and keep its bearer inside the probe container."""
+
+    container_id = OLD_CONTAINER_ID
+    token_path = "/run/secrets/teams-delivery-admin-token"
+    token_value = "do-not-export-retry-token"
+    token_source = tmp_path / "admin-token"
+    token_source.write_text(token_value, encoding="ascii")
+    token_source.chmod(0o400)
+    metadata = _internal_probe_container(
+        container_id=container_id,
+        service="teams-ingress",
+        token_path=token_path,
+        token_source=token_source,
+    )
+    body = {"deliveryId": "one-dead-test-row"}
+    run_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: _internal_probe_inspect_output(metadata),
+    )
+
+    def successful_probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_calls.append((argv, kwargs))
+        request_url = next(
+            value for value in argv if isinstance(value, str) and value.startswith("http://")
+        )
+        assert request_url.endswith("/_internal/teams/delivery/retry-dead")
+        return subprocess.CompletedProcess(
+            argv,
+            0,
+            json.dumps({"httpStatus": 200, "document": {"retried": True}}),
+            "",
+        )
+
+    monkeypatch.setattr(runtime_update, "_run_command", successful_probe)
+    response = runtime_update._call_internal_api(
+        ["docker"],
+        container_id,
+        service="teams-ingress",
+        method="POST",
+        path="/_internal/teams/delivery/retry-dead",
+        body=body,
+        timeout_seconds=15,
+    )
+
+    assert response == {"retried": True, "_httpStatus": 200}
+    assert len(run_calls) == 1
+    argv, options = run_calls[0]
+    assert argv[argv.index("--network") + 1] == f"container:{container_id}"
+    assert argv[argv.index("--mount") + 1] == (
+        f"type=bind,src={token_source.resolve()},dst={token_path},readonly"
+    )
+    assert argv.count("--mount") == 1
+    assert token_value not in repr(argv)
+    assert token_value not in options["input_data"]
+    assert token_value not in json.dumps(response)
+    assert options["input_data"] == json.dumps(body, sort_keys=True, separators=(",", ":"))
+    assert options["external_mutation"] is True
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/_internal/teams/delivery/retry-dead"),
+        ("POST", "/_internal/teams/delivery/retry-dead/"),
+        ("POST", "/_internal/teams/delivery/retry-dead?all=true"),
+        ("POST", "/_internal/teams/delivery/retry-all"),
+    ],
+)
+def test_internal_retry_dead_allowlist_rejects_every_other_route_before_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+) -> None:
+    """Do not generalize the privileged ingress control surface beyond one exact route."""
+
+    monkeypatch.setattr(
+        runtime_update,
+        "_checked_stdout",
+        lambda *_args, **_kwargs: pytest.fail("unapproved route must not inspect a container"),
+    )
+    monkeypatch.setattr(
+        runtime_update,
+        "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("unapproved route must not start a probe container"),
+    )
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="outside the closed allowlist"):
+        runtime_update._call_internal_api(
+            ["docker"],
+            OLD_CONTAINER_ID,
+            service="teams-ingress",
+            method=method,
+            path=path,
+            body={},
+            timeout_seconds=15,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
