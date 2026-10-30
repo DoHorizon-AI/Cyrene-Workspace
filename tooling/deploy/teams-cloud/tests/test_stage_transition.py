@@ -4912,6 +4912,154 @@ def test_secret_mount_identity_uses_docker_destination_for_bare_compose_targets(
         stage_transition._expected_mount_identity(ambiguous, "exchange")
 
 
+def test_automation_health_mount_pins_metadata_without_hashing_mutable_contents(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Pin the health-export mount identity without treating its changing records as config."""
+
+    health_dir = tmp_path / "automation-health-export"
+    health_dir.mkdir()
+    health_record = health_dir / "health.json"
+    health_record.write_text('{"status":"healthy"}\n', encoding="utf-8")
+    actor_dir = tmp_path / "teams-authorization"
+    actor_dir.mkdir()
+    actor_file = actor_dir / "teams-actor-subjects.json"
+    actor_file.write_text('{"subjects":[]}\n', encoding="utf-8")
+
+    metadata = {
+        health_dir: {
+            "uid": 0,
+            "gid": 10001,
+            "mode": stat.S_IFDIR | 0o750,
+        },
+        actor_dir: {
+            "uid": 10001,
+            "gid": 10001,
+            "mode": stat.S_IFDIR | 0o700,
+        },
+        actor_file: {
+            "uid": 10001,
+            "gid": 10001,
+            "mode": stat.S_IFREG | 0o600,
+        },
+    }
+    real_stat = Path.stat
+    real_lstat = Path.lstat
+
+    def mocked_metadata(path: Path, observed: Any) -> Any:
+        values = metadata.get(path)
+        if values is None:
+            return observed
+        return SimpleNamespace(
+            st_uid=values["uid"],
+            st_gid=values["gid"],
+            st_mode=values["mode"],
+            st_size=observed.st_size,
+            st_nlink=observed.st_nlink,
+        )
+
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *, follow_symlinks=True: mocked_metadata(
+            path, real_stat(path, follow_symlinks=follow_symlinks)
+        ),
+    )
+    monkeypatch.setattr(Path, "lstat", lambda path: mocked_metadata(path, real_lstat(path)))
+    monkeypatch.setattr(stage_transition.preflight, "_private_artifact", lambda _path: True)
+
+    compose = {
+        "name": "cyrene-teams-cloud",
+        "services": {
+            "navigator": {
+                "volumes": [
+                    {
+                        "type": "bind",
+                        "source": str(health_dir),
+                        "target": stage_transition.AUTOMATION_HEALTH_TARGET,
+                        "read_only": True,
+                    },
+                    {
+                        "type": "bind",
+                        "source": str(actor_dir),
+                        "target": "/run/teams-authorization",
+                        "read_only": True,
+                    },
+                ]
+            }
+        },
+        "volumes": {},
+        "configs": {},
+        "secrets": {},
+    }
+    identity = stage_transition._expected_mount_identity(compose, "navigator")
+    health_mount = next(
+        row for row in identity if row["target"] == stage_transition.AUTOMATION_HEALTH_TARGET
+    )
+    actor_mount = next(row for row in identity if row["target"] == "/run/teams-authorization")
+    assert health_mount == {
+        "type": "bind",
+        "source": str(health_dir.resolve()),
+        "target": stage_transition.AUTOMATION_HEALTH_TARGET,
+        "readOnly": True,
+        "sourceKind": "directory",
+        "sourceUid": 0,
+        "sourceGid": 10001,
+        "sourceMode": 0o750,
+    }
+    assert isinstance(actor_mount.get("contentSha256"), str)
+    stage_transition._validate_runtime_config_identity(
+        {"navigator": identity},
+        expected_services={"navigator"},
+        label="test runtime identity",
+    )
+    writable_compose = copy.deepcopy(compose)
+    writable_compose["services"]["navigator"]["volumes"][0]["read_only"] = False
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="automation health mount must be read-only"
+    ):
+        stage_transition._expected_mount_identity(writable_compose, "navigator")
+
+    health_record.write_text('{"status":"updated"}\n', encoding="utf-8")
+    stage_transition._verify_runtime_config_identity_sources(
+        {"navigator": identity}, "candidate runtime configuration"
+    )
+    actor_file.write_text('{"subjects":["changed"]}\n', encoding="utf-8")
+    with pytest.raises(stage_transition.StageTransitionError, match="static config source changed"):
+        stage_transition._verify_runtime_config_identity_sources(
+            {"navigator": identity}, "candidate runtime configuration"
+        )
+
+    actor_file.write_text('{"subjects":[]}\n', encoding="utf-8")
+    for field, invalid in (("uid", 10001), ("gid", 10000), ("mode", stat.S_IFDIR | 0o700)):
+        original = metadata[health_dir][field]
+        metadata[health_dir][field] = invalid
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="automation health mount must be a canonical root:10001 mode 0750 directory",
+        ):
+            stage_transition._expected_mount_identity(compose, "navigator")
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="automation health mount must be a canonical root:10001 mode 0750 directory",
+        ):
+            stage_transition._verify_runtime_config_identity_sources(
+                {"navigator": identity}, "candidate runtime configuration"
+            )
+        metadata[health_dir][field] = original
+
+    symlink = tmp_path / "automation-health-link"
+    symlink.symlink_to(health_dir, target_is_directory=True)
+    linked_compose = copy.deepcopy(compose)
+    linked_compose["services"]["navigator"]["volumes"][0]["source"] = str(symlink)
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="automation health mount must be a canonical root:10001 mode 0750 directory",
+    ):
+        stage_transition._expected_mount_identity(linked_compose, "navigator")
+
+
 def test_runtime_selection_v2_pins_static_config_but_not_live_profile_contents(
     tmp_path: Path,
 ) -> None:

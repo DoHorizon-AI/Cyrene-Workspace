@@ -125,6 +125,7 @@ SELECTION_PATH_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 DATABASE_PATH = "/var/lib/cyrene-navigator/persistence.db"
 DATABASE_VOLUME_TARGET = "/var/lib/cyrene-navigator"
 CODEBUDDY_HOME_TARGET = "/home/navigator/.codebuddy"
+AUTOMATION_HEALTH_TARGET = "/run/cyrene/automation-health"
 MEMORY_RESERVE_DEFAULT_MIB = 1024
 SQLITE_ADDITIVE_SCHEMA_OBJECTS = {"table:work_credential_authorization_health"}
 ACCOUNT_CENTER_DOWNGRADE_BLOCKED_ERROR = "account_center_schema_downgrade_unsupported"
@@ -623,6 +624,33 @@ def _directory_manifest(path: Path, label: str) -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def _validate_automation_health_source(path: Path, canonical_source: str) -> Any:
+    """Validate the fixed owner/group/mode contract for mutable health snapshots."""
+
+    try:
+        resolved = path.resolve(strict=True)
+        link_metadata = path.lstat()
+        metadata = path.stat()
+    except OSError as error:
+        raise StageTransitionError("automation health mount source is unavailable") from error
+    if (
+        not path.is_absolute()
+        or str(path) != canonical_source
+        or str(resolved) != canonical_source
+        or stat.S_ISLNK(link_metadata.st_mode)
+        or not stat.S_ISDIR(link_metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 10001
+        or stat.S_IMODE(metadata.st_mode) != 0o750
+        or not preflight._private_artifact(path)
+    ):
+        raise StageTransitionError(
+            "automation health mount must be a canonical root:10001 mode 0750 directory"
+        )
+    return metadata
 
 
 def _secret_manifest(compose: dict[str, Any], label: str) -> list[dict[str, Any]]:
@@ -3979,7 +4007,13 @@ def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list
                     f"{service_name} bind mount source is unavailable"
                 ) from error
             read_only = row.get("read_only") is True
-            source_metadata = Path(resolved_source).stat()
+            resolved_path = Path(resolved_source)
+            if target == AUTOMATION_HEALTH_TARGET:
+                if not read_only:
+                    raise StageTransitionError("automation health mount must be read-only")
+                source_metadata = _validate_automation_health_source(Path(source), resolved_source)
+            else:
+                source_metadata = resolved_path.stat()
             if not (stat.S_ISDIR(source_metadata.st_mode) or stat.S_ISREG(source_metadata.st_mode)):
                 raise StageTransitionError(f"{service_name} bind source is not a file or directory")
             identity = {
@@ -3991,10 +4025,15 @@ def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list
                 "sourceUid": source_metadata.st_uid,
                 "sourceMode": stat.S_IMODE(source_metadata.st_mode),
             }
-            resolved_path = Path(resolved_source)
+            if target == AUTOMATION_HEALTH_TARGET:
+                identity["sourceGid"] = source_metadata.st_gid
             if read_only and resolved_path.is_file():
                 identity["contentSha256"] = _sha256_file(resolved_path)
-            elif read_only and stat.S_ISDIR(source_metadata.st_mode):
+            elif (
+                read_only
+                and stat.S_ISDIR(source_metadata.st_mode)
+                and target != AUTOMATION_HEALTH_TARGET
+            ):
                 directory_contents = _directory_manifest(
                     resolved_path, "Teams authorization config"
                 )
@@ -4003,6 +4042,10 @@ def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list
         elif mount_type == "volume":
             if not isinstance(source, str) or not isinstance(target, str):
                 raise StageTransitionError(f"{service_name} named-volume mount is malformed")
+            if target == AUTOMATION_HEALTH_TARGET:
+                raise StageTransitionError(
+                    "automation health must use its fixed read-only directory bind"
+                )
             volume_row = compose.get("volumes", {}).get(source, {})
             volume_name = volume_row.get("name") if isinstance(volume_row, dict) else None
             actual_name = (
@@ -4046,6 +4089,10 @@ def _expected_mount_identity(compose: dict[str, Any], service_name: str) -> list
             source = definition.get("file") if isinstance(definition, dict) else None
             if not isinstance(source, str) or not isinstance(target, str):
                 raise StageTransitionError(f"{service_name} {field} mount is unresolved")
+            if target == AUTOMATION_HEALTH_TARGET:
+                raise StageTransitionError(
+                    "automation health must use its fixed read-only directory bind"
+                )
             try:
                 resolved_source = str(Path(source).resolve(strict=True))
             except OSError as error:
@@ -4347,15 +4394,18 @@ def _validate_runtime_config_identity(
             if not isinstance(row, dict):
                 raise StageTransitionError(f"{label} mount record is malformed")
             mount_type = row.get("type")
+            target = row.get("target")
             common = {"type", "source", "target", "readOnly"}
             metadata_fields = {"sourceKind", "sourceUid", "sourceMode"}
+            health_mount = target == AUTOMATION_HEALTH_TARGET
             allowed = common | (
                 metadata_fields | {"contentSha256"} if mount_type == "bind" else set()
             )
+            if mount_type == "bind" and health_mount:
+                allowed.add("sourceGid")
             if set(row) - allowed or not common <= set(row):
                 raise StageTransitionError(f"{label} mount record has unsupported fields")
             source = row.get("source")
-            target = row.get("target")
             read_only = row.get("readOnly")
             if (
                 mount_type not in {"bind", "volume"}
@@ -4380,8 +4430,23 @@ def _validate_runtime_config_identity(
                     or not 0 <= row["sourceMode"] <= 0o7777
                 ):
                     raise StageTransitionError(f"{label} bind ownership is malformed")
+                if health_mount:
+                    if (
+                        not read_only
+                        or row.get("sourceKind") != "directory"
+                        or row.get("sourceUid") != 0
+                        or isinstance(row.get("sourceGid"), bool)
+                        or row.get("sourceGid") != 10001
+                        or row.get("sourceMode") != 0o750
+                        or "contentSha256" in row
+                    ):
+                        raise StageTransitionError(
+                            f"{label} automation health mount identity is malformed"
+                        )
+                elif "sourceGid" in row:
+                    raise StageTransitionError(f"{label} bind has unsupported group ownership")
                 digest = row.get("contentSha256")
-                needs_digest = read_only
+                needs_digest = read_only and not health_mount
                 if needs_digest and (
                     not isinstance(digest, str) or SHA256_RE.fullmatch(digest) is None
                 ):
@@ -4411,6 +4476,19 @@ def _verify_runtime_config_identity_sources(
             if row["type"] != "bind":
                 continue
             path = Path(row["source"])
+            if row["target"] == AUTOMATION_HEALTH_TARGET:
+                metadata = _validate_automation_health_source(path, row["source"])
+                if (
+                    row.get("sourceKind") != "directory"
+                    or row.get("sourceUid") != metadata.st_uid
+                    or row.get("sourceGid") != metadata.st_gid
+                    or row.get("sourceMode") != stat.S_IMODE(metadata.st_mode)
+                    or "contentSha256" in row
+                ):
+                    raise StageTransitionError(
+                        f"{label} {service_name} automation health mount identity changed"
+                    )
+                continue
             try:
                 metadata = path.stat()
                 resolved = str(path.resolve(strict=True))
