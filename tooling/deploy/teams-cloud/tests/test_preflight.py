@@ -190,8 +190,10 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
         )
 
 
-def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path: Path) -> None:
-    """Render the shipped Graph overlay and verify host/provider secret joins and retention."""
+def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopback(
+    tmp_path: Path,
+) -> None:
+    """Render shipped Graph and Office overlays and verify secrets plus the OAuth loopback."""
 
     docker = preflight.shutil.which("docker")
     if docker is None:
@@ -250,6 +252,9 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
 
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
+    office_operator_config = tmp_path / "office-operator.json"
+    office_operator_config.write_text("{}\n", encoding="utf-8")
+    office_operator_config.chmod(0o600)
     all_sources = {
         source
         for pairs in (*old_pairs.values(), *overlay_pairs.values())
@@ -278,6 +283,7 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
     }
     base_file = tmp_path / "base.yaml"
     graph_file = DEPLOYMENT_ROOT / "compose.microsoft-graph.yaml"
+    office_oauth_file = DEPLOYMENT_ROOT / "compose.office-oauth-setup.yaml"
     base_file.write_text(yaml.safe_dump(base_compose), encoding="utf-8")
     env_file = tmp_path / "graph-render.env"
     env_file.write_text(
@@ -288,6 +294,7 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
                 "CYRENE_IMAGE_MICROSOFT_GRAPH=example.invalid/microsoft-graph:test",
                 "CYRENE_MICROSOFT_GRAPH_BINDING_ID=graph-render-test",
                 "CYRENE_MICROSOFT_GRAPH_CONFIGURATION_JSON={}",
+                f"CYRENE_OFFICE_OPERATOR_CONFIG_FILE={office_operator_config}",
             )
         )
         + "\n",
@@ -303,6 +310,8 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
             str(base_file),
             "--file",
             str(graph_file),
+            "--file",
+            str(office_oauth_file),
             "--profile",
             "cloud-phase2",
             "config",
@@ -316,6 +325,19 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
     )
     assert rendered.returncode == 0, rendered.stderr
     rendered_compose = json.loads(rendered.stdout)
+    exchange_ports = rendered_compose["services"]["exchange"]["ports"]
+    assert exchange_ports == [
+        {
+            "target": 52191,
+            "published": "52191",
+            "host_ip": "127.0.0.1",
+            "protocol": "tcp",
+            "mode": "ingress",
+        }
+    ]
+    preflight._validate_office_oauth_loopback_ports(
+        exchange_ports, preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    )
 
     def rendered_pairs(service: str) -> list[tuple[str, str]]:
         return secret_pairs(rendered_compose["services"][service]["secrets"])
@@ -328,6 +350,42 @@ def test_real_graph_overlay_render_preserves_secret_sources_and_targets(tmp_path
     graph_actual = rendered_pairs("microsoft-graph")
     assert len(graph_actual) == len(set(graph_actual))
     assert set(graph_actual) == set(overlay_pairs["microsoft-graph"])
+
+
+def test_office_oauth_loopback_port_guard_rejects_any_other_shape() -> None:
+    """Accept only the exact localhost port, with Compose's optional ingress default."""
+
+    phase = preflight.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    port = {
+        "host_ip": "127.0.0.1",
+        "published": "52191",
+        "target": 52191,
+        "protocol": "tcp",
+    }
+    preflight._validate_office_oauth_loopback_ports([port], phase)
+    preflight._validate_office_oauth_loopback_ports([{**port, "mode": "ingress"}], phase)
+
+    for invalid in (
+        [{**port, "mode": "host"}],
+        [{**port, "host_ip": "0.0.0.0"}],
+        [{**port, "target": 52192}],
+        [{**port, "published": "52192"}],
+        [{**port, "protocol": "udp"}],
+        [{**port, "name": "office-oauth"}],
+        [port, port],
+    ):
+        with pytest.raises(
+            preflight.PreflightError,
+            match="Graph bootstrap requires its one temporary Exchange OAuth loopback",
+        ):
+            preflight._validate_office_oauth_loopback_ports(invalid, phase)
+
+    preflight._validate_office_oauth_loopback_ports([], None)
+    with pytest.raises(
+        preflight.PreflightError,
+        match="Exchange OAuth loopback must be absent outside Graph provider bootstrap",
+    ):
+        preflight._validate_office_oauth_loopback_ports([port], "issued-connector-activation")
 
 
 @pytest.mark.parametrize("memory_mib", [3584, 3893])

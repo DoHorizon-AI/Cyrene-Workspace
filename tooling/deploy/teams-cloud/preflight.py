@@ -5500,6 +5500,27 @@ def _validate_caddyfile(
         raise PreflightError("staging Caddyfile must use its isolated internal certificate")
 
 
+def _validate_office_oauth_loopback_ports(ports: Any, connector_auth_phase: str | None) -> None:
+    """Allow only the fixed temporary owner OAuth loopback in Graph bootstrap."""
+
+    expected_port = {
+        "host_ip": "127.0.0.1",
+        "published": str(OFFICE_OAUTH_SETUP_PORT),
+        "target": OFFICE_OAUTH_SETUP_PORT,
+        "protocol": "tcp",
+    }
+    allowed_ports = ([expected_port], [{**expected_port, "mode": "ingress"}])
+    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+        if ports not in allowed_ports:
+            raise PreflightError(
+                "Graph bootstrap requires its one temporary Exchange OAuth loopback"
+            )
+    elif ports:
+        raise PreflightError(
+            "Exchange OAuth loopback must be absent outside Graph provider bootstrap"
+        )
+
+
 def _validate_compose(
     config: dict[str, Any],
     mode: str,
@@ -5516,23 +5537,7 @@ def _validate_compose(
         raise PreflightError("rendered Compose has no services")
     exchange = services.get("exchange")
     exchange_ports = exchange.get("ports", []) if isinstance(exchange, dict) else []
-    expected_office_setup_port = [
-        {
-            "host_ip": "127.0.0.1",
-            "published": str(OFFICE_OAUTH_SETUP_PORT),
-            "target": OFFICE_OAUTH_SETUP_PORT,
-            "protocol": "tcp",
-        }
-    ]
-    if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
-        if exchange_ports != expected_office_setup_port:
-            raise PreflightError(
-                "Graph bootstrap requires its one temporary Exchange OAuth loopback"
-            )
-    elif exchange_ports:
-        raise PreflightError(
-            "Exchange OAuth loopback must be absent outside Graph provider bootstrap"
-        )
+    _validate_office_oauth_loopback_ports(exchange_ports, connector_auth_phase)
     public_name = "teams-public-ingress"
     memory = 0
     cpus = 0.0
