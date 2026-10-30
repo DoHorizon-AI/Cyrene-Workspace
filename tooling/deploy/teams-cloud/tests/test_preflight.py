@@ -5079,6 +5079,14 @@ def test_connector_auth_host_fronted_compose_keeps_only_loopback_18443() -> None
     [
         ("provider-bootstrap", {"github", "computer"}),
         (
+            "microsoft-graph-provider-bootstrap",
+            {"github", "huggingface", "azure", "gcp", "runpod", "computer"},
+        ),
+        (
+            "microsoft-graph-provider-bootstrap",
+            {"github", "huggingface", "azure", "gcp", "computer"},
+        ),
+        (
             "issued-connector-activation",
             {"github", "huggingface", "azure", "gcp", "runpod", "computer"},
         ),
@@ -5109,10 +5117,19 @@ def test_connector_auth_phases_keep_new_provider_bindings_closed_until_activatio
             },
         }
     }
-    assert (
-        preflight._expected_connector_providers(config, "connector-auth-readonly", phase)
-        == expected
-    )
+    if phase == "microsoft-graph-provider-bootstrap":
+        config["services"]["microsoft-graph"] = {
+            "environment": {"CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps({"profiles": []})}
+        }
+        config["secrets"] = {
+            "account-center-graph-provider-hmac-key": {},
+            "exchange-graph-auth-context-hmac-key": {},
+        }
+
+    observed = preflight._expected_connector_providers(config, "connector-auth-readonly", phase)
+    assert observed == expected
+    if phase == "microsoft-graph-provider-bootstrap":
+        assert "microsoft_graph" not in observed
 
 
 def test_connector_auth_capacity_gates_added_caps_without_changing_host_reserve() -> None:
