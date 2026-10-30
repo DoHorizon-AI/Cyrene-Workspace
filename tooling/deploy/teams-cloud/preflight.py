@@ -4570,9 +4570,9 @@ def _connector_bootstrap_cloud_profiles(
     if not isinstance(cloud_rows, list):
         raise PreflightError("Cloud Management bootstrap profile list is invalid")
     provider_mode = "cutover" if mode == "connector-auth-readonly" else mode
-    expected_providers = _expected_exchange_providers(config, provider_mode) - (
-        {"hf"} if _huggingface_enabled(config) else set()
-    )
+    expected_providers = _expected_exchange_providers(config, provider_mode) - {"microsoft_graph"}
+    if _huggingface_enabled(config):
+        expected_providers.discard("hf")
     rows_by_provider: dict[str, dict[str, Any]] = {}
     for row in cloud_rows:
         if not isinstance(row, dict):
@@ -5049,8 +5049,9 @@ def _validate_credential_notification_activation(
     anchor_file: Path | None,
     provenance_file: Path | None,
     expected_provider_ids: set[str],
+    require_provenance: bool = True,
 ) -> dict[str, str]:
-    """Bind the owner-only notification DTO to the real anchor and Exchange system profile."""
+    """Validate the existing notification route and, when issued, its source provenance."""
 
     services = config.get("services", {})
     navigator = services.get("navigator", {})
@@ -5077,19 +5078,23 @@ def _validate_credential_notification_activation(
         raise PreflightError(
             "credential notification config must stay in the private config directory"
         )
-    if anchor_file is None or anchor_file.is_symlink() or not anchor_file.is_file():
-        raise PreflightError("a separate private owner/destination notification anchor is required")
-    if provenance_file is None or provenance_file.is_symlink() or not provenance_file.is_file():
-        raise PreflightError("a private credential notification provenance receipt is required")
-    if not _private_artifact(anchor_file) or not _private_artifact(provenance_file):
-        raise PreflightError(
-            "credential notification anchor and provenance must stay under private umbrella artifacts"
-        )
-    for path, label in (
-        (config_path, "config"),
-        (anchor_file, "anchor"),
-        (provenance_file, "provenance"),
-    ):
+    if require_provenance:
+        if anchor_file is None or anchor_file.is_symlink() or not anchor_file.is_file():
+            raise PreflightError(
+                "a separate private owner/destination notification anchor is required"
+            )
+        if provenance_file is None or provenance_file.is_symlink() or not provenance_file.is_file():
+            raise PreflightError("a private credential notification provenance receipt is required")
+        if not _private_artifact(anchor_file) or not _private_artifact(provenance_file):
+            raise PreflightError(
+                "credential notification anchor and provenance must stay under private umbrella artifacts"
+            )
+    elif anchor_file is not None or provenance_file is not None:
+        raise PreflightError("Graph bootstrap must not include notification provenance inputs")
+    files_to_validate = [(config_path, "config")]
+    if require_provenance:
+        files_to_validate.extend([(anchor_file, "anchor"), (provenance_file, "provenance")])
+    for path, label in files_to_validate:
         metadata = path.stat()
         if (
             metadata.st_uid != 10001
@@ -5104,13 +5109,16 @@ def _validate_credential_notification_activation(
         document = json.loads(
             config_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
         )
-        provenance = json.loads(
-            provenance_file.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
-        )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
-        raise PreflightError(
-            "credential notification config or provenance is invalid JSON"
-        ) from error
+        raise PreflightError("credential notification config is invalid JSON") from error
+    if require_provenance:
+        try:
+            provenance = json.loads(
+                provenance_file.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise PreflightError("credential notification provenance is invalid JSON") from error
     expected_fields = {
         "schemaVersion",
         "organizationId",
@@ -5361,6 +5369,9 @@ def _validate_credential_notification_activation(
     )
     if any(path.is_symlink() or not path.is_file() for path in source_files):
         raise PreflightError("credential notification schemas and templates are unavailable")
+
+    if not require_provenance:
+        return {}
 
     candidate_config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
     exchange_config_sha256 = _canonical_json_digest(exchange_document)
@@ -5980,6 +5991,23 @@ def _validate_secrets_and_configs(
                 raise PreflightError(
                     "notification config path must remain absent during provider bootstrap"
                 )
+        elif connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+            _validate_exchange_authorization_cloud_runner_phase(config, connector_auth_phase)
+            expected_provider_ids = _expected_connector_providers(
+                config, mode, connector_auth_phase
+            ) - {"github", "computer"}
+            if "microsoft_graph" in expected_provider_ids:
+                raise PreflightError(
+                    "Graph bootstrap must not notify for an unissued Graph binding"
+                )
+            notification_inputs = _validate_credential_notification_activation(
+                config,
+                config_dir=config_dir,
+                anchor_file=notification_anchor_file,
+                provenance_file=notification_provenance_file,
+                expected_provider_ids=expected_provider_ids,
+                require_provenance=False,
+            )
         elif connector_auth_phase == "issued-connector-activation":
             _validate_exchange_authorization_cloud_runner_phase(config, connector_auth_phase)
             expected_provider_ids = _expected_connector_providers(
@@ -6209,7 +6237,7 @@ def _validate_codebuddy_acp_mount_boundary(
     config_dir: Path,
     connector_auth_phase: str | None = None,
 ) -> None:
-    """Keep ACP mounts to the base set plus the issued-activation notification config."""
+    """Keep ACP mounts to the base set plus the Graph-retained notification config."""
 
     volumes = navigator.get("volumes", [])
     by_target = {
@@ -6252,7 +6280,10 @@ def _validate_codebuddy_acp_mount_boundary(
         ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
     }
     expected_notification_consumers = []
-    if connector_auth_phase == "issued-connector-activation":
+    if connector_auth_phase in {
+        OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "issued-connector-activation",
+    }:
         notification_target = "/run/secrets/teams-credential-notifications.json"
         expected_config_pairs.add(
             (
