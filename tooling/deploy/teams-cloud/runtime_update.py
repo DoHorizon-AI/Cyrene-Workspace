@@ -46,6 +46,11 @@ STAGE_TRANSITION_TARGET_ORDER = (
     "exchange",
     "navigator",
 )
+# Keep the one-shot stage Compose primitive aligned with both formal phase orders.
+# The legacy runtime-update CLI continues to use ALLOWED_TARGETS below.
+FORMAL_STAGE_TRANSITION_TARGETS = frozenset(
+    {*STAGE_TRANSITION_TARGET_ORDER, "microsoft-graph", "teams-provider", "teams-ingress"}
+)
 LEGACY_TARGETS_ONLY = ["exchange", "navigator"]
 ALLOWED_TARGETS = set(TARGET_ORDER)
 LOCK_SERVICE_FOR_TARGET = {
@@ -1370,8 +1375,10 @@ def _compose_up_stage_transition(
 ) -> subprocess.CompletedProcess[str]:
     """Replace one explicit Teams cloud phase service without dependencies or image I/O."""
 
-    if service not in STAGE_TRANSITION_TARGET_ORDER:
-        raise RuntimeUpdateError("service is outside the formal Teams cloud stage-transition order")
+    if service not in FORMAL_STAGE_TRANSITION_TARGETS:
+        raise RuntimeUpdateError(
+            "service is outside the formal Teams cloud stage-transition target set"
+        )
     argv = [
         *_compose_base_argv(docker_prefix, project, compose_files, env_files),
         "up",

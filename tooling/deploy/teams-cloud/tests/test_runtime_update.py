@@ -27,6 +27,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 runtime_update = importlib.import_module("runtime_update")
+stage_transition = importlib.import_module("stage_transition")
 
 OLD_IMAGE_ID = "sha256:" + "a" * 64
 NEW_IMAGE_ID = "sha256:" + "b" * 64
@@ -55,6 +56,64 @@ def _plugins_delivery_status() -> dict[str, Any]:
     fixture = json.loads(PLUGINS_DELIVERY_FIXTURE_PATH.read_text(encoding="utf-8"))
     assert fixture["producerCommit"] == "cffd6786fbbef74dcc0797fe33e760dbda5250a8"
     return copy.deepcopy(fixture["status"])
+
+
+def test_formal_stage_compose_targets_build_closed_no_image_io_argv_without_cli_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow every formal stage target, while keeping the legacy CLI set unchanged."""
+
+    approved = set(runtime_update.STAGE_TRANSITION_TARGET_ORDER) | set(
+        stage_transition.OFFICE_GRAPH_STAGE_TARGET_ORDER
+    )
+    assert runtime_update.FORMAL_STAGE_TRANSITION_TARGETS == approved
+    assert runtime_update.TARGET_ORDER == ("github-issues", "exchange", "navigator")
+    assert runtime_update.ALLOWED_TARGETS == set(runtime_update.TARGET_ORDER)
+
+    captured: list[tuple[list[str], float, bool]] = []
+
+    def record_command(
+        argv: list[str], *, timeout_seconds: float, external_mutation: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        captured.append((argv, timeout_seconds, external_mutation))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(runtime_update, "_run_command", record_command)
+    for service in sorted(approved):
+        result = runtime_update._compose_up_stage_transition(
+            docker_prefix=["docker"],
+            project="cyrene-teams-cloud",
+            compose_files=[Path("compose.yaml")],
+            env_files=[Path("runtime.env")],
+            service=service,
+            timeout_seconds=60,
+        )
+        assert result.returncode == 0
+        argv, timeout, external = captured[-1]
+        assert timeout == 60
+        assert external is True
+        assert argv[-8:] == [
+            "up",
+            "--detach",
+            "--no-deps",
+            "--pull",
+            "never",
+            "--no-build",
+            "--force-recreate",
+            service,
+        ]
+
+    calls_before_rejection = len(captured)
+    with pytest.raises(runtime_update.RuntimeUpdateError, match="outside the formal"):
+        runtime_update._compose_up_stage_transition(
+            docker_prefix=["docker"],
+            project="cyrene-teams-cloud",
+            compose_files=[Path("compose.yaml")],
+            env_files=[Path("runtime.env")],
+            service="second-navigator",
+            timeout_seconds=60,
+        )
+    assert len(captured) == calls_before_rejection
 
 
 def _edge_status(*, paused: bool, revision: int, active: int = 0) -> dict[str, Any]:
