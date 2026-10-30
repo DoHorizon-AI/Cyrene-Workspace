@@ -1930,12 +1930,22 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
             },
         },
     }
+    default_office_ports = {
+        f"{preflight.OFFICE_OAUTH_SETUP_PORT}/tcp": [
+            {"HostIp": "127.0.0.1", "HostPort": str(preflight.OFFICE_OAUTH_SETUP_PORT)}
+        ],
+        "8081/tcp": None,
+    }
+    unspecified = object()
 
     def run_inventory(
         candidate: dict[str, Any],
         *,
         published_owner_overrides: dict[str, list[str]] | None = None,
         port_bindings_overrides: dict[str, dict[str, Any]] | None = None,
+        office_network_ports: Any = unspecified,
+        exchange_networks: dict[str, dict[str, Any]] | None = None,
+        network_inspect_rows: list[dict[str, Any]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         services = candidate["services"]
         container_ids = {name: f"{index:064x}" for index, name in enumerate(services, start=1)}
@@ -1971,6 +1981,15 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
                 for row in volumes
                 if isinstance(row, dict)
             ]
+            network_settings = {"Networks": {f"{project}_default": {}}}
+            if service_name == "exchange":
+                network_settings["Ports"] = (
+                    default_office_ports
+                    if office_network_ports is unspecified
+                    else office_network_ports
+                )
+                if exchange_networks is not None:
+                    network_settings["Networks"] = exchange_networks
             rows.append(
                 {
                     "Id": container_ids[service_name],
@@ -1983,7 +2002,7 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
                         },
                     },
                     "State": {"Running": True},
-                    "NetworkSettings": {"Networks": {f"{project}_default": {}}},
+                    "NetworkSettings": network_settings,
                     "Mounts": [
                         {
                             "Type": row["type"],
@@ -2018,6 +2037,8 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
         monkeypatch.setattr(stage_transition, "_lock_image_ids", lambda _lock: image_ids)
 
         def checked_stdout(argv: list[str], *, label: str) -> str:
+            if argv[1:3] == ["network", "inspect"]:
+                return json.dumps(network_inspect_rows or [])
             if argv[1] == "inspect":
                 return json.dumps(rows)
             if argv[1] == "ps":
@@ -2051,6 +2072,111 @@ def test_live_service_inventory_keeps_office_loopback_owner_separate_from_ingres
     ingress_mode = copy.deepcopy(compose)
     ingress_mode["services"]["exchange"]["ports"][0]["mode"] = "ingress"
     assert run_inventory(ingress_mode)["exchange"]["containerId"] == f"{6:064x}"
+
+    attached_networks = {
+        "cyrene-teams-cloud_exchange-private": {"NetworkID": "a" * 64},
+        "cyrene-teams-cloud_office-private": {"NetworkID": "b" * 64},
+    }
+    inspected_networks = [
+        {"Name": name, "Id": attachment["NetworkID"], "Internal": True}
+        for name, attachment in attached_networks.items()
+    ]
+    unpublished_ports = {"52191/tcp": None, "8081/tcp": None}
+    internal_unpublished = run_inventory(
+        compose,
+        published_owner_overrides={"52191": []},
+        office_network_ports=unpublished_ports,
+        exchange_networks=attached_networks,
+        network_inspect_rows=inspected_networks,
+    )
+    assert internal_unpublished["exchange"]["containerId"] == f"{6:064x}"
+
+    noninternal_networks = copy.deepcopy(inspected_networks)
+    noninternal_networks[0]["Internal"] = False
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="not the exact internal network"
+    ):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports=unpublished_ports,
+            exchange_networks=attached_networks,
+            network_inspect_rows=noninternal_networks,
+        )
+
+    wrong_network_identity = copy.deepcopy(inspected_networks)
+    wrong_network_identity[0]["Id"] = "c" * 64
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="not the exact internal network"
+    ):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports=unpublished_ports,
+            exchange_networks=attached_networks,
+            network_inspect_rows=wrong_network_identity,
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="network inspection is incomplete"
+    ):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports=unpublished_ports,
+            exchange_networks=attached_networks,
+            network_inspect_rows=[],
+        )
+
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="NetworkSettings.Ports is unknown"
+    ):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports=None,
+            exchange_networks=attached_networks,
+            network_inspect_rows=inspected_networks,
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="no network inventory"):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports=unpublished_ports,
+            exchange_networks={},
+            network_inspect_rows=inspected_networks,
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="actual port publication"):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": []},
+            office_network_ports={
+                "52191/tcp": None,
+                "8081/tcp": [{"HostIp": "0.0.0.0", "HostPort": "8081"}],
+            },
+            exchange_networks=attached_networks,
+            network_inspect_rows=inspected_networks,
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="exact loopback binding"):
+        run_inventory(
+            compose,
+            office_network_ports={
+                "52191/tcp": [{"HostIp": "0.0.0.0", "HostPort": "52191"}],
+                "8081/tcp": None,
+            },
+        )
+
+    with pytest.raises(stage_transition.StageTransitionError, match="was published by Docker"):
+        run_inventory(
+            compose,
+            published_owner_overrides={"52191": ["bbbbbbbbbbbb"]},
+            office_network_ports=unpublished_ports,
+            exchange_networks=attached_networks,
+            network_inspect_rows=inspected_networks,
+        )
 
     docker = preflight.shutil.which("docker")
     if docker is not None:
