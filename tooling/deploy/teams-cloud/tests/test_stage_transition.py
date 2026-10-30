@@ -1842,7 +1842,6 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     protected_hash = stage_transition._sha256_bytes(
         stage_transition._canonical_json(sorted(protected_rows))
     )
-    monkeypatch.setattr(stage_transition, "ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256", protected_hash)
 
     container_id = "a" * 64
     image_id = _image_id(103)
@@ -1915,6 +1914,41 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     stage_transition._validate_account_center_image_update_state(
         {"database": state, "runtimeCapacity": runtime_capacity}
     )
+
+    # A different deployment may have a different valid five-profile baseline.
+    # It is valid to seal that digest, but a later change from the sealed digest
+    # must be rejected by the same comparison used at apply time.
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET anchor_subject='changed-subject' "
+        "WHERE profile_ref='profile-gcp'"
+    )
+    connection.commit()
+    connection.close()
+    changed_identity = stage_transition._account_center_database_state(
+        compose=compose,
+        project="cyrene-teams-cloud",
+        container_id=container_id,
+        image_ref=image_ref,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+    assert changed_identity["protectedProvidersSha256"] != state["protectedProvidersSha256"]
+    stage_transition._validate_account_center_database_state(changed_identity)
+    assert not stage_transition._account_center_database_state_matches_baseline(
+        state, changed_identity
+    )
+    assert stage_transition._account_center_database_state_matches_baseline(
+        changed_identity, changed_identity
+    )
+
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET anchor_subject='fixed-subject-gcp' "
+        "WHERE profile_ref='profile-gcp'"
+    )
+    connection.commit()
+    connection.close()
     with pytest.raises(stage_transition.StageTransitionError, match="3584 MiB/1.95 CPU"):
         stage_transition._validate_account_center_image_update_state(
             {
@@ -8350,7 +8384,7 @@ def test_account_center_image_update_journal_reports_readonly_database_and_readi
         "foreignKeyViolationCount": 0,
         "quickCheck": ["ok"],
         "protectedProviderCount": 5,
-        "protectedProvidersSha256": stage_transition.ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256,
+        "protectedProvidersSha256": "3" * 64,
         "additionalMicrosoftProfileCount": 0,
         "additionalMicrosoftProfileIdentitySha256": None,
     }

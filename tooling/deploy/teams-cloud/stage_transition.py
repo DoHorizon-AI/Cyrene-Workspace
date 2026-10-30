@@ -125,9 +125,6 @@ ACCOUNT_CENTER_PROFILE_COLUMNS = (
 ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS = frozenset(
     {"github", "huggingface", "azure", "gcp", "runpod"}
 )
-ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256 = (
-    "a1158e9135f83baf1c755d6f62e8432b342bb14d39523960dec392ac3d72476f"
-)
 ACCOUNT_CENTER_MICROSOFT_PROFILE_PROVIDER = "microsoft_graph"
 AUTOMATION_RUNTIME_SERVICE_SET = RUNTIME_SERVICE_SET | set(OPTIONAL_RUNTIME_SERVICE_ORDER)
 # A hot memory update may target one already-running service from the active profile.
@@ -4062,7 +4059,6 @@ def _validate_account_center_database_state(database: Any) -> None:
         or database.get("protectedProviderCount") != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
         or isinstance(database.get("protectedProviderCount"), bool)
         or not isinstance(database.get("protectedProviderCount"), int)
-        or database.get("protectedProvidersSha256") != ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256
         or isinstance(microsoft_count, bool)
         or not isinstance(microsoft_count, int)
         or microsoft_count not in {0, 1}
@@ -4086,6 +4082,14 @@ def _validate_account_center_database_state(database: Any) -> None:
         raise StageTransitionError(
             "Account Center image update requires schema 9 and the five fixed provider identities"
         )
+
+
+def _account_center_database_state_matches_baseline(expected: Any, actual: Any) -> bool:
+    """Compare a live database identity with the digest sealed in the private plan."""
+
+    _validate_account_center_database_state(expected)
+    _validate_account_center_database_state(actual)
+    return actual == expected
 
 
 def _validate_account_center_image_update_state(value: Any) -> None:
@@ -4287,7 +4291,6 @@ def _account_center_database_state(
     if (
         len(protected) != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
         or {row[5] for row in protected} != ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS
-        or _sha256_bytes(_canonical_json(protected)) != ACCOUNT_CENTER_PROTECTED_PROFILE_SHA256
         or len(extras) > 1
     ):
         raise StageTransitionError(
@@ -11473,8 +11476,8 @@ def apply_plan_file(
                 max_cpus=1.95,
                 docker_prefix=docker_prefix,
             )
-            if database_state != account_center_update_state.get(
-                "database"
+            if not _account_center_database_state_matches_baseline(
+                account_center_update_state.get("database"), database_state
             ) or capacity_state != account_center_update_state.get("runtimeCapacity"):
                 raise StageTransitionError(
                     "Account Center database/profile or 15-service resource baseline changed after planning"
@@ -11668,7 +11671,9 @@ def apply_plan_file(
                         docker_prefix=docker_prefix,
                     )
                     if (
-                        database_state != baseline["database"]
+                        not _account_center_database_state_matches_baseline(
+                            baseline["database"], database_state
+                        )
                         or capacity_state != baseline["runtimeCapacity"]
                     ):
                         raise StageTransitionError(
@@ -11908,7 +11913,9 @@ def apply_plan_file(
                 account_center_state["afterDatabaseIdentity"] = database_state
                 account_center_state["afterRuntimeCapacity"] = capacity_state
                 verified = (
-                    database_state == plan["accountCenterImageUpdateState"]["database"]
+                    _account_center_database_state_matches_baseline(
+                        plan["accountCenterImageUpdateState"]["database"], database_state
+                    )
                     and capacity_state == plan["accountCenterImageUpdateState"]["runtimeCapacity"]
                 )
                 account_center_state["identityReadbackStatus"] = (
