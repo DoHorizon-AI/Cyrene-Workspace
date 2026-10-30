@@ -258,6 +258,28 @@ class BlockingBeginBridge(FakeBridge):
         return super().invoke(operation, payload)
 
 
+class BlockingStatusBeginBridge(FakeBridge):
+    """Hold a poll then begin to verify the status message advances between them."""
+
+    def __init__(self, port: int = setup.DEFAULT_PORT) -> None:
+        super().__init__(port)
+        self.status_started = threading.Event()
+        self.release_status = threading.Event()
+        self.begin_started = threading.Event()
+        self.release_begin = threading.Event()
+
+    def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if operation == "status":
+            self.status_started.set()
+            if not self.release_status.wait(timeout=5):
+                raise AssertionError("test did not release blocked status bridge")
+        elif operation == "begin":
+            self.begin_started.set()
+            if not self.release_begin.wait(timeout=5):
+                raise AssertionError("test did not release blocked begin bridge")
+        return super().invoke(operation, payload)
+
+
 @pytest.fixture
 def linked_service() -> tuple[setup.OfficeSetupService, FakeBridge, setup.SetupSession]:
     """Create an owner profile fixture whose identity was checked by Exchange."""
@@ -612,6 +634,39 @@ def test_begin_reuses_status_that_finishes_while_it_waits_for_singleflight_lock(
     assert urllib.parse.urlsplit(location).hostname == "login.microsoftonline.com"
     assert len([op for op, _ in bridge.calls if op == "status"]) == 1
     assert bridge.begin_calls == 1
+
+
+def test_new_begin_marks_cached_poll_as_preparing_not_previous_failure() -> None:
+    """A prior failure cannot clear a new attempt's popup while status is in flight."""
+
+    bridge = BlockingStatusBeginBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    with service._lock:
+        service._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        status = pool.submit(service.status, session)
+        assert bridge.status_started.wait(timeout=2)
+        begin = pool.submit(service.begin, session)
+        deadline = time.monotonic() + 2
+        while not service._begin_pending and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert service._begin_pending
+        with service._lock:
+            assert service._last_callback_message == "AUTHORIZATION_PREPARING"
+
+        bridge.release_status.set()
+        assert status.result(timeout=2)["message"] == "AUTHORIZATION_PREPARING"
+        assert bridge.begin_started.wait(timeout=2)
+        with pytest.raises(setup.OfficeSetupError, match="office_status_busy"):
+            service.status(session)
+        bridge.release_begin.set()
+        location = begin.result(timeout=2)
+
+    assert urllib.parse.urlsplit(location).hostname == "login.microsoftonline.com"
+    assert bridge.begin_calls == 1
+    assert [op for op, _ in bridge.calls].count("status") == 1
 
 
 def test_blocked_begin_keeps_home_and_session_responsive_and_status_unqueued() -> None:
@@ -993,6 +1048,7 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         assert "STATUS_REQUEST_TIMEOUT_MS=8000" in page_body
         assert "new AbortController()" in page_body
         assert "refreshInFlight" in page_body
+        assert "AUTHORIZATION_PREPARING" in page_body
         assert "setInterval(" not in page_body
         assert 'target="cyrene-office-oauth"' in page_body
         assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body

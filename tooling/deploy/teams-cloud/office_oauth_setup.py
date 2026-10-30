@@ -832,6 +832,8 @@ class OfficeSetupService:
         if not self._flow_operation_lock.acquire(blocking=False):
             raise OfficeSetupError("office_authorization_pending")
         status_admitted = False
+        attempt_started = False
+        begin_invoked = False
         try:
             with self._lock:
                 active_flow = self._active_flow
@@ -841,8 +843,9 @@ class OfficeSetupService:
                     return active_flow.authorization_url
                 if active_flow is not None:
                     self._active_flow = None
-                    self._last_callback_message = "AUTHORIZATION_DID_NOT_COMPLETE"
+                self._last_callback_message = "AUTHORIZATION_PREPARING"
                 self._begin_pending = True
+                attempt_started = True
                 cached = self._cached_status_locked(time.monotonic())
 
             if cached is None:
@@ -875,6 +878,7 @@ class OfficeSetupService:
             # Do not let a later poll treat the pre-begin snapshot as post-begin state.
             with self._lock:
                 self._invalidate_status_locked()
+            begin_invoked = True
             response = self.bridge.invoke("begin", {})
             required = {
                 "state",
@@ -904,16 +908,16 @@ class OfficeSetupService:
                 self._last_callback_message = "AUTHORIZATION_PENDING"
             return auth_url
         except OfficeSetupError as error:
-            if str(error) in {
-                "office_bridge_busy",
-                "office_bridge_unavailable",
-                "office_bridge_timeout",
-            }:
+            if attempt_started:
+                code = str(error)
                 with self._lock:
                     self._last_callback_message = (
-                        "AUTHORIZATION_UNCONFIRMED"
-                        if str(error) == "office_bridge_timeout"
+                        "READY"
+                        if code == "office_already_linked"
                         else "AUTHORIZATION_DID_NOT_COMPLETE"
+                        if code in {"office_bridge_busy", "office_bridge_unavailable"}
+                        or not begin_invoked
+                        else "AUTHORIZATION_UNCONFIRMED"
                     )
                     self._invalidate_status_locked()
             raise
@@ -1437,7 +1441,7 @@ async function refresh(){
     if(authSubmitPending&&data.message==='AUTHORIZATION_UNCONFIRMED'){
       setPopupMessage('The sign-in request could not be confirmed. Check the Office setup page before trying again.');
     }
-    document.getElementById('connect').disabled=ready||authSubmitPending;
+    document.getElementById('connect').disabled=ready||authSubmitPending||data.message==='AUTHORIZATION_PREPARING';
     if(ready){
       statusNode.textContent=`Microsoft account verified · ${data.authStatus} · credential revision ${revision}`;
     }else if(data.message==='AADSTS50011'){
@@ -1448,6 +1452,8 @@ async function refresh(){
       statusNode.textContent='A Microsoft sign-in is pending. If its window stayed blank, click Sign in again to reopen it.';
     }else if(data.message==='AUTHORIZATION_UNCONFIRMED'){
       statusNode.textContent='The sign-in request could not be confirmed. Wait before trying again; no automatic retry was made.';
+    }else if(data.message==='AUTHORIZATION_PREPARING'){
+      statusNode.textContent='Office is preparing a Microsoft sign-in request. Keep this page open.';
     }else if(!authSubmitPending){
       statusNode.textContent=`Microsoft connection status: ${data.authStatus}`;
     }
