@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.cyrene.io/teams-cloud/office-operator.schema.json",
+  "title": "Cyrene Office setup operator binding",
+  "description": "Private owner and binding pins consumed by the Exchange office-setup CLI. This file contains no OAuth tokens or provider secrets.",
+  "type": "object",
+  "required": ["schemaVersion", "actor", "bindingRef", "profileIdempotencyKey"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "actor": {
+      "type": "object",
+      "required": ["issuer", "subject", "organizationId", "workspaceId"],
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "pattern": "^https://login\\.microsoftonline\\.com/[0-9a-fA-F-]{36}/v2\\.0$",
+          "maxLength": 128
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "organizationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "bindingRef": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
+    },
+    "profileIdempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"
+    }
+  },
+  "additionalProperties": false
+}
