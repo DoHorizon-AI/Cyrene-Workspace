@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/microsoft-graph-office-v2-provider-settings.schema.json",
+  "title": "Microsoft Graph provider Office v2 feature settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "planner_enabled",
+    "todo_enabled",
+    "calendar_enabled",
+    "mail_metadata_enabled",
+    "mail_drafts_enabled",
+    "mail_send_enabled",
+    "sharepoint_drive_metadata_enabled"
+  ],
+  "properties": {
+    "planner_enabled": {"type": "boolean"},
+    "todo_enabled": {"type": "boolean"},
+    "calendar_enabled": {"type": "boolean"},
+    "mail_metadata_enabled": {"const": false},
+    "mail_drafts_enabled": {"const": false},
+    "mail_send_enabled": {"const": false},
+    "sharepoint_drive_metadata_enabled": {"type": "boolean"}
+  }
+}

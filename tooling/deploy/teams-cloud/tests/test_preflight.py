@@ -4596,6 +4596,79 @@ def test_account_center_accepts_github_only_config_without_hf_sources_or_mounts(
         preflight._validate_account_center_config(service, huggingface_enabled=False)
 
 
+def test_account_center_graph_oauth_uses_distinct_callback_client_and_provider_keys() -> None:
+    """Pin Graph OAuth callbacks/client secret separately from provider HMAC and profiles."""
+
+    service = _account_center_oauth_service()
+    environment = service["environment"]
+    config = json.loads(environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"])
+    callback_ref = "account-center/caller-hmac-keys/microsoft-graph-callback"
+    provider_ref = "account-center/caller-hmac-keys/microsoft-graph-provider"
+    client_secret_ref = "microsoft-graph/client-secret"
+    config.update(
+        {
+            "exchange_caller_id": "exchange-service",
+            "microsoft_graph_client_id": UUID,
+            "microsoft_graph_client_secret_ref": client_secret_ref,
+            "microsoft_graph_callback_uri": "http://localhost:52191/oauth/callback",
+            "microsoft_graph_callback_caller_id": "microsoft-entra-callback",
+            "microsoft_graph_provider_caller_id": "microsoft-graph-provider",
+            "caller_key_refs": {
+                **config["caller_key_refs"],
+                "microsoft-entra-callback": callback_ref,
+                "microsoft-graph-provider": provider_ref,
+            },
+            "hostSecretRefs": {
+                **config["hostSecretRefs"],
+                callback_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY",
+                provider_ref: "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY",
+                client_secret_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET",
+            },
+            "method_callers": {
+                "begin_microsoft_graph_link": ["exchange-service"],
+                "complete_microsoft_graph_link": ["microsoft-entra-callback"],
+                "begin_microsoft_graph_scope_upgrade": ["exchange-service"],
+                "complete_microsoft_graph_scope_upgrade": ["microsoft-entra-callback"],
+                "update_microsoft_graph_v2_scope": ["exchange-service"],
+                "list_provider_profiles": ["exchange-service", "microsoft-graph-provider"],
+                "redeem_provider_credential_lease": [
+                    "github-issues-service",
+                    "huggingface-provider",
+                    "microsoft-graph-provider",
+                ],
+            },
+            "workspace_operator_profile_refs": [],
+        }
+    )
+    environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    environment["CYRENE_SECRET_FILE_MAP"] += (
+        ",CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY=/run/secrets/account-center-microsoft-graph-callback-hmac-key"
+        ",CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY=/run/secrets/account-center-graph-provider-hmac-key"
+        ",CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET=/run/secrets/account-center-microsoft-graph-client-secret"
+    )
+    preflight._validate_account_center_config(
+        service,
+        microsoft_graph_office_v2_enabled=True,
+    )
+
+    config["microsoft_graph_callback_caller_id"] = "exchange-service"
+    environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    with pytest.raises(preflight.PreflightError, match="fixed localhost callback"):
+        preflight._validate_account_center_config(
+            service,
+            microsoft_graph_office_v2_enabled=True,
+        )
+
+    config["microsoft_graph_callback_caller_id"] = "microsoft-entra-callback"
+    config["method_callers"].pop("redeem_provider_credential_lease")
+    environment["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(config)
+    with pytest.raises(preflight.PreflightError, match="lease redemption"):
+        preflight._validate_account_center_config(
+            service,
+            microsoft_graph_office_v2_enabled=True,
+        )
+
+
 def test_connector_bootstrap_input_must_match_the_selected_provider_set(tmp_path: Path) -> None:
     """Accept the real GitHub-only Exchange input and reject HF target leakage."""
 
@@ -5595,3 +5668,88 @@ def test_credential_notification_activation_binds_anchor_provenance_and_exchange
             provenance_file=provenance_path,
             expected_provider_ids={"huggingface", "azure", "gcp"},
         )
+
+
+def test_office_v2_scope_maps_targets_features_and_oauth_scopes_exactly() -> None:
+    """Bind Office tools and delegated scopes to the owner-selected v2 target lists."""
+
+    tenant_id = "44444444-4444-4444-8444-444444444444"
+    workspace_id = "33333333-3333-4333-8333-333333333333"
+    owner_id = "11111111-1111-4111-8111-111111111111"
+    scope = {
+        "schemaVersion": 2,
+        "tenantId": tenant_id,
+        "workspaceId": workspace_id,
+        "enabledFeatures": {
+            "plannerEnabled": True,
+            "todoEnabled": True,
+            "calendarEnabled": True,
+            "mailMetadataEnabled": False,
+            "mailDraftsEnabled": False,
+            "mailSendEnabled": False,
+            "sharePointDriveMetadataEnabled": True,
+        },
+        "targets": {
+            "plannerPlanIds": ["plan-one"],
+            "sharePointSiteIds": [
+                "dohorizon.sharepoint.com,c168f545-80d1-4f1d-a50b-76b6d3f6ca89,1799f030-e18c-48e5-b5dc-74229bf9f617"
+            ],
+            "sharePointListIds": ["55555555-5555-4555-8555-555555555555"],
+            "sharePointDriveIds": ["drive-one"],
+            "toDoTaskListIds": ["todo-one"],
+            "calendarIds": ["calendar-one"],
+            "mailFolderIds": [],
+            "freebusySubjects": ["owner@dohorizon.com"],
+        },
+    }
+    compose = {
+        "services": {
+            "navigator": {"environment": {"TEAMS_TENANT_ID": tenant_id}},
+            "directory-operator": {
+                "environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner_id}
+            },
+            "workspace-authority": {
+                "environment": {
+                    "CYRENE_ORGANIZATION_ID": "22222222-2222-4222-8222-222222222222",
+                    "CYRENE_WORKSPACE_ID": workspace_id,
+                }
+            },
+        }
+    }
+
+    preflight._validate_office_v2_host_scope(scope, compose)
+    provider_flags = {
+        provider_key: scope["enabledFeatures"][host_key]
+        for host_key, provider_key in preflight.GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS.items()
+    }
+    preflight._validate_graph_provider_office_flags(provider_flags, scope)
+    operations = preflight._graph_operations_for_office_scope(scope)
+    assert "microsoft_graph.planner.task.create" in operations
+    assert "microsoft_graph.todo.task.delete" in operations
+    assert "microsoft_graph.calendar.event.create" in operations
+    assert "microsoft_graph.calendar.freebusy.get" in operations
+    assert "microsoft_graph.sharepoint.drive.items.list" in operations
+    assert not any(operation.startswith("microsoft_graph.mail.") for operation in operations)
+    assert preflight._graph_expected_oauth_scopes(scope) == {
+        "openid",
+        "profile",
+        "offline_access",
+        "User.Read",
+        "Tasks.ReadWrite",
+        "Calendars.ReadWrite",
+        "Sites.Selected",
+    }
+    public_scope = preflight._graph_public_target_scope(scope)
+    assert public_scope["sharepoint"]["siteId"] == scope["targets"]["sharePointSiteIds"][0]
+    assert public_scope["mail"] == {
+        "enabled": False,
+        "folderIds": [],
+        "metadataRead": False,
+        "bodyRead": False,
+        "draftsWrite": False,
+        "sendEnabled": False,
+    }
+
+    provider_flags["planner_enabled"] = False
+    with pytest.raises(preflight.PreflightError, match="map the Exchange scope"):
+        preflight._validate_graph_provider_office_flags(provider_flags, scope)

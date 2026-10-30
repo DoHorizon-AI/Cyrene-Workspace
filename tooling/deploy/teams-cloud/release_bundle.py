@@ -162,6 +162,20 @@ AUTOMATION_DEPLOYMENT_TOOL_FILES = frozenset(
         "config/work-actor-token-map.schema.json",
     }
 )
+OFFICE_GRAPH_DEPLOYMENT_TOOL_FILES = frozenset(
+    {
+        "compose.microsoft-graph.yaml",
+        "compose.office-oauth-setup.yaml",
+        "Dockerfile.microsoft-graph",
+        "config/build-plan.office-graph.template.json",
+        "config/health-policy.office-graph-15.template.json",
+        "config/microsoft-graph-office-v2-host-profile.schema.json",
+        "config/microsoft-graph-office-v2-host-profile.template.json",
+        "config/microsoft-graph-office-v2-provider-settings.schema.json",
+        "config/microsoft-graph-office-v2-provider-settings.template.json",
+        "config/observation-health-policy.v2.schema.json",
+    }
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RELEASE_ID_RE = re.compile(r"^teams-arm64-[0-9a-f]{12}-[0-9a-f]{12}$")
@@ -1730,11 +1744,19 @@ def verify_release_bundle(bundle_root: Path) -> dict[str, Any]:
     automation_markers = {
         f"{tools_prefix}/{name}"
         for name in AUTOMATION_DEPLOYMENT_TOOL_FILES
-        if name != "maintainer_subjects.py"
+        if name not in {"maintainer_subjects.py", "Dockerfile.microsoft-graph"}
     }
     if tools_members & automation_markers:
         required_tool_members.update(
             f"{tools_prefix}/{name}" for name in AUTOMATION_DEPLOYMENT_TOOL_FILES
+        )
+    office_graph_markers = {
+        f"{tools_prefix}/compose.microsoft-graph.yaml",
+        f"{tools_prefix}/config/build-plan.office-graph.template.json",
+    }
+    if tools_members & office_graph_markers:
+        required_tool_members.update(
+            f"{tools_prefix}/{name}" for name in OFFICE_GRAPH_DEPLOYMENT_TOOL_FILES
         )
     missing_tool_members = required_tool_members - tools_members
     if missing_tool_members:

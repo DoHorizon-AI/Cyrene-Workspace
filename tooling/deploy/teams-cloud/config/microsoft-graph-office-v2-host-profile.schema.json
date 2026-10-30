@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cyrene.invalid/schemas/microsoft-graph-office-v2-host-profile.schema.json",
+  "title": "Microsoft Graph Office v2 host profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "tenantId", "workspaceId", "enabledFeatures", "targets"],
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "tenantId": {"type": "string", "format": "uuid"},
+    "workspaceId": {"type": "string", "format": "uuid"},
+    "enabledFeatures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plannerEnabled",
+        "todoEnabled",
+        "calendarEnabled",
+        "mailMetadataEnabled",
+        "mailDraftsEnabled",
+        "mailSendEnabled",
+        "sharePointDriveMetadataEnabled"
+      ],
+      "properties": {
+        "plannerEnabled": {"type": "boolean"},
+        "todoEnabled": {"type": "boolean"},
+        "calendarEnabled": {"type": "boolean"},
+        "mailMetadataEnabled": {"type": "boolean"},
+        "mailDraftsEnabled": {"type": "boolean"},
+        "mailSendEnabled": {"type": "boolean"},
+        "sharePointDriveMetadataEnabled": {"type": "boolean"}
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plannerPlanIds",
+        "sharePointSiteIds",
+        "sharePointListIds",
+        "sharePointDriveIds",
+        "toDoTaskListIds",
+        "calendarIds",
+        "mailFolderIds",
+        "freebusySubjects"
+      ],
+      "properties": {
+        "plannerPlanIds": {"$ref": "#/$defs/plannerPlanIds"},
+        "sharePointSiteIds": {"$ref": "#/$defs/sharePointSiteIds"},
+        "sharePointListIds": {"$ref": "#/$defs/sharePointListIds"},
+        "sharePointDriveIds": {"$ref": "#/$defs/opaqueIds"},
+        "toDoTaskListIds": {"$ref": "#/$defs/opaqueIds"},
+        "calendarIds": {"$ref": "#/$defs/opaqueIds"},
+        "mailFolderIds": {"$ref": "#/$defs/opaqueIds"},
+        "freebusySubjects": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 3, "maxLength": 320, "pattern": "^[^*\\u0000-\\u001f]+$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "plannerPlanIds": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"}
+    },
+    "sharePointSiteIds": {
+      "type": "array",
+      "maxItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 75, "maxLength": 329, "pattern": "^[A-Za-z0-9.-]{1,255},[0-9a-fA-F-]{36},[0-9a-fA-F-]{36}$"}
+    },
+    "sharePointListIds": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {"type": "string", "format": "uuid"}
+    },
+    "opaqueIds": {
+      "type": "array",
+      "maxItems": 100,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^*\\u0000-\\u001f]+$"}
+    }
+  }
+}

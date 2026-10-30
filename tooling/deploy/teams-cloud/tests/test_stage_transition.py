@@ -168,6 +168,8 @@ def test_create_plan_consumes_statuses_after_transport_and_single_validation(
         "lifecycleAcceptance": "NOT_RUN",
         "expectedProviderScopeDigests": {},
         "huggingfaceRepositoryScopeDigestSha256": "a" * 64,
+        "composeCgroupMemoryLimitMiB": 3520,
+        "composeCgroupCpuLimit": 1.90,
     }
     seed_file = tmp_path / "huggingface-oauth.json"
     evidence_file = tmp_path / "connector-auth-evidence.json"
@@ -204,7 +206,11 @@ def test_create_plan_consumes_statuses_after_transport_and_single_validation(
     monkeypatch.setattr(stage_transition, "_directory_manifest", lambda *_args: [])
     monkeypatch.setattr(stage_transition.preflight, "_compose_config", lambda *_args: compose)
     monkeypatch.setattr(stage_transition, "_secret_manifest", lambda *_args: [])
-    monkeypatch.setattr(stage_transition, "_validate_active_candidate_configs", lambda *_args: None)
+    monkeypatch.setattr(
+        stage_transition,
+        "_validate_active_candidate_configs",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(stage_transition, "_validate_active_candidate_secrets", lambda *_args: None)
     monkeypatch.setattr(
         stage_transition, "_validate_candidate_secret_paths", lambda **_kwargs: None
@@ -622,15 +628,14 @@ def _active_and_bootstrap() -> tuple[
 
 def _active_image_update(
     target: str,
+    tmp_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Build a fixed 14-service selector state with one candidate image changed."""
+    """Build the canonical runtime inventory with one candidate image changed."""
 
-    _bootstrap_active, active, _bootstrap_lock, active_lock = _active_and_bootstrap()
-    active = copy.deepcopy(active)
-    active_lock = copy.deepcopy(active_lock)
+    active, _unused_candidate, active_lock, _unused_lock = _listener_repair_pair(tmp_path)
+    lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
     candidate = copy.deepcopy(active)
     candidate_lock = copy.deepcopy(active_lock)
-    lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
     candidate_ref = f"{target}:image-update"
     candidate["services"][target]["image"] = candidate_ref
     row = next(item for item in candidate_lock["images"] if item["service"] == lock_service)
@@ -704,7 +709,9 @@ def _listener_repair_pair(
     for index, service_name in enumerate(stage_transition.RUNTIME_SERVICE_ORDER, start=1):
         image = f"example.invalid/{service_name}:fixed"
         active["services"][service_name]["image"] = image
-        lock_rows.append((service_name, image, index))
+        lock_rows.append(
+            (runtime_update.LOCK_SERVICE_FOR_TARGET.get(service_name, service_name), image, index)
+        )
 
     persistence = active["services"]["navigator-persistence"]
     persistence["environment"]["NAVIGATOR_DATABASE_PATH"] = stage_transition.DATABASE_PATH
@@ -756,8 +763,6 @@ def _full_cloud_image_update(
     target = "cloud-management-phase2"
     target_lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
     active_lock = copy.deepcopy(active_lock)
-    target_row = next(row for row in active_lock["images"] if row["service"] == target)
-    target_row["service"] = target_lock_service
 
     candidate = copy.deepcopy(active)
     candidate_lock = copy.deepcopy(active_lock)
@@ -771,6 +776,417 @@ def _full_cloud_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _office_personal_route_services() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return active and candidate service fragments for the five-actor route delta."""
+
+    owner = "d83aeb27-ff11-46d7-b0f7-af8da8d5b8ec"
+    actor_secrets = stage_transition.OFFICE_PERSONAL_ROUTE_SECRET_NAMES
+    route_map = {
+        "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN": "/run/secrets/teams-private-bridge-token",
+        **{
+            f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}": f"/run/secrets/work-actor-token-{index:02d}"
+            for index in range(1, 6)
+        },
+    }
+    map_text = lambda mapping: ",".join(f"{key}={value}" for key, value in mapping.items())
+    auth_mount = {
+        "type": "bind",
+        "source": "/active/private-config",
+        "target": "/run/teams-authorization",
+        "read_only": True,
+    }
+    active = {
+        "navigator": {
+            "image": "navigator:old",
+            "environment": {
+                "CYRENE_SECRET_FILE_MAP": map_text(
+                    {"CYRENE_SESSION_TOKEN": "/run/secrets/navigator-session-token"}
+                ),
+                "CYRENE_WORKFLOWS_ENABLED": "false",
+            },
+            "secrets": [],
+            "volumes": [auth_mount],
+        },
+        "navigator-persistence": {
+            "image": "persistence:old",
+            "environment": {
+                "CYRENE_SECRET_FILE_MAP": map_text(
+                    {"NAVIGATOR_SESSION_TOKEN": "/run/secrets/navigator-session-token"}
+                )
+            },
+            "secrets": [],
+            "volumes": [],
+        },
+        "teams-ingress": {"image": "ingress:old", "environment": {}},
+        "teams-provider": {
+            "image": "teams:old",
+            "environment": {"CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps({})},
+        },
+        "directory-operator": {
+            "environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner},
+            "volumes": [
+                {
+                    "type": "bind",
+                    "source": "/active/private-config",
+                    "target": "/run/cyrene-config",
+                }
+            ],
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate["navigator"]["image"] = "navigator:new"
+    candidate["navigator"]["environment"].update(
+        {
+            "CYRENE_WORK_ACTOR_TOKEN_MAP_FILE": "/run/teams-authorization/work-actor-token-map.json",
+            "CYRENE_AUTOMATION_SOURCE_BINDINGS_FILE": "/run/teams-authorization/automation-source-bindings.json",
+            "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "true",
+            "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": owner,
+            "CYRENE_SECRET_FILE_MAP": map_text(
+                {
+                    "CYRENE_SESSION_TOKEN": "/run/secrets/navigator-session-token",
+                    **route_map,
+                }
+            ),
+        }
+    )
+    candidate["navigator"]["secrets"] = [
+        {"source": name, "target": name} for name in sorted(actor_secrets)
+    ]
+    candidate["navigator"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/private/automation-health",
+            "target": "/run/cyrene/automation-health",
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+    )
+    candidate["navigator-persistence"]["image"] = "persistence:new"
+    candidate["navigator-persistence"]["environment"].update(
+        {
+            "TEAMS_TASK_ACTOR_SUBJECTS_FILE": "/run/teams-authorization/teams-actor-subjects.json",
+            "CYRENE_SECRET_FILE_MAP": map_text(
+                {"NAVIGATOR_SESSION_TOKEN": "/run/secrets/navigator-session-token", **route_map}
+            ),
+        }
+    )
+    candidate["navigator-persistence"]["secrets"] = [
+        {"source": name, "target": name} for name in sorted(actor_secrets)
+    ]
+    candidate["navigator-persistence"]["volumes"].append(
+        {
+            "type": "bind",
+            "source": "/candidate/private-config",
+            "target": "/run/teams-authorization",
+            "read_only": True,
+            "bind": {"create_host_path": False},
+        }
+    )
+    candidate["navigator"]["volumes"][0]["source"] = "/candidate/private-config"
+    candidate["teams-ingress"]["image"] = "ingress:new"
+    candidate["teams-ingress"]["environment"]["TEAMS_PERSONAL_CHAT_ENABLED"] = "true"
+    candidate["teams-provider"]["image"] = "teams:new"
+    candidate["teams-provider"]["environment"]["CYRENE_CAPABILITY_CONFIGURATION_JSON"] = json.dumps(
+        {"personal_chat_enabled": True}
+    )
+    candidate["directory-operator"]["volumes"][0]["source"] = "/candidate/private-config"
+    return active, candidate
+
+
+def test_office_graph_bootstrap_accepts_only_the_owner_model_personal_route() -> None:
+    active, candidate = _office_personal_route_services()
+
+    stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
+
+    active, candidate = _office_personal_route_services()
+    changed = copy.deepcopy(candidate)
+    changed["navigator"]["environment"]["CYRENE_TEAMS_MODEL_ACTOR_SUBJECT"] = (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="owner"):
+        stage_transition._validate_office_graph_personal_route_compose_delta(
+            copy.deepcopy(active), changed
+        )
+
+    active, candidate = _office_personal_route_services()
+    candidate["navigator"]["environment"]["CYRENE_WORKFLOWS_ENABLED"] = "true"
+    with pytest.raises(stage_transition.StageTransitionError, match="Workflows disabled"):
+        stage_transition._validate_office_graph_personal_route_compose_delta(active, candidate)
+
+
+def test_office_graph_bootstrap_principal_delta_adds_only_private_chat_policy(
+    tmp_path: Path,
+) -> None:
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    active_file = active_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    candidate_file = candidate_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    active_file.write_text(json.dumps({"principals": [{"actor_id": "owner"}]}), encoding="utf-8")
+    policy = {
+        "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
+        "workspace_id": "77777777-7777-4777-8777-777777777777",
+        "issuer": "https://login.microsoftonline.com/88888888-8888-4888-8888-888888888888/v2.0",
+        "tenant_id": "88888888-8888-4888-8888-888888888888",
+        "bot_app_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }
+    candidate_file.write_text(
+        json.dumps({"principals": [{"actor_id": "owner"}], "teams_private_conversations": policy}),
+        encoding="utf-8",
+    )
+    active = {
+        "configs": {"navigator-principal": {"file": str(active_file)}},
+        "services": {
+            "navigator-persistence": {
+                "configs": [
+                    {
+                        "source": "navigator-principal",
+                        "target": stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_TARGET,
+                    }
+                ]
+            },
+            "navigator": {"configs": []},
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate["configs"]["navigator-principal"]["file"] = str(candidate_file)
+    candidate["services"]["navigator"]["environment"] = {
+        "CYRENE_WORKSPACE_ID": policy["workspace_id"],
+        "TEAMS_TENANT_ID": policy["tenant_id"],
+        "TEAMS_BOT_APP_ID": policy["bot_app_id"],
+    }
+    stage_transition._validate_office_graph_private_principal_delta(active, candidate)
+
+    changed = json.loads(candidate_file.read_text(encoding="utf-8"))
+    changed["principals"][0]["can_takeover"] = True
+    candidate_file.write_text(json.dumps(changed), encoding="utf-8")
+    with pytest.raises(stage_transition.StageTransitionError, match="principal permissions"):
+        stage_transition._validate_office_graph_private_principal_delta(active, candidate)
+
+
+def test_office_graph_activation_grants_health_publishing_to_owner_session_only(
+    tmp_path: Path,
+) -> None:
+    active_dir = tmp_path / "active-config"
+    candidate_dir = tmp_path / "candidate-config"
+    active_dir.mkdir()
+    candidate_dir.mkdir()
+    owner = "11111111-1111-4111-8111-111111111111"
+    principal_rows = [
+        {
+            "token_env": "NAVIGATOR_SESSION_TOKEN",
+            "actor_id": owner,
+            "can_publish_credential_health": False,
+        }
+    ]
+    principal_rows.extend(
+        {
+            "token_env": f"CYRENE_WORK_ACTOR_TOKEN_{index:02d}",
+            "actor_id": f"{index:08d}-1111-4111-8111-{index:012d}",
+            "can_publish_credential_health": False,
+        }
+        for index in range(1, 6)
+    )
+    principal_rows.append(
+        {
+            "token_env": "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN",
+            "actor_id": "teams-private-bridge",
+            "can_publish_credential_health": False,
+        }
+    )
+    policy = {"actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE"}
+    active_file = active_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    candidate_file = candidate_dir / stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_FILENAME
+    active_file.write_text(
+        json.dumps({"principals": principal_rows, "teams_private_conversations": policy}),
+        encoding="utf-8",
+    )
+    candidate_rows = copy.deepcopy(principal_rows)
+    candidate_rows[0]["can_publish_credential_health"] = True
+    candidate_file.write_text(
+        json.dumps({"principals": candidate_rows, "teams_private_conversations": policy}),
+        encoding="utf-8",
+    )
+    alias = "navigator-principal"
+    active = {
+        "configs": {alias: {"file": str(active_file)}},
+        "services": {
+            "navigator-persistence": {
+                "configs": [
+                    {
+                        "source": alias,
+                        "target": stage_transition.NAVIGATOR_PRINCIPAL_CONFIG_TARGET,
+                    }
+                ]
+            },
+            "navigator": {"configs": []},
+            "directory-operator": {
+                "environment": {"CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": owner}
+            },
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate["configs"][alias]["file"] = str(candidate_file)
+
+    stage_transition._validate_office_graph_owner_health_principal_delta(
+        active_config_dir=active_dir,
+        candidate_config_dir=candidate_dir,
+        active=active,
+        candidate=candidate,
+    )
+
+    candidate_rows[1]["can_publish_credential_health"] = True
+    candidate_file.write_text(
+        json.dumps({"principals": candidate_rows, "teams_private_conversations": policy}),
+        encoding="utf-8",
+    )
+    with pytest.raises(stage_transition.StageTransitionError, match="beyond owner health"):
+        stage_transition._validate_office_graph_owner_health_principal_delta(
+            active_config_dir=active_dir,
+            candidate_config_dir=candidate_dir,
+            active=active,
+            candidate=candidate,
+        )
+
+
+def test_office_graph_exchange_delta_allows_only_private_subject_projection() -> None:
+    active = {
+        "connectorHost": {"teamsMessages": {"connectionRef": "teams-connection"}},
+        "accountCenter": {},
+        "hostSecretRefs": {},
+    }
+    candidate = copy.deepcopy(active)
+    candidate["accountCenter"] = {
+        "callbackCallerId": "microsoft-entra-callback",
+        "callbackSigningKeyRef": "account-center/caller-hmac-keys/microsoft-graph-callback",
+    }
+    candidate["hostSecretRefs"] = {
+        "account-center/caller-hmac-keys/microsoft-graph-callback": (
+            "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY"
+        )
+    }
+    candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = [
+        "11111111-1111-4111-8111-111111111111",
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "55555555-5555-4555-8555-555555555555",
+    ]
+
+    stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+    candidate["connectorHost"]["teamsMessages"]["personalActorSubjects"] = [
+        "11111111-1111-4111-8111-111111111111"
+    ]
+    with pytest.raises(stage_transition.StageTransitionError, match="five pilot actor subjects"):
+        stage_transition._validate_office_graph_exchange_config_delta(active, candidate)
+
+
+def test_office_graph_account_center_only_appends_graph_lease_role() -> None:
+    callback_ref = "account-center/caller-hmac-keys/microsoft-graph-callback"
+    provider_ref = "account-center/caller-hmac-keys/microsoft-graph-provider"
+    client_ref = "microsoft-graph/client-secret"
+    active = {
+        "exchange_caller_id": "exchange-service",
+        "caller_key_refs": {"exchange-service": "account/signing"},
+        "hostSecretRefs": {"account/signing": "CYRENE_ACCOUNT_CENTER_EXCHANGE_HMAC_KEY"},
+        "method_callers": {
+            "redeem_provider_credential_lease": [
+                "github-issues-service",
+                "huggingface-provider",
+            ]
+        },
+    }
+    candidate = copy.deepcopy(active)
+    candidate.update(
+        {
+            "microsoft_graph_client_id": "11111111-1111-4111-8111-111111111111",
+            "microsoft_graph_client_secret_ref": client_ref,
+            "microsoft_graph_callback_uri": "http://localhost:52191/oauth/callback",
+            "microsoft_graph_callback_caller_id": "microsoft-entra-callback",
+            "microsoft_graph_provider_caller_id": "microsoft-graph-provider",
+        }
+    )
+    candidate["caller_key_refs"].update(
+        {
+            "microsoft-entra-callback": callback_ref,
+            "microsoft-graph-provider": provider_ref,
+        }
+    )
+    candidate["hostSecretRefs"].update(
+        {
+            callback_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY",
+            provider_ref: "CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY",
+            client_ref: "CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET",
+        }
+    )
+    candidate["method_callers"].update(
+        {
+            "begin_microsoft_graph_link": ["exchange-service"],
+            "complete_microsoft_graph_link": ["microsoft-entra-callback"],
+            "begin_microsoft_graph_scope_upgrade": ["exchange-service"],
+            "complete_microsoft_graph_scope_upgrade": ["microsoft-entra-callback"],
+            "update_microsoft_graph_v2_scope": ["exchange-service"],
+            "list_provider_profiles": ["exchange-service", "microsoft-graph-provider"],
+            "redeem_provider_credential_lease": [
+                "github-issues-service",
+                "huggingface-provider",
+                "microsoft-graph-provider",
+            ],
+        }
+    )
+
+    stage_transition._validate_office_graph_account_center_config_delta(active, candidate)
+
+    candidate["method_callers"]["redeem_provider_credential_lease"] = [
+        "github-issues-service",
+        "huggingface-provider",
+        "microsoft-entra-callback",
+        "microsoft-graph-provider",
+    ]
+    with pytest.raises(stage_transition.StageTransitionError, match="method callers"):
+        stage_transition._validate_office_graph_account_center_config_delta(active, candidate)
+
+
+def test_exchange_graph_readiness_uses_unix_expiry_metadata() -> None:
+    profile = {
+        "profileRef": "opaque-profile",
+        "profileAlias": "microsoft-graph-office",
+        "providerId": "microsoft_graph",
+        "authStatus": "healthy",
+        "accessMode": "actor_owned",
+        "targetScope": {"schemaVersion": 2},
+        "authMode": "delegated_oauth",
+        "credentialRevision": 1,
+        "externalSubject": "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
+        "scopeSchemaVersion": 2,
+        "enabledFeatures": ["planner_read"],
+        "requiredOAuthScopes": ["Tasks.Read"],
+        "targetRefCount": 1,
+        "credentialExpiresAt": 1_800_000_000,
+        "refreshExpiresAt": None,
+        "reauthRequired": False,
+        "reauthReasonCode": None,
+    }
+    connection = {
+        "connectionRef": "opaque-connection",
+        "providerId": "microsoft_graph",
+        "profileRef": "opaque-profile",
+        "profileAlias": "microsoft-graph-office",
+        "accessMode": "actor_owned",
+        "readOnly": True,
+        "targetAlias": None,
+    }
+    snapshot = {"profiles": [profile], "connections": [connection]}
+
+    stage_transition._assert_exchange_readiness_safe_shape(snapshot)
+
+    profile["credentialExpiresAt"] = "2027-01-15T00:00:00Z"
+    with pytest.raises(stage_transition.StageTransitionError, match="profile metadata is malformed"):
+        stage_transition._assert_exchange_readiness_safe_shape(snapshot)
+
+
 def _full_github_image_update(
     tmp_path: Path,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -780,8 +1196,6 @@ def _full_github_image_update(
     target = "github-issues"
     target_lock_service = runtime_update.LOCK_SERVICE_FOR_TARGET[target]
     active_lock = copy.deepcopy(active_lock)
-    target_row = next(row for row in active_lock["images"] if row["service"] == target)
-    target_row["service"] = target_lock_service
 
     candidate = copy.deepcopy(active)
     candidate_lock = copy.deepcopy(active_lock)
@@ -821,13 +1235,14 @@ def _active_memory_update(
 def test_image_update_targets_exactly_one_service_and_keeps_existing_phase(
     target: str,
     phase: str,
+    tmp_path: Path,
 ) -> None:
     """Update one built image while preserving every service/configuration in the phase.
 
     中文：单目标镜像更新保留现有拓扑、配置与其余镜像。
     """
 
-    active, candidate, active_lock, candidate_lock = _active_image_update(target)
+    active, candidate, active_lock, candidate_lock = _active_image_update(target, tmp_path)
 
     targets, images = stage_transition._validate_phase_topology(
         phase=phase,
@@ -867,7 +1282,7 @@ def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventor
     del candidate["services"]["computer-runtime"]
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="issued Cloud Management image updates require the exact 14-service runtime topology",
+        match="exact 14-service topology or supported Graph/ADO extension",
     ):
         stage_transition._validate_phase_topology(
             phase="issued-connector-activation",
@@ -919,7 +1334,7 @@ def test_issued_github_image_update_preserves_exact_fourteen_service_inventory(
     del candidate["services"]["computer-runtime"]
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="issued GitHub Issues image updates require the exact 14-service runtime topology",
+        match="exact 14-service topology or supported Graph/ADO extension",
     ):
         stage_transition._validate_phase_topology(
             phase="issued-connector-activation",
@@ -2431,10 +2846,10 @@ def test_cloud_candidate_render_keeps_exchange_runner_disabled(
         stage_transition._candidate_configs(plan, ["docker"])
 
 
-def test_image_update_rejects_config_and_non_target_image_changes() -> None:
+def test_image_update_rejects_config_and_non_target_image_changes(tmp_path: Path) -> None:
     """Keep image-update plans closed to one image reference and ID change."""
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate["services"]["exchange"]["environment"]["NEW_ROLE"] = "unexpected"
     with pytest.raises(
         stage_transition.StageTransitionError, match="only its selected service image"
@@ -2448,7 +2863,7 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate["services"]["navigator"]["image"] = "navigator:unexpected"
     candidate_lock["images"] = [
         {**row, "image": "navigator:unexpected", "imageId": _image_id(52)}
@@ -2457,7 +2872,7 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
         for row in candidate_lock["images"]
     ]
     with pytest.raises(
-        stage_transition.StageTransitionError, match="only its selected service image"
+        stage_transition.StageTransitionError, match="only the selected built service"
     ):
         stage_transition._validate_phase_topology(
             phase="issued-connector-activation",
@@ -2468,7 +2883,7 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate_lock["images"] = [
         {**row, "imageId": _image_id(52)} if row["service"] == "dsh-executor" else row
         for row in candidate_lock["images"]
@@ -2485,7 +2900,7 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate_lock["externalImages"]["unexpected"] = {"imageId": _image_id(53)}
     with pytest.raises(
         stage_transition.StageTransitionError, match="only the selected built service"
@@ -2499,7 +2914,7 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate["services"]["unplanned-worker"] = _service("worker:v1")
     with pytest.raises(
         stage_transition.StageTransitionError, match="exact active service inventory"
@@ -2514,10 +2929,10 @@ def test_image_update_rejects_config_and_non_target_image_changes() -> None:
         )
 
 
-def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
+def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> None:
     """Require one real Exchange/Navigator image change and reject other targets."""
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     candidate["services"]["exchange"]["image"] = active["services"]["exchange"]["image"]
     candidate_lock["images"] = copy.deepcopy(active_lock["images"])
     with pytest.raises(stage_transition.StageTransitionError, match="distinct target reference"):
@@ -2530,7 +2945,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("exchange")
+    active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="must be Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence",
@@ -2544,7 +2959,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("cloud-management-phase2")
+    active, candidate, active_lock, candidate_lock = _active_image_update("cloud-management-phase2", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="phase must be provider-bootstrap or issued-connector-activation",
@@ -2558,7 +2973,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("navigator-persistence")
+    active, candidate, active_lock, candidate_lock = _active_image_update("navigator-persistence", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="Persistence image updates require issued-connector-activation",
@@ -2572,7 +2987,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets() -> None:
             candidate_lock=candidate_lock,
         )
 
-    active, candidate, active_lock, candidate_lock = _active_image_update("huggingface")
+    active, candidate, active_lock, candidate_lock = _active_image_update("huggingface", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
         match="Hugging Face image updates require issued-connector-activation",
@@ -2615,7 +3030,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         for action in plan_parser._actions
         if "--memory-update-target" in action.option_strings
     )
-    assert memory_target_action.choices == sorted(stage_transition.RUNTIME_SERVICE_SET)
+    assert memory_target_action.choices == sorted(stage_transition.MEMORY_UPDATE_TARGETS)
     listener_action = next(
         action for action in plan_parser._actions if "--listener-repair" in action.option_strings
     )
@@ -4234,15 +4649,13 @@ def test_runtime_selection_v2_pins_static_config_but_not_live_profile_contents(
         )
 
 
-def test_activation_is_config_only_and_keeps_every_immutable_image() -> None:
+def test_activation_is_config_only_and_keeps_every_immutable_image(tmp_path: Path) -> None:
     """Issued connector activation cannot silently rebuild or upgrade a service image."""
 
-    _active, candidate, _active_lock, candidate_lock = _active_and_bootstrap()
-    active = {
-        **candidate,
-        "services": {name: dict(row) for name, row in candidate["services"].items()},
-    }
+    active, _unused_candidate, candidate_lock, _unused_lock = _listener_repair_pair(tmp_path)
+    candidate = copy.deepcopy(active)
     active["services"]["navigator"]["environment"] = {}
+    candidate_lock = copy.deepcopy(candidate_lock)
     targets, _images = stage_transition._validate_phase_topology(
         phase="issued-connector-activation",
         active=active,
@@ -4253,7 +4666,11 @@ def test_activation_is_config_only_and_keeps_every_immutable_image() -> None:
     assert "navigator" in targets
 
     changed_lock = copy.deepcopy(candidate_lock)
-    cloud_row = next(row for row in changed_lock["images"] if row["service"] == "cloud-management")
+    cloud_row = next(
+        row
+        for row in changed_lock["images"]
+        if row["service"] == runtime_update.LOCK_SERVICE_FOR_TARGET["cloud-management-phase2"]
+    )
     cloud_row["imageId"] = _image_id(42)
     with pytest.raises(
         stage_transition.StageTransitionError, match="keep every image ID unchanged"

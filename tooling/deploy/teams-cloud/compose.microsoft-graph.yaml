@@ -1,0 +1,106 @@
+# Microsoft Graph only. Azure DevOps remains a separately selected deployment overlay.
+# 中文：仅添加 Microsoft Graph；Azure DevOps 由独立 overlay 选择，默认关闭。
+services:
+  cloud-management-phase2:
+    # Reallocate 128 MiB to the Graph process while keeping the existing VM budget fixed.
+    # 中文：仅把现有 Cloud 服务上限从 384 MiB 调至 256 MiB，释放 128 MiB 给 Graph。
+    mem_limit: 256m
+    memswap_limit: 256m
+
+  account-center:
+    environment:
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_ACCOUNT_CENTER_CONFIGURATION_GRAPH_JSON:?Graph OAuth host profile is required}
+      CYRENE_SECRET_FILE_MAP: CYRENE_ACCOUNT_CENTER_ENCRYPTION_KEY=/run/secrets/account-center-encryption-key,CYRENE_ACCOUNT_CENTER_EXCHANGE_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_PROVIDER_HMAC_KEY=/run/secrets/account-center-github-provider-hmac-key,CYRENE_ACCOUNT_CENTER_HF_PROVIDER_HMAC_KEY=/run/secrets/account-center-hf-provider-hmac-key,CYRENE_ACCOUNT_CENTER_GITHUB_APP_PRIVATE_KEY=/run/secrets/account-center-github-app-private-key,CYRENE_ACCOUNT_CENTER_GRAPH_PROVIDER_HMAC_KEY=/run/secrets/account-center-graph-provider-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY=/run/secrets/account-center-microsoft-graph-callback-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CLIENT_SECRET=/run/secrets/account-center-microsoft-graph-client-secret
+    secrets:
+      - account-center-graph-provider-hmac-key
+      - account-center-microsoft-graph-callback-hmac-key
+      - account-center-microsoft-graph-client-secret
+    networks:
+      - graph-account-center-private
+
+  exchange:
+    environment:
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_ACCOUNT_CONTEXT_HMAC_KEY=/run/secrets/account-center-exchange-hmac-key,EXCHANGE_HF_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-hf-auth-context-hmac-key,EXCHANGE_CLOUD_AUTH_CONTEXT_HMAC_KEY=/run/secrets/cloud-management-exchange-hmac-key,EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-graph-auth-context-hmac-key,CYRENE_ACCOUNT_CENTER_MICROSOFT_GRAPH_CALLBACK_HMAC_KEY=/run/secrets/account-center-microsoft-graph-callback-hmac-key
+    secrets:
+      - exchange-graph-auth-context-hmac-key
+      - account-center-microsoft-graph-callback-hmac-key
+    networks:
+      - graph-exchange-private
+    depends_on:
+      microsoft-graph:
+        condition: service_healthy
+
+  microsoft-graph:
+    command: [--entrypoint, microsoft_graph_provider.plugin:MicrosoftGraphProvider, --capability, tool.provider.v1, --interface-version, "1", --listen, "0.0.0.0:7443", --tls-cert-file, /run/secrets/microsoft-graph-server-cert, --tls-key-file, /run/secrets/microsoft-graph-server-key, --tls-client-ca-file, /run/secrets/microsoft-graph-client-ca]
+    image: ${CYRENE_IMAGE_MICROSOFT_GRAPH:?build and lock the exact ARM64 image before activation}
+    pull_policy: never
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m"]
+    environment:
+      CYRENE_CAPABILITY_BINDING_ID: ${CYRENE_MICROSOFT_GRAPH_BINDING_ID:?host binding is required}
+      CYRENE_CAPABILITY_CONFIGURATION_JSON: ${CYRENE_MICROSOFT_GRAPH_CONFIGURATION_JSON:?exact host profile is required}
+      CYRENE_SECRET_FILE_MAP: EXCHANGE_GRAPH_AUTH_CONTEXT_HMAC_KEY=/run/secrets/exchange-graph-auth-context-hmac-key,GRAPH_ACCOUNT_CENTER_PROVIDER_HMAC_KEY=/run/secrets/account-center-graph-provider-hmac-key,GRAPH_ACCOUNT_CENTER_ROOT_CERTIFICATE=/run/secrets/exchange-plugin-root-ca,GRAPH_ACCOUNT_CENTER_CLIENT_CERTIFICATE=/run/secrets/microsoft-graph-account-center-client-cert,GRAPH_ACCOUNT_CENTER_CLIENT_KEY=/run/secrets/microsoft-graph-account-center-client-key
+    secrets:
+      - exchange-graph-auth-context-hmac-key
+      - account-center-graph-provider-hmac-key
+      - exchange-plugin-root-ca
+      - source: exchange-plugin-client-ca
+        target: microsoft-graph-client-ca
+      - microsoft-graph-server-cert
+      - microsoft-graph-server-key
+      - microsoft-graph-health-client-cert
+      - microsoft-graph-health-client-key
+      - microsoft-graph-account-center-client-cert
+      - microsoft-graph-account-center-client-key
+    expose: ["7443"]
+    networks:
+      graph-exchange-private:
+        aliases: [microsoft-graph]
+      graph-account-center-private: {}
+      graph-egress: {}
+    depends_on:
+      account-center:
+        condition: service_healthy
+    mem_limit: 192m
+    memswap_limit: 192m
+    cpus: "0.05"
+    pids_limit: 96
+    healthcheck:
+      test: [CMD, python, /usr/local/bin/cyrene-plugin-grpc-health, --target, microsoft-graph:7443, --plugin-id, cyrene.providers.microsoft-graph, --server-ca, /run/secrets/exchange-plugin-root-ca, --client-cert, /run/secrets/microsoft-graph-health-client-cert, --client-key, /run/secrets/microsoft-graph-health-client-key]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+networks:
+  graph-exchange-private: {internal: true}
+  graph-account-center-private: {internal: true}
+  graph-egress: {}
+
+secrets:
+  account-center-graph-provider-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/account-center-graph-provider-hmac-key
+  account-center-microsoft-graph-client-secret:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/account-center-microsoft-graph-client-secret
+  account-center-microsoft-graph-callback-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/account-center-microsoft-graph-callback-hmac-key
+  exchange-graph-auth-context-hmac-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/exchange-graph-auth-context-hmac-key
+  microsoft-graph-server-cert:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-server-cert
+  microsoft-graph-server-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-server-key
+  microsoft-graph-health-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-health-client-cert
+  microsoft-graph-health-client-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-health-client-key
+  microsoft-graph-account-center-client-cert:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-account-center-client-cert
+  microsoft-graph-account-center-client-key:
+    file: ${CYRENE_SECRETS_DIR:?private secrets directory is required}/microsoft-graph-account-center-client-key

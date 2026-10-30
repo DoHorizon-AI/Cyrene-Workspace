@@ -1,0 +1,16 @@
+# Temporary loopback bridge for the owner-only OAuth setup process inside Exchange.
+# 中文：仅在 Graph provider bootstrap 阶段启用；授权完成后从 selector 移除。
+services:
+  exchange:
+    ports:
+      - target: 52191
+        published: "52191"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: ${CYRENE_OFFICE_OPERATOR_CONFIG_FILE:?provide the private owner-only Office setup config}
+        target: /run/config/office-operator.json
+        read_only: true
+        bind:
+          create_host_path: false
