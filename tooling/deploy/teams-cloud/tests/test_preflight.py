@@ -480,6 +480,59 @@ def test_real_docker_compose_render_keeps_private_bind_semantics(tmp_path: Path)
         )
 
 
+def test_microsoft_graph_healthcheck_timeout_matches_the_cold_rpc_probe_deadline() -> None:
+    """Allow the measured cold Graph probe to finish without changing resource or probe scope."""
+
+    compose_path = DEPLOYMENT_ROOT / "compose.microsoft-graph.yaml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    graph = compose["services"]["microsoft-graph"]
+    healthcheck = graph["healthcheck"]
+    expected_probe = [
+        "CMD",
+        "python",
+        "/usr/local/bin/cyrene-plugin-grpc-health",
+        "--target",
+        "microsoft-graph:7443",
+        "--plugin-id",
+        "cyrene.providers.microsoft-graph",
+        "--server-ca",
+        "/run/secrets/exchange-plugin-root-ca",
+        "--client-cert",
+        "/run/secrets/microsoft-graph-health-client-cert",
+        "--client-key",
+        "/run/secrets/microsoft-graph-health-client-key",
+    ]
+    assert healthcheck == {
+        "test": expected_probe,
+        "interval": "15s",
+        "timeout": "30s",
+        "retries": 8,
+        "start_period": "45s",
+    }
+    assert graph["cpus"] == "0.05"
+    assert graph["mem_limit"] == "192m"
+    assert graph["memswap_limit"] == "192m"
+
+    dockerfile_lines = (
+        (DEPLOYMENT_ROOT / "Dockerfile.microsoft-graph").read_text(encoding="utf-8").splitlines()
+    )
+    start = next(
+        index for index, line in enumerate(dockerfile_lines) if line.startswith("HEALTHCHECK ")
+    )
+    block = []
+    for line in dockerfile_lines[start:]:
+        if not line.strip():
+            break
+        block.append(line.strip().rstrip("\\").strip())
+    expected_docker_healthcheck = " ".join(
+        [
+            "HEALTHCHECK --interval=15s --timeout=30s --start-period=45s --retries=5",
+            *expected_probe,
+        ]
+    )
+    assert " ".join(block) == expected_docker_healthcheck
+
+
 def test_real_graph_and_office_oauth_overlay_render_preserves_secrets_and_loopback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
