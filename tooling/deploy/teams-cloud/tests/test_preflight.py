@@ -40,9 +40,31 @@ UUID = "00000000-0000-4000-8000-000000000001"
 UUID_2 = "00000000-0000-4000-8000-000000000002"
 
 
+class _ComposeOverrideList(list[Any]):
+    """Keep the Compose `!override` merge marker for static fixture rendering."""
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """Load Compose's explicit list-replacement tag in focused source tests."""
+
+
+def _load_compose_override(path: Path) -> Any:
+    """Load one Compose document while retaining explicit list replacement."""
+
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader)
+
+
+_ComposeLoader.add_constructor(
+    "!override",
+    lambda loader, node: _ComposeOverrideList(loader.construct_sequence(node, deep=True)),
+)
+
+
 def _merge_compose_fixture(base: Any, override: Any) -> Any:
     """Merge the maps and overlay lists used by the selected Teams Compose stack."""
 
+    if isinstance(override, _ComposeOverrideList):
+        return copy.deepcopy(list(override))
     if isinstance(base, dict) and isinstance(override, dict):
         result = copy.deepcopy(base)
         for key, value in override.items():
@@ -1922,10 +1944,200 @@ def test_codebuddy_acp_model_profile_is_native_and_closed() -> None:
         with pytest.raises(preflight.PreflightError, match=error):
             preflight._validate_model_runtime_config(invalid)
 
-    with pytest.raises(preflight.PreflightError, match="backend must be dsh or codebuddy-acp"):
+    with pytest.raises(
+        preflight.PreflightError,
+        match="backend must be dsh, codebuddy-acp, or antigravity-acp",
+    ):
         preflight._validate_model_runtime_config(
             {"CYRENE_HARNESS_EXECUTION_BACKEND": "antigravity"}
         )
+
+
+def test_antigravity_acp_model_profile_is_native_and_closed() -> None:
+    """Accept only the fixed standalone ACP command and an optional advertised model ID."""
+
+    environment = {
+        "CYRENE_HARNESS_EXECUTION_BACKEND": "antigravity-acp",
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND": "/usr/local/bin/agy_acp_server.par",
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_PROFILE": "/home/navigator/.config/antigravity-acp",
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL": "",
+        "CYRENE_HARNESS_MODEL_SOURCE": "",
+        "CYRENE_HARNESS_MODEL": "",
+        "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS": "2",
+        "CYRENE_WORKFLOWS_ENABLED": "false",
+    }
+    preflight._validate_model_runtime_config(environment)
+
+    environment["CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL"] = "native-model-2026"
+    preflight._validate_model_runtime_config(environment)
+
+    invalid_profiles = [
+        (
+            "CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND",
+            "/usr/local/bin/agy_acp_server.par --uid=",
+            "exactly the pinned",
+        ),
+        (
+            "CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND",
+            "agy_acp_server.par",
+            "exactly the pinned",
+        ),
+        (
+            "CYRENE_HARNESS_ANTIGRAVITY_ACP_PROFILE",
+            "/home/navigator/.config/other-profile",
+            "fixed private mount path",
+        ),
+        (
+            "CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL",
+            "native model; run shell",
+            "native model ID",
+        ),
+        ("CYRENE_HARNESS_MODEL_SOURCE", "antigravity", "legacy Harness model source"),
+        ("CYRENE_HARNESS_MODEL", "native-model-2026", "legacy Harness model source"),
+        ("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS", "1", "two bounded"),
+        ("CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS", "3", "two bounded"),
+        ("CYRENE_WORKFLOWS_ENABLED", "true", "remain disabled"),
+        (
+            "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED",
+            "false",
+            "CodeBuddy ACP or fallback",
+        ),
+    ]
+    for key, value, error in invalid_profiles:
+        invalid = dict(environment)
+        invalid[key] = value
+        with pytest.raises(preflight.PreflightError, match=error):
+            preflight._validate_model_runtime_config(invalid)
+
+
+def test_antigravity_acp_requires_the_locked_image_profile_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject ordinary CodeBuddy images when the native Antigravity overlay is selected."""
+
+    image = "cyrene/dsh-executor:antigravity-acp-20261031"
+    image_id = "sha256:" + "a" * 64
+    image_lock = {
+        "images": [
+            {"service": "dsh-executor", "image": image, "imageId": image_id},
+        ]
+    }
+    config = {"services": {"navigator": {"image": image}}}
+    labels = dict(preflight.ANTIGRAVITY_ACP_IMAGE_LABELS)
+    inspected = [{"Id": image_id, "Config": {"Labels": labels}}]
+    calls: list[list[str]] = []
+
+    def inspect(argv: list[str], *, capture: bool = True) -> str:
+        calls.append(argv)
+        assert capture is True
+        return json.dumps(inspected)
+
+    monkeypatch.setattr(preflight, "_run", inspect)
+    preflight._validate_antigravity_acp_image_profile(config, image_lock, ["docker"])
+    assert calls == [["docker", "image", "inspect", image]]
+
+    labels["com.cyrene.navigator.runtime-profile"] = "codebuddy-acp"
+    with pytest.raises(preflight.PreflightError, match="verified 1.4.5 profile labels"):
+        preflight._validate_antigravity_acp_image_profile(config, image_lock, ["docker"])
+
+    with pytest.raises(preflight.PreflightError, match="not the locked Navigator executor image"):
+        preflight._validate_antigravity_acp_image_profile(
+            config,
+            {
+                "images": [
+                    {"service": "dsh-executor", "image": "cyrene/ordinary", "imageId": image_id}
+                ]
+            },
+            ["docker"],
+        )
+
+
+def test_antigravity_acp_compose_profile_and_owner_directory_are_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replace the legacy CodeBuddy bind with a fixed Google profile and preserve task state."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text(encoding="utf-8"))
+    profile = _load_compose_override(DEPLOYMENT_ROOT / "compose.antigravity-acp.yaml")
+    navigator_overlay = profile["services"]["navigator"]
+    assert isinstance(navigator_overlay["volumes"], _ComposeOverrideList)
+    merged = _merge_compose_fixture(base, profile)
+    navigator = merged["services"]["navigator"]
+    environment = navigator["environment"]
+    environment["CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL"] = ""
+    volumes = navigator["volumes"]
+    volume_targets = {row["target"] for row in volumes}
+    assert volume_targets == {
+        "/home/navigator/.config/antigravity-acp",
+        "/var/lib/cyrene-navigator",
+        "/run/teams-authorization",
+    }
+    assert "/home/navigator/.codebuddy" not in volume_targets
+    assert environment["CYRENE_HARNESS_EXECUTION_BACKEND"] == "antigravity-acp"
+    assert environment["CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND"] == (
+        "/usr/local/bin/agy_acp_server.par"
+    )
+    assert environment["CODEBUDDY_CONFIG_DIR"] == "/var/empty/cyrene-codebuddy-disabled"
+    assert environment["CYRENE_WORKFLOWS_ENABLED"] == "false"
+
+    secrets_dir = tmp_path / "secrets"
+    config_dir = tmp_path / "config"
+    profile_dir = secrets_dir / "antigravity-acp"
+    profile_dir.mkdir(parents=True, mode=0o700)
+    config_dir.mkdir()
+    merged["volumes"]["navigator-sessions"] = {"name": "cyrene-teams-cloud_navigator-sessions"}
+    profile_mount = next(
+        row for row in volumes if row["target"] == "/home/navigator/.config/antigravity-acp"
+    )
+    profile_mount["source"] = str(profile_dir)
+    actor_mount = next(row for row in volumes if row["target"] == "/run/teams-authorization")
+    actor_mount["source"] = str(config_dir)
+    preflight._validate_antigravity_acp_boundary(
+        merged,
+        secrets_dir=secrets_dir,
+        config_dir=config_dir,
+    )
+
+    actual_lstat = Path.lstat
+    owner_mode = {"value": 0o700}
+
+    def owner_profile_lstat(path: Path) -> os.stat_result:
+        if path == profile_dir:
+            return os.stat_result(
+                (stat.S_IFDIR | owner_mode["value"], 1, 0, 2, 10001, 10001, 0, 0, 0, 0)
+            )
+        return actual_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", owner_profile_lstat)
+    preflight._validate_antigravity_acp_profile_mount(
+        navigator,
+        secrets_dir=secrets_dir,
+    )
+    owner_mode["value"] = 0o755
+    with pytest.raises(preflight.PreflightError, match="owner-only"):
+        preflight._validate_antigravity_acp_profile_mount(
+            navigator,
+            secrets_dir=secrets_dir,
+        )
+
+    bad_volume = copy.deepcopy(volumes[0])
+    bad_volume["source"] = str(tmp_path / "personal-profile")
+    navigator["volumes"] = [bad_volume, *volumes[1:]]
+    with pytest.raises(preflight.PreflightError, match="private profile, session"):
+        preflight._validate_antigravity_acp_boundary(
+            merged,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+        )
+
+    environment["GOOGLE_API_KEY"] = "test-only-value"
+    with pytest.raises(preflight.PreflightError, match="credentials must remain") as error:
+        preflight._validate_antigravity_acp_boundary(
+            merged,
+            secrets_dir=secrets_dir,
+            config_dir=config_dir,
+        )
+    assert "test-only-value" not in str(error.value)
 
 
 def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() -> None:

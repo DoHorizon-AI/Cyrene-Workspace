@@ -1,0 +1,45 @@
+services:
+  navigator:
+    labels:
+      com.cyrene.runtime.profile: antigravity-acp
+      com.cyrene.navigator.primary-provider: antigravity-acp
+      com.cyrene.navigator.run-count-limit: none
+    environment:
+      CYRENE_HARNESS_EXECUTION_BACKEND: antigravity-acp
+      CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND: /usr/local/bin/agy_acp_server.par
+      CYRENE_HARNESS_ANTIGRAVITY_ACP_PROFILE: /home/navigator/.config/antigravity-acp
+      CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL: ${CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL:-}
+      CYRENE_HARNESS_MODEL_SOURCE: ""
+      CYRENE_HARNESS_MODEL: ""
+      CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "2"
+      CYRENE_WORKFLOWS_ENABLED: "false"
+      CYRENE_RESPONSIBILITY_TARGETS_FILE: /run/config/responsibility-targets.v1.json
+      CODEBUDDY_CONFIG_DIR: /var/empty/cyrene-codebuddy-disabled
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    volumes: !override
+      - type: bind
+        source: ${CYRENE_SECRETS_DIR:?provision the owner-only Antigravity ACP profile}/antigravity-acp
+        target: /home/navigator/.config/antigravity-acp
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: volume
+        source: navigator-sessions
+        target: /var/lib/cyrene-navigator
+      - type: bind
+        source: ${CYRENE_CONFIG_DIR:?provision the private config directory}
+        target: /run/teams-authorization
+        read_only: true
+    configs:
+      - source: responsibility-targets
+        target: /run/config/responsibility-targets.v1.json
+
+configs:
+  responsibility-targets:
+    file: ${CYRENE_RESPONSIBILITY_TARGETS_HOST_FILE:?provision the owner-only host responsibility target config}

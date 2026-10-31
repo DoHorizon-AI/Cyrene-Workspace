@@ -176,6 +176,16 @@ OFFICE_GRAPH_DEPLOYMENT_TOOL_FILES = frozenset(
         "config/observation-health-policy.v2.schema.json",
     }
 )
+ANTIGRAVITY_ACP_DEPLOYMENT_TOOL_FILES = frozenset(
+    {
+        "compose.antigravity-acp.yaml",
+        "Dockerfile.dsh-executor-antigravity-acp",
+        "config/antigravity-acp.env.schema.json",
+        "config/antigravity-acp.env.template",
+        "config/antigravity-acp-third-party-notice.md",
+        "config/build-plan.antigravity-acp.template.json",
+    }
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 RELEASE_ID_RE = re.compile(r"^teams-arm64-[0-9a-f]{12}-[0-9a-f]{12}$")
@@ -1757,6 +1767,14 @@ def verify_release_bundle(bundle_root: Path) -> dict[str, Any]:
     if tools_members & office_graph_markers:
         required_tool_members.update(
             f"{tools_prefix}/{name}" for name in OFFICE_GRAPH_DEPLOYMENT_TOOL_FILES
+        )
+    antigravity_acp_markers = {
+        f"{tools_prefix}/compose.antigravity-acp.yaml",
+        f"{tools_prefix}/config/build-plan.antigravity-acp.template.json",
+    }
+    if tools_members & antigravity_acp_markers:
+        required_tool_members.update(
+            f"{tools_prefix}/{name}" for name in ANTIGRAVITY_ACP_DEPLOYMENT_TOOL_FILES
         )
     missing_tool_members = required_tool_members - tools_members
     if missing_tool_members:

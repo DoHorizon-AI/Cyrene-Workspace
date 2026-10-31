@@ -1,0 +1,129 @@
+# syntax=docker/dockerfile:1.7
+# Opt-in standalone Google Antigravity ACP 1.4.5 image; CodeBuddy image remains separate.
+
+ARG NODE_BASE_IMAGE
+FROM ${NODE_BASE_IMAGE} AS agy-acp-binary
+
+ARG TARGETARCH
+
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "$TARGETARCH" in \
+      amd64) \
+        archive_url=https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-x86_64.zip; \
+        expected_sha256=923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b ;; \
+      arm64) \
+        archive_url=https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-arm64.zip; \
+        expected_sha256=7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056 ;; \
+      *) echo "unsupported Antigravity ACP target architecture: $TARGETARCH" >&2; exit 2 ;; \
+    esac; \
+    archive="/tmp/agy-acp-1.4.5-${TARGETARCH}.zip"; \
+    curl --fail --silent --show-error --location --retry 3 \
+      --connect-timeout 10 --max-time 600 \
+      "$archive_url" \
+      --output "$archive"; \
+    printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum --check --status; \
+    install -d -m 0755 /usr/local/bin; \
+    unzip -p "$archive" agy_acp_server.par > /tmp/agy_acp_server.par; \
+    unzip -p "$archive" localharness_external > /tmp/localharness_external; \
+    test -s /tmp/agy_acp_server.par; \
+    test -s /tmp/localharness_external; \
+    install -m 0555 /tmp/agy_acp_server.par /usr/local/bin/agy_acp_server.par; \
+    install -m 0555 /tmp/localharness_external /usr/local/bin/localharness_external; \
+    rm -f "$archive" /tmp/agy_acp_server.par /tmp/localharness_external
+
+FROM ${NODE_BASE_IMAGE} AS dsh-upstream
+
+ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
+ARG DSH_TAG=dsh-v0.2.0-rc.2
+ARG DSH_COMMIT=639ed015397290b3745d163aafe02ffee4aa3f84
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+RUN corepack enable && corepack prepare pnpm@11.7.0 --activate
+
+WORKDIR /app
+COPY Cyrene-Services/Cyrene-Navigator/harness/upstream.lock.json ./harness/upstream.lock.json
+COPY Cyrene-Services/Cyrene-Navigator/scripts/prepare-harness.mjs ./scripts/prepare-harness.mjs
+
+# Keep the pinned SDK build independent from frequently changing Navigator app sources.
+# 让固定上游 SDK 构建只依赖锁文件和准备脚本，避免应用改动击穿此缓存层。
+RUN git clone --depth=1 --branch "$DSH_TAG" "$DSH_REPOSITORY" /opt/dsh \
+    && test "$(git -C /opt/dsh rev-parse HEAD)" = "$DSH_COMMIT" \
+    && node /app/scripts/prepare-harness.mjs --root=/opt/dsh --install --build --link \
+    && rm -rf /opt/dsh/.git
+
+FROM dsh-upstream AS build
+
+COPY Cyrene-Services/Cyrene-Navigator/harness/ ./harness/
+COPY Cyrene-Services/Cyrene-Navigator/scripts/ ./scripts/
+COPY Cyrene-Services/Cyrene-Navigator/src/ ./src/
+# Restore the validated upstream package links after copying the application tree.
+# 复制应用源码后恢复上游已校验的依赖链接。
+COPY --from=dsh-upstream /app/harness/node_modules/ ./harness/node_modules/
+RUN node /opt/dsh/node_modules/typescript/bin/tsc -p /app/harness/tsconfig.json --pretty false
+
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/prepare_production_runtime.py /tmp/prepare-production-runtime.py
+WORKDIR /opt/dsh
+RUN python3 /tmp/prepare-production-runtime.py --upstream /opt/dsh --harness /app/harness \
+    && corepack pnpm --filter @cyrene/navigator-harness deploy --prod --legacy --ignore-scripts /opt/dsh/runtime \
+    && node /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-subprocess-local/scripts/ensure-spawn-helper.mjs \
+    && mkdir -p /opt/dsh/vendor/node_modules/@deepseek-ai \
+    && ln -sfn ../../cosmokit /opt/dsh/vendor/node_modules/@deepseek-ai/cosmokit \
+    && test -f /opt/dsh/runtime/dist/serve.js \
+    && test -f /opt/dsh/runtime/dist/workflows/runtime.js \
+    && test -e /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-subprocess-local \
+    && test -e /opt/dsh/runtime/node_modules/@deepseek-ai/dsh-schedule
+
+FROM ${NODE_BASE_IMAGE} AS runtime
+
+LABEL com.cyrene.navigator.runtime-profile="antigravity-acp" \
+    com.cyrene.navigator.antigravity-acp.version="1.4.5" \
+    com.cyrene.navigator.antigravity-acp.archive.sha256.amd64="923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b" \
+    com.cyrene.navigator.antigravity-acp.archive.sha256.arm64="7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056"
+
+ENV NODE_ENV=production \
+    PORT=8080 \
+    HOST=0.0.0.0 \
+    HOME=/home/navigator \
+    CYRENE_HARNESS_MODEL_SOURCE="" \
+    CYRENE_HARNESS_MODEL="" \
+    DISABLE_AUTOUPDATER=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 navigator \
+    && useradd --system --uid 10001 --gid navigator --create-home --home-dir /home/navigator --shell /usr/sbin/nologin navigator \
+    && install -d --owner=10001 --group=10001 --mode=0700 \
+      /home/navigator/.config/antigravity-acp /app/plugins /app/workspace \
+    && install -d --mode=0755 /var/empty/cyrene-codebuddy-disabled
+
+WORKDIR /app
+COPY --from=agy-acp-binary /usr/local/bin/agy_acp_server.par /usr/local/bin/agy_acp_server.par
+COPY --from=agy-acp-binary /usr/local/bin/localharness_external /usr/local/bin/localharness_external
+COPY --from=build --chown=10001:10001 /app/harness/package.json ./harness/package.json
+COPY --from=build --chown=10001:10001 /app/harness/cordis.patch.yml ./harness/cordis.patch.yml
+COPY --from=build --chown=10001:10001 /app/scripts/serve-executor.mjs ./scripts/serve-executor.mjs
+COPY --from=build --chown=10001:10001 /app/src/ ./src/
+COPY --from=build /opt/dsh/runtime/node_modules /opt/dsh/runtime/node_modules
+COPY --from=build /opt/dsh/vendor/cosmokit /opt/dsh/vendor/cosmokit
+COPY --from=build /opt/dsh/vendor/schemastery /opt/dsh/vendor/schemastery
+COPY --from=build /opt/dsh/runtime/dist ./harness/dist
+COPY --from=build /opt/dsh/runtime/presets ./harness/presets
+COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
+RUN mkdir -p /opt/dsh/vendor/node_modules/@deepseek-ai \
+    && ln -sfn ../../cosmokit /opt/dsh/vendor/node_modules/@deepseek-ai/cosmokit \
+    && ln -s /opt/dsh/runtime/node_modules /app/node_modules \
+    && chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint \
+    && chmod 0555 /usr/local/bin/agy_acp_server.par /usr/local/bin/localharness_external
+
+USER 10001:10001
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:8080/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/usr/local/bin/cyrene-secret-env-entrypoint", "node", "/app/scripts/serve-executor.mjs"]
+CMD ["--port", "8080", "--host", "0.0.0.0", "--plugins-dir", "/app/plugins"]
