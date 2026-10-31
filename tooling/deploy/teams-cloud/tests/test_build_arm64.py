@@ -433,8 +433,8 @@ def test_dsh_upstream_build_cache_isolated_from_navigator_app_sources() -> None:
     assert plan["sources"]["dsh"]["commit"] == dsh_commit
 
 
-def test_codebuddy_release_dockerfile_needs_no_private_antigravity_binary() -> None:
-    """Keep the automatic DSH release build on the pinned CodeBuddy ACP path only."""
+def test_codebuddy_release_dockerfile_bundles_only_official_antigravity_assets() -> None:
+    """Keep the CodeBuddy runtime active while bundling the verified Google ACP pair."""
 
     deployment_root = Path(__file__).resolve().parents[1]
     dockerfile = (deployment_root / "Dockerfile.dsh-executor-codebuddy").read_text(encoding="utf-8")
@@ -446,7 +446,26 @@ def test_codebuddy_release_dockerfile_needs_no_private_antigravity_binary() -> N
     assert "@tencent-ai/codebuddy-code@2.163.0" in dockerfile
     assert 'CYRENE_HARNESS_MODEL_SOURCE=""' in dockerfile
     assert "CYRENE_HARNESS_MODEL=glm-5.3-flash" in dockerfile
-    assert "antigravity" not in dockerfile.lower()
+    assert "FROM ${NODE_BASE_IMAGE} AS agy-acp-binary" in dockerfile
+    assert 'case "$TARGETARCH"' in dockerfile
+    assert "sha256sum --check --status" in dockerfile
+    expected_archives = {
+        "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-x86_64.zip": (
+            "923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b"
+        ),
+        "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-arm64.zip": (
+            "7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056"
+        ),
+    }
+    for archive_url, archive_sha256 in expected_archives.items():
+        assert archive_url in dockerfile
+        assert archive_sha256 in dockerfile
+    assert 'unzip -p "$archive" agy_acp_server.par' in dockerfile
+    assert 'unzip -p "$archive" localharness_external' in dockerfile
+    assert "COPY --from=agy-acp-binary --chmod=0555" in dockerfile
+    assert "/home/navigator/.codebuddy" in dockerfile
+    assert "/home/navigator/.config/antigravity-acp" not in dockerfile
+    assert "CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND" not in dockerfile
     assert "ASSET_ANTIGRAVITY_CLI_SHA256" not in dockerfile
     assert "runtime-artifacts/" not in dockerfile
     assert dsh_image["buildArgs"]["CODEBUDDY_PACKAGE"] == "@tencent-ai/codebuddy-code@2.163.0"
