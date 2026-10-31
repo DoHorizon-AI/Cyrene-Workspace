@@ -9518,12 +9518,17 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_changing_nav_inputs(
     target: str, tmp_path: Path
 ) -> None:
-    """Verify the live Graph delta without adding Graph to frozen Navigator inputs."""
+    """Verify the read-only live Graph delta without changing frozen Navigator inputs.
+
+    中文：复用现有 Graph profile/operation-map 只读验收，不写入 Navigator 冻结输入。
+    """
 
     snapshot, compose, _database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9629,10 +9634,18 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
         "microsoft_graph",
         "runpod",
     ]
+    assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
     assert receipt["connectionRefByProvider"]["microsoft_graph"] == (
         "77777777-7777-4777-8777-777777777777"
     )
-    assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
+    graph_binding = next(
+        row for row in snapshot["bindings"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_catalog = next(
+        row for row in snapshot["catalog"]["items"] if row["providerId"] == "microsoft_graph"
+    )
+    assert all(row["mutating"] is False for row in graph_binding["tools"])
+    assert all(row["readOnly"] is True for row in graph_catalog["tools"])
     assert receipt["bindingCount"] == len(frozen_bindings["bindings"]) + 1 == 16
     assert receipt["connectionCount"] == len(snapshot["connections"]) == 16
     assert receipt["profileCount"] == len(snapshot["profiles"]) == 7
@@ -9747,6 +9760,8 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 @pytest.mark.parametrize(
@@ -9864,6 +9879,8 @@ def test_graph_bootstrap_image_update_rejects_invalid_live_graph_delta(
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_rejects_graph_in_frozen_navigator_inputs(
@@ -9931,6 +9948,8 @@ def test_workspace_authority_graph_bootstrap_delta_does_not_apply_to_other_targe
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_readiness_requires_linked_profile(
@@ -9963,6 +9982,8 @@ def test_graph_bootstrap_image_readiness_requires_linked_profile(
     [
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_exchange_graph_bootstrap_live_graph_delta_is_not_allowed_in_issued_phase(

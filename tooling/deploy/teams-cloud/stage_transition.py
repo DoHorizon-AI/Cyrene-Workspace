@@ -83,6 +83,15 @@ OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS = frozenset(
         WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
     }
 )
+OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS = frozenset(
+    {
+        EXCHANGE_IMAGE_UPDATE_TARGET,
+        MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        NAVIGATOR_IMAGE_UPDATE_TARGET,
+        PERSISTENCE_IMAGE_UPDATE_TARGET,
+        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+    }
+)
 OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS = frozenset(
     {NAVIGATOR_IMAGE_UPDATE_TARGET, PERSISTENCE_IMAGE_UPDATE_TARGET}
 )
@@ -10445,21 +10454,16 @@ def _verify_exchange_readiness_snapshot(
     candidate_catalog = _sorted_exchange_catalog(catalog_document)
     graph_bootstrap_image_update = (
         not listener_repair
-        and image_update_target
-        in {
-            WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
-            EXCHANGE_IMAGE_UPDATE_TARGET,
-            MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
-        }
+        and image_update_target in OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS
         and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
     )
-    graph_bootstrap_image_update_label = (
-        "Workspace Authority"
-        if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
-        else "Exchange"
-        if image_update_target == EXCHANGE_IMAGE_UPDATE_TARGET
-        else "Microsoft Graph"
-    )
+    graph_bootstrap_image_update_label = {
+        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET: "Workspace Authority",
+        EXCHANGE_IMAGE_UPDATE_TARGET: "Exchange",
+        MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET: "Microsoft Graph",
+        NAVIGATOR_IMAGE_UPDATE_TARGET: "Navigator",
+        PERSISTENCE_IMAGE_UPDATE_TARGET: "Persistence",
+    }.get(image_update_target, "selected")
     if listener_repair:
         _verify_listener_repair_connector_projection(
             snapshot=snapshot,
@@ -10554,11 +10558,7 @@ def _verify_exchange_readiness_snapshot(
 
     if not listener_repair and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
         provider_ids = {row["providerId"] for row in live_bindings}
-        if image_update_target not in {
-            WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
-            EXCHANGE_IMAGE_UPDATE_TARGET,
-            MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
-        } and (
+        if image_update_target not in OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS and (
             "microsoft_graph" in provider_ids
             or any(row.get("providerId") == "microsoft_graph" for row in snapshot["profiles"])
             or any(row.get("providerId") == "microsoft_graph" for row in snapshot["connections"])
@@ -10566,12 +10566,7 @@ def _verify_exchange_readiness_snapshot(
             raise StageTransitionError(
                 "Graph bootstrap must not claim an issued Office profile before OAuth completes"
             )
-        if image_update_target not in {
-            ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-            WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
-            EXCHANGE_IMAGE_UPDATE_TARGET,
-            MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
-        }:
+        if image_update_target not in OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS:
             return {
                 "schemaVersion": 1,
                 "status": "LIVE_VERIFIED",
@@ -11121,20 +11116,14 @@ def _verify_exchange_readiness_snapshot(
         ),
         **(
             {"connectionRefByProvider": dict(sorted(live_connection_refs.items()))}
-            if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
-            and phase in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
-            else {}
-        ),
-        **(
-            {"connectionRefByProvider": dict(sorted(live_connection_refs.items()))}
-            if image_update_target == EXCHANGE_IMAGE_UPDATE_TARGET
-            and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-            else {}
-        ),
-        **(
-            {"connectionRefByProvider": dict(sorted(live_connection_refs.items()))}
-            if image_update_target == MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
-            and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+            if (
+                image_update_target in OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS
+                and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+            )
+            or (
+                image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+                and phase in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+            )
             else {}
         ),
         **(
@@ -11423,18 +11412,11 @@ def _image_update_exchange_readiness_checkpoint(
         expected_profile_count = inventory["expectedProfileCount"]
         expected_connection_count = inventory["expectedConnectionCount"]
     elif (
-        (
-            target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
-            and plan.get("phase") in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
-        )
-        or (
-            target == EXCHANGE_IMAGE_UPDATE_TARGET
-            and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        )
-        or (
-            target == MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
-            and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        )
+        target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and plan.get("phase") in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+    ) or (
+        target in OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS
+        and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
     ):
         if not isinstance(candidate_compose, dict):
             raise StageTransitionError(
