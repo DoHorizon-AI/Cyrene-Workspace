@@ -1,7 +1,40 @@
 # syntax=docker/dockerfile:1.7
-# CodeBuddy ACP-only image without host-supplied executable assets.
+# CodeBuddy ACP image with a pinned Antigravity ACP capability kept dormant.
 
 ARG NODE_BASE_IMAGE
+
+FROM ${NODE_BASE_IMAGE} AS agy-acp-binary
+
+ARG TARGETARCH
+
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl unzip; \
+    rm -rf /var/lib/apt/lists/*; \
+    case "$TARGETARCH" in \
+      amd64) \
+        archive_url=https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-x86_64.zip; \
+        expected_sha256=923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b ;; \
+      arm64) \
+        archive_url=https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-arm64.zip; \
+        expected_sha256=7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056 ;; \
+      *) echo "unsupported Antigravity ACP target architecture: $TARGETARCH" >&2; exit 2 ;; \
+    esac; \
+    archive="/tmp/agy-acp-1.4.5-${TARGETARCH}.zip"; \
+    curl --fail --silent --show-error --location --retry 3 \
+      --connect-timeout 10 --max-time 600 \
+      "$archive_url" \
+      --output "$archive"; \
+    printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum --check --status; \
+    install -d -m 0755 /usr/local/bin; \
+    unzip -p "$archive" agy_acp_server.par > /tmp/agy_acp_server.par; \
+    unzip -p "$archive" localharness_external > /tmp/localharness_external; \
+    test -s /tmp/agy_acp_server.par; \
+    test -s /tmp/localharness_external; \
+    install -m 0555 /tmp/agy_acp_server.par /usr/local/bin/agy_acp_server.par; \
+    install -m 0555 /tmp/localharness_external /usr/local/bin/localharness_external; \
+    rm -f "$archive" /tmp/agy_acp_server.par /tmp/localharness_external
+
 FROM ${NODE_BASE_IMAGE} AS dsh-upstream
 
 ARG DSH_REPOSITORY=https://github.com/deepseek-ai/deepseek-harness.git
@@ -50,6 +83,11 @@ FROM ${NODE_BASE_IMAGE} AS runtime
 
 ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0
 
+LABEL com.cyrene.navigator.capability.codebuddy.version="2.163.0" \
+    com.cyrene.navigator.capability.antigravity-acp.version="1.4.5" \
+    com.cyrene.navigator.capability.antigravity-acp.archive.sha256.amd64="923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b" \
+    com.cyrene.navigator.capability.antigravity-acp.archive.sha256.arm64="7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056"
+
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
@@ -81,6 +119,8 @@ COPY --from=build /opt/dsh/vendor/cosmokit /opt/dsh/vendor/cosmokit
 COPY --from=build /opt/dsh/vendor/schemastery /opt/dsh/vendor/schemastery
 COPY --from=build /opt/dsh/runtime/dist ./harness/dist
 COPY --from=build /opt/dsh/runtime/presets ./harness/presets
+COPY --from=agy-acp-binary --chmod=0555 /usr/local/bin/agy_acp_server.par /usr/local/bin/agy_acp_server.par
+COPY --from=agy-acp-binary --chmod=0555 /usr/local/bin/localharness_external /usr/local/bin/localharness_external
 COPY Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
 RUN mkdir -p /opt/dsh/vendor/node_modules/@deepseek-ai \
     && ln -sfn ../../cosmokit /opt/dsh/vendor/node_modules/@deepseek-ai/cosmokit \

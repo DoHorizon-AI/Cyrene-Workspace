@@ -321,6 +321,12 @@ ANTIGRAVITY_ACP_IMAGE_LABELS = {
     "com.cyrene.navigator.antigravity-acp.archive.sha256.amd64": "923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b",
     "com.cyrene.navigator.antigravity-acp.archive.sha256.arm64": "7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056",
 }
+ANTIGRAVITY_ACP_STANDBY_IMAGE_LABELS = {
+    "com.cyrene.navigator.capability.codebuddy.version": "2.163.0",
+    "com.cyrene.navigator.capability.antigravity-acp.version": "1.4.5",
+    "com.cyrene.navigator.capability.antigravity-acp.archive.sha256.amd64": "923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b",
+    "com.cyrene.navigator.capability.antigravity-acp.archive.sha256.arm64": "7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056",
+}
 ANTIGRAVITY_ACP_PROVIDER_AUTH_ENVIRONMENT = frozenset(
     {
         "ANTIGRAVITY_API_KEY",
@@ -6526,6 +6532,64 @@ def _validate_antigravity_acp_image_profile(
         )
 
 
+def _validate_antigravity_acp_standby_capability(
+    image_lock: dict[str, Any],
+    docker_prefix: list[str],
+) -> dict[str, str]:
+    """Verify the combined CodeBuddy and Antigravity bundle without provider configuration.
+
+    中文：只核对锁定执行镜像的固定标签，不读取 Compose、profile 或 Provider 授权。
+    """
+
+    if (
+        image_lock.get("schemaVersion") != "cyrene-teams-cloud-image-lock-v1"
+        or image_lock.get("targetPlatform") != "linux/arm64"
+    ):
+        raise PreflightError("capability check requires a canonical ARM64 image lock")
+    image_rows = image_lock.get("images")
+    if not isinstance(image_rows, list):
+        raise PreflightError("capability image lock is malformed")
+    matching_rows = [
+        row for row in image_rows if isinstance(row, dict) and row.get("service") == "dsh-executor"
+    ]
+    if len(matching_rows) != 1:
+        raise PreflightError("capability image lock must contain exactly one dsh-executor image")
+    row = matching_rows[0]
+    image = row.get("image")
+    image_id = row.get("imageId")
+    if (
+        not isinstance(image, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", image) is None
+        or row.get("platform") != "linux/arm64"
+        or not isinstance(image_id, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_id) is None
+    ):
+        raise PreflightError("capability image lock has an invalid executor identity")
+    try:
+        inspected_rows = json.loads(_run([*docker_prefix, "image", "inspect", image]))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PreflightError("capability image metadata is invalid") from error
+    if not isinstance(inspected_rows, list) or len(inspected_rows) != 1:
+        raise PreflightError("capability image metadata is unavailable")
+    inspected = inspected_rows[0]
+    if not isinstance(inspected, dict) or inspected.get("Id") != image_id:
+        raise PreflightError("capability image differs from its locked image ID")
+    if inspected.get("Os") != "linux" or inspected.get("Architecture") not in {
+        "arm64",
+        "aarch64",
+    }:
+        raise PreflightError("capability image is not a native Linux ARM64 image")
+    image_config = inspected.get("Config")
+    labels = image_config.get("Labels", {}) if isinstance(image_config, dict) else None
+    if not isinstance(labels, dict) or any(
+        labels.get(name) != value for name, value in ANTIGRAVITY_ACP_STANDBY_IMAGE_LABELS.items()
+    ):
+        raise PreflightError(
+            "dsh-executor image metadata must declare both pinned runtime capabilities"
+        )
+    return {"image": image, "imageId": image_id}
+
+
 def _validate_codebuddy_acp_boundary(
     config: dict[str, Any],
     *,
@@ -8769,13 +8833,17 @@ def main() -> int:
             "stage3",
             "connector-auth-readonly",
         ),
-        required=True,
     )
-    parser.add_argument("--compose-file", type=Path, action="append", required=True)
-    parser.add_argument("--env-file", type=Path, action="append", required=True)
-    parser.add_argument("--image-lock", type=Path, required=True)
-    parser.add_argument("--secrets-dir", type=Path, required=True)
-    parser.add_argument("--config-dir", type=Path, required=True)
+    parser.add_argument("--compose-file", type=Path, action="append")
+    parser.add_argument("--env-file", type=Path, action="append")
+    parser.add_argument("--image-lock", type=Path)
+    parser.add_argument("--secrets-dir", type=Path)
+    parser.add_argument("--config-dir", type=Path)
+    parser.add_argument(
+        "--capability-only",
+        choices=("antigravity-acp",),
+        help="verify the locked combined CodeBuddy/Antigravity executor image without runtime or auth inputs",
+    )
     parser.add_argument("--github-hf-evidence", type=Path)
     parser.add_argument("--azure-gcp-ledger", type=Path)
     parser.add_argument("--azure-gcp-api-evidence", type=Path)
@@ -8806,6 +8874,85 @@ def main() -> int:
         help="allow only a verified project-owned 127.0.0.1:18443 listener in stage1/staging mode",
     )
     arguments = parser.parse_args()
+    if arguments.capability_only is not None:
+        if (
+            any(
+                value is not None
+                for value in (
+                    arguments.mode,
+                    arguments.compose_file,
+                    arguments.env_file,
+                    arguments.secrets_dir,
+                    arguments.config_dir,
+                    arguments.github_hf_evidence,
+                    arguments.azure_gcp_ledger,
+                    arguments.azure_gcp_api_evidence,
+                    arguments.runpod_ledger,
+                    arguments.runpod_api_evidence,
+                    arguments.connector_auth_phase,
+                    arguments.connector_auth_evidence,
+                    arguments.connector_auth_task_id,
+                    arguments.huggingface_seed_file,
+                    arguments.notification_anchor_file,
+                    arguments.notification_provenance_file,
+                    arguments.candidate_runpod_key_file,
+                )
+            )
+            or arguments.allow_owned_staging_ingress
+            or arguments.ingress_exposure != "public-cutover"
+        ):
+            parser.error("--capability-only cannot be combined with runtime or provider inputs")
+        if arguments.image_lock is None:
+            parser.error("--capability-only requires --image-lock")
+        try:
+            if arguments.image_lock.is_symlink():
+                raise PreflightError("capability image lock must not be a symlink")
+            image_lock = arguments.image_lock.resolve()
+            if (
+                not _private_artifact(image_lock)
+                or not image_lock.is_file()
+                or image_lock.stat().st_mode & 0o077
+            ):
+                raise PreflightError(
+                    "capability image lock must be a regular owner-only umbrella .artifacts file"
+                )
+            image_lock_data = json.loads(image_lock.read_text(encoding="utf-8"))
+            if not isinstance(image_lock_data, dict):
+                raise PreflightError("capability image lock must be a JSON object")
+            result = _validate_antigravity_acp_standby_capability(
+                image_lock_data,
+                arguments.docker_prefix,
+            )
+        except (OSError, json.JSONDecodeError, PreflightError, subprocess.SubprocessError) as error:
+            print(f"Executor capability check blocked: {error}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                {
+                    "state": "CAPABILITY_LABELS_VERIFIED",
+                    "targetPlatform": "linux/arm64",
+                    "capabilities": {
+                        "codebuddy": "2.163.0",
+                        "antigravity-acp": "1.4.5",
+                    },
+                    **result,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if (
+        arguments.mode is None
+        or not arguments.compose_file
+        or not arguments.env_file
+        or arguments.image_lock is None
+        or arguments.secrets_dir is None
+        or arguments.config_dir is None
+    ):
+        parser.error(
+            "full deployment preflight requires --mode, --compose-file, --env-file, "
+            "--image-lock, --secrets-dir, and --config-dir"
+        )
     try:
         result = run_preflight(
             mode=arguments.mode,

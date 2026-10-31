@@ -2,9 +2,9 @@
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │  📄 test_antigravity_acp_packaging.py                                        │
 │  Module: tooling.deploy.teams_cloud.tests.test_antigravity_acp_packaging    │
-│  Role: Verify the opt-in Google ACP image pins and profile configuration.    │
+│  Role: Verify Google ACP pins, combined-image capability, and profile setup.│
 │                                                                              │
-│  模块职责：验证 Google ACP 可选镜像的固定版本和 profile 配置。              │
+│  模块职责：验证 Google ACP 固定版本、组合镜像能力和 profile 配置。         │
 └──────────────────────────────────────────────────────────────────────────────┘
 """
 
@@ -129,6 +129,96 @@ def test_antigravity_acp_dockerfile_uses_official_architecture_pins() -> None:
     assert "CODEBUDDY_PACKAGE" not in dockerfile
     for name, value in preflight.ANTIGRAVITY_ACP_IMAGE_LABELS.items():
         assert f'{name}="{value}"' in dockerfile
+
+
+def test_codebuddy_executor_keeps_codebuddy_and_adds_the_pinned_antigravity_bundle() -> None:
+    """Keep the normal CodeBuddy image active while packaging both pinned ACP executables."""
+
+    dockerfile = (DEPLOYMENT_ROOT / "Dockerfile.dsh-executor-codebuddy").read_text(encoding="utf-8")
+    expected_sources = {
+        "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-x86_64.zip": (
+            "923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b"
+        ),
+        "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.5-linux-arm64.zip": (
+            "7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056"
+        ),
+    }
+    for url, digest in expected_sources.items():
+        assert url in dockerfile
+        assert digest in dockerfile
+
+    assert "FROM ${NODE_BASE_IMAGE} AS agy-acp-binary" in dockerfile
+    assert 'case "$TARGETARCH"' in dockerfile
+    assert "sha256sum --check --status" in dockerfile
+    assert 'unzip -p "$archive" agy_acp_server.par' in dockerfile
+    assert 'unzip -p "$archive" localharness_external' in dockerfile
+    assert (
+        "COPY --from=agy-acp-binary --chmod=0555 /usr/local/bin/agy_acp_server.par "
+        "/usr/local/bin/agy_acp_server.par"
+    ) in dockerfile
+    assert (
+        "COPY --from=agy-acp-binary --chmod=0555 /usr/local/bin/localharness_external "
+        "/usr/local/bin/localharness_external"
+    ) in dockerfile
+    assert "ARG CODEBUDDY_PACKAGE=@tencent-ai/codebuddy-code@2.163.0" in dockerfile
+    assert 'npm install --global "$CODEBUDDY_PACKAGE"' in dockerfile
+    assert "codebuddy --version | grep -F '2.163.0'" in dockerfile
+    assert "CODEBUDDY_CONFIG_DIR=/home/navigator/.codebuddy" in dockerfile
+    assert "/home/navigator/.codebuddy" in dockerfile
+    assert "CYRENE_HARNESS_ANTIGRAVITY_ACP_" not in dockerfile
+    assert "/home/navigator/.config/antigravity-acp" not in dockerfile
+    assert 'com.cyrene.navigator.runtime-profile="antigravity-acp"' not in dockerfile
+    for name, value in preflight.ANTIGRAVITY_ACP_STANDBY_IMAGE_LABELS.items():
+        assert f'{name}="{value}"' in dockerfile
+
+
+def test_canonical_builder_accepts_a_two_image_executor_and_persistence_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a local candidate plan limited to the exact images without claiming a release."""
+
+    template = json.loads(
+        (DEPLOYMENT_ROOT / "config/build-plan.template.json").read_text(encoding="utf-8")
+    )
+    template["taskId"] = "vm-codebuddy-antigravity-dual-20261031"
+    template["sources"]["workspace"]["commit"] = "a" * 40
+    template["sources"]["navigator"]["commit"] = "b" * 40
+    selected = [
+        image
+        for image in template["images"]
+        if image.get("service") in {"dsh-executor", "navigator-persistence"}
+    ]
+    executor = next(image for image in selected if image["service"] == "dsh-executor")
+    executor["dockerfile"] = (
+        "Cyrene-Workspace/tooling/deploy/teams-cloud/Dockerfile.dsh-executor-codebuddy"
+    )
+    executor.pop("binaryArtifacts", None)
+    plan = {
+        "schemaVersion": template["schemaVersion"],
+        "taskId": template["taskId"],
+        "targetPlatform": "linux/arm64",
+        "binaryArtifacts": [],
+        "sources": {
+            alias: template["sources"][alias] for alias in ("workspace", "navigator", "dsh")
+        },
+        "images": selected,
+        "externalImages": {},
+    }
+    plan_path = tmp_path / "executor-persistence-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    monkeypatch.setattr(build_arm64, "_private_artifact", lambda _path: True)
+
+    validated = build_arm64.validate_plan(plan_path)
+
+    assert [image["service"] for image in validated["images"]] == [
+        "dsh-executor",
+        "navigator-persistence",
+    ]
+    assert validated["images"][0]["dockerfile"].endswith("Dockerfile.dsh-executor-codebuddy")
+    assert validated["images"][0]["buildArgs"]["CODEBUDDY_PACKAGE"] == (
+        "@tencent-ai/codebuddy-code@2.163.0"
+    )
+    assert validated["binaryArtifacts"] == []
 
 
 def test_antigravity_acp_build_plan_is_a_closed_single_image_template(
