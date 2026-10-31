@@ -1827,7 +1827,7 @@ async function refresh(){
       updateSaveButton();
       return;
     }
-    if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision){
+    if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision&&!targetSaveInFlight){
       targetRevisionConflict=true;
       conflictingTargetStatus=data;
       document.getElementById('reload-targets').hidden=false;
@@ -2026,6 +2026,10 @@ document.getElementById('save').addEventListener('click',async()=>{
     dirtyTargets.clear();
     unobservedDirtyTargets.clear();
     targetEditRevision=null;
+    targetRevisionConflict=false;
+    conflictingTargetStatus=null;
+    document.getElementById('reload-targets').hidden=true;
+    document.getElementById('discover').disabled=false;
     targetSaveInFlight=false;
     renderAll();
     const countLabels={plannerPlans:'Planner',sharePointLists:'SharePoint lists',sharePointLibraries:'SharePoint libraries',toDoLists:'To Do',calendars:'Calendars',freebusySubjects:'Free/busy people',mailFolders:'Mail folders'};

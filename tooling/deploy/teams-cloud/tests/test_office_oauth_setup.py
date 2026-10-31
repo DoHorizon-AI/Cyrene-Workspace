@@ -1607,13 +1607,20 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         assert "for(const key of dirtyTargets) values[key]=[...selectedTargets[key]];" in page_body
         assert "Clear selected: ${targetLabelByKey[key]}" in page_body
         conflict_guard = page_body.index(
-            "if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision)"
+            "if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision&&!targetSaveInFlight)"
         )
         revision_update = page_body.index("revision=incomingRevision;", conflict_guard)
         conflict_code = page_body[conflict_guard:revision_update]
         assert "targetRevisionConflict=true" in conflict_code
         assert "conflictingTargetStatus=data" in conflict_code
         assert "return;" in conflict_code
+        save_success = page_body.split("const result=await api('/api/select-targets'", 1)[1].split(
+            "}catch(error){", 1
+        )[0]
+        assert "targetSaveInFlight=true;" in page_body
+        assert "targetRevisionConflict=false;" in save_success
+        assert "conflictingTargetStatus=null;" in save_success
+        assert "document.getElementById('reload-targets').hidden=true;" in save_success
         assert "Reload latest targets and discard unsaved edits" in page_body
         assert 'target="cyrene-office-oauth"' in page_body
         assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body
