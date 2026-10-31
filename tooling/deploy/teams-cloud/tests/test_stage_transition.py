@@ -1840,7 +1840,12 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
         "CREATE TABLE provider_profiles ("
         "profile_ref TEXT PRIMARY KEY, anchor_issuer TEXT, anchor_subject TEXT, "
         "organization_id TEXT, workspace_id TEXT, provider TEXT, identity_ref TEXT, "
-        "target_scope_json TEXT, external_subject TEXT, status TEXT, auth_mode TEXT)"
+        "target_scope_json TEXT, auth_status TEXT, external_subject TEXT, credential_blob BLOB, "
+        "credential_expires_at INTEGER, credential_secret_ref TEXT, status TEXT, "
+        "created_at INTEGER, updated_at INTEGER, auth_mode TEXT, credential_refresh_blob BLOB, "
+        "credential_refresh_expires_at INTEGER, oauth_client_id TEXT, oauth_scopes_json TEXT, "
+        "refresh_claim_id TEXT, refresh_claim_owner TEXT, refresh_claimed_at INTEGER, "
+        "credential_revision INTEGER, access_mode TEXT)"
     )
     protected_rows = [
         (
@@ -1852,9 +1857,24 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
             provider,
             f"identity-{provider}",
             '{"scope":"read"}',
+            "healthy",
             f"external-{provider}",
+            f"access-{provider}".encode(),
+            2_000_000_000,
+            f"credential-secret-{provider}",
             "READY",
-            "oauth",
+            1_700_000_000,
+            1_700_000_100,
+            "device_oauth",
+            f"refresh-{provider}".encode(),
+            2_000_000_000,
+            f"oauth-client-{provider}",
+            '["read"]',
+            None,
+            None,
+            None,
+            7,
+            "workspace_operator",
         )
         for provider in sorted(stage_transition.ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
     ]
@@ -1867,9 +1887,25 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     )
     connection.commit()
     connection.close()
+    logical_profiles = stage_transition._account_center_profile_logical_rows(sorted(protected_rows))
+    protected_row_digests = {
+        row[5]["value"]: stage_transition._sha256_bytes(stage_transition._canonical_json(row))
+        for row in logical_profiles
+    }
     protected_hash = stage_transition._sha256_bytes(
-        stage_transition._canonical_json(sorted(protected_rows))
+        stage_transition._canonical_json(
+            {
+                "columns": list(stage_transition.ACCOUNT_CENTER_PROFILE_COLUMN_NAMES),
+                "providers": protected_row_digests,
+            }
+        )
     )
+    assert logical_profiles[0][10] == {
+        "sqliteType": "blob",
+        "sha256": hashlib.sha256(protected_rows[0][10]).hexdigest(),
+        "bytes": len(protected_rows[0][10]),
+    }
+    assert logical_profiles[0][0] == {"sqliteType": "str", "value": protected_rows[0][0]}
 
     container_id = "a" * 64
     image_id = _image_id(103)
@@ -1939,9 +1975,48 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
         "totalNanoCpus": 1_900_000_000,
         "maxNanoCpus": 1_950_000_000,
     }
+    sealed_state = {
+        **state,
+        "recoveryPredicateCounts": {
+            key: 0 for key in stage_transition.ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+        },
+        "liveCredentialLeaseCounts": {
+            key: 0 for key in stage_transition.ACCOUNT_CENTER_LIVE_IDLE_COUNTS
+        },
+    }
     stage_transition._validate_account_center_image_update_state(
-        {"database": state, "runtimeCapacity": runtime_capacity}
+        {"database": sealed_state, "runtimeCapacity": runtime_capacity}
     )
+
+    connection = sqlite3.connect(database_path)
+    original_gcp = next(row for row in protected_rows if row[5] == "gcp")
+    connection.execute(
+        "UPDATE provider_profiles SET credential_blob=?,credential_refresh_blob=? "
+        "WHERE profile_ref='profile-gcp'",
+        (b"changed-access-ciphertext", b"changed-refresh-ciphertext"),
+    )
+    connection.commit()
+    connection.close()
+    changed_credentials = stage_transition._account_center_database_state(
+        compose=compose,
+        project="cyrene-teams-cloud",
+        container_id=container_id,
+        image_ref=image_ref,
+        image_id=image_id,
+        docker_prefix=["docker"],
+    )
+    assert changed_credentials["protectedProvidersSha256"] != state["protectedProvidersSha256"]
+    assert not stage_transition._account_center_database_state_matches_baseline(
+        state, changed_credentials
+    )
+    connection = sqlite3.connect(database_path)
+    connection.execute(
+        "UPDATE provider_profiles SET credential_blob=?,credential_refresh_blob=? "
+        "WHERE profile_ref='profile-gcp'",
+        (original_gcp[10], original_gcp[17]),
+    )
+    connection.commit()
+    connection.close()
 
     # A different deployment may have a different valid five-profile baseline.
     # It is valid to seal that digest, but a later change from the sealed digest
@@ -1980,7 +2055,7 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     with pytest.raises(stage_transition.StageTransitionError, match="3584 MiB/1.95 CPU"):
         stage_transition._validate_account_center_image_update_state(
             {
-                "database": state,
+                "database": sealed_state,
                 "runtimeCapacity": {**runtime_capacity, "totalNanoCpus": 1_950_000_001},
             }
         )
@@ -1995,9 +2070,24 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
         "microsoft_graph",
         "office-identity",
         '["User.Read"]',
+        "healthy",
         "office-external",
+        b"office-access-ciphertext",
+        2_000_000_000,
+        "office-credential-secret",
         "READY",
-        "oauth",
+        1_700_000_000,
+        1_700_000_100,
+        "delegated_oauth",
+        b"office-refresh-ciphertext",
+        2_000_000_000,
+        "office-client-id",
+        '["User.Read"]',
+        None,
+        None,
+        None,
+        1,
+        "actor_owned",
     )
     connection.execute(
         f"INSERT INTO provider_profiles VALUES ({','.join('?' for _ in microsoft_profile)})",
@@ -2024,8 +2114,17 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     )
     assert state_with_microsoft["additionalMicrosoftProfileCount"] == 1
     assert isinstance(state_with_microsoft["additionalMicrosoftProfileIdentitySha256"], str)
+    state_with_microsoft_for_update = {
+        **state_with_microsoft,
+        "recoveryPredicateCounts": {
+            key: 0 for key in stage_transition.ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+        },
+        "liveCredentialLeaseCounts": {
+            key: 0 for key in stage_transition.ACCOUNT_CENTER_LIVE_IDLE_COUNTS
+        },
+    }
     stage_transition._validate_account_center_image_update_state(
-        {"database": state_with_microsoft, "runtimeCapacity": runtime_capacity}
+        {"database": state_with_microsoft_for_update, "runtimeCapacity": runtime_capacity}
     )
 
     connection = sqlite3.connect(database_path)
@@ -2044,6 +2143,99 @@ def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
             image_id=image_id,
             docker_prefix=["docker"],
         )
+
+
+def test_account_center_startup_counts_only_schema_live_unredeemed_leases() -> None:
+    """Ignore expired/redeemed leases and require all 439 startup predicates to be empty."""
+
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        """
+        CREATE TABLE provider_profiles (
+            profile_ref TEXT, provider TEXT, status TEXT, auth_status TEXT,
+            anchor_issuer TEXT, anchor_subject TEXT, organization_id TEXT, workspace_id TEXT,
+            refresh_claim_id TEXT, refresh_claimed_at INTEGER
+        );
+        CREATE TABLE accounts (
+            account_ref TEXT, status TEXT, credential_status TEXT, refresh_claim_id TEXT,
+            remote_revocation_status TEXT, remote_revocation_command_hash TEXT,
+            anchor_issuer TEXT, anchor_subject TEXT, organization_id TEXT, workspace_id TEXT,
+            credential_blob BLOB
+        );
+        CREATE TABLE provider_credential_leases (
+            lease_ref TEXT, profile_ref TEXT, expires_at INTEGER, redeemed_at INTEGER,
+            anchor_issuer TEXT, anchor_subject TEXT, organization_id TEXT, workspace_id TEXT
+        );
+        CREATE TABLE credential_leases (
+            lease_ref TEXT, account_ref TEXT, expires_at INTEGER, redeemed_at INTEGER,
+            anchor_issuer TEXT, anchor_subject TEXT, organization_id TEXT, workspace_id TEXT
+        );
+        CREATE TABLE microsoft_entra_oauth_sessions (status TEXT);
+        CREATE TABLE link_sessions (provider TEXT, status TEXT, pending_credential_blob BLOB);
+        CREATE TABLE huggingface_device_renewal_sessions (
+            status TEXT, created_at INTEGER, poll_claim_id TEXT, poll_claimed_at INTEGER
+        );
+        CREATE TABLE command_idempotency (status TEXT);
+        """
+    )
+    owner = ("issuer", "subject", "organization", "workspace")
+    connection.executemany(
+        "INSERT INTO provider_profiles VALUES(?,?,?,?,?,?,?,?,NULL,NULL)",
+        [
+            ("profile-live", "github", "active", "healthy", *owner),
+            ("profile-revoked", "github", "unlinked", "revoked", *owner),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO accounts VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("account-live", "active", "ready", None, None, None, *owner, b"encrypted"),
+            ("account-revoked", "unlinked", "ready", None, None, None, *owner, b"encrypted"),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO provider_credential_leases VALUES(?,?,?,?,?,?,?,?)",
+        [
+            ("provider-live", "profile-live", 1_100, None, *owner),
+            ("provider-redeemed", "profile-live", 1_100, 990, *owner),
+            ("provider-expired", "profile-live", 999, None, *owner),
+            ("provider-revoked-owner", "profile-revoked", 1_100, None, *owner),
+        ],
+    )
+    connection.executemany(
+        "INSERT INTO credential_leases VALUES(?,?,?,?,?,?,?,?)",
+        [
+            ("account-live", "account-live", 1_100, None, *owner),
+            ("account-redeemed", "account-live", 1_100, 990, *owner),
+            ("account-expired", "account-live", 999, None, *owner),
+            ("account-revoked-owner", "account-revoked", 1_100, None, *owner),
+        ],
+    )
+
+    recovery, live_leases = stage_transition._account_center_startup_recovery_counts(
+        connection, now=1_000
+    )
+    assert set(recovery) == stage_transition.ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+    assert set(live_leases) == stage_transition.ACCOUNT_CENTER_LIVE_IDLE_COUNTS
+    assert set(recovery.values()) == {0}
+    assert live_leases == {
+        "activeProviderCredentialLeases": 1,
+        "activeAccountCredentialLeases": 1,
+    }
+    with pytest.raises(stage_transition.StageTransitionError, match="startup recovery"):
+        stage_transition._account_center_zero_recovery_counts(
+            recovery, live_leases, label="test schema"
+        )
+
+    connection.execute("DELETE FROM provider_credential_leases WHERE lease_ref='provider-live'")
+    connection.execute("DELETE FROM credential_leases WHERE lease_ref='account-live'")
+    recovery, live_leases = stage_transition._account_center_startup_recovery_counts(
+        connection, now=1_000
+    )
+    stage_transition._account_center_zero_recovery_counts(
+        recovery, live_leases, label="test schema"
+    )
+    connection.close()
 
 
 def test_issued_cloud_image_update_preserves_the_exact_fourteen_service_inventory(
@@ -8683,6 +8875,26 @@ def test_account_center_readiness_rejects_changed_computer_inventory(
         )
 
 
+def _account_center_test_active_services(
+    *, exchange_container_id: str, exchange_image_id: str
+) -> dict[str, dict[str, str]]:
+    """Build the exact 15 active service identities used by Account Center monitor fixtures."""
+
+    services = {
+        service_name: {
+            "containerId": f"{index:064x}",
+            "imageId": _image_id(500 + index),
+        }
+        for index, service_name in enumerate(
+            sorted(stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET), start=1
+        )
+    }
+    services["exchange"].update(
+        {"containerId": exchange_container_id, "imageId": exchange_image_id}
+    )
+    return services
+
+
 def test_account_center_monitor_gate_checks_existing_non_graph_connections_readonly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -8704,7 +8916,9 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
                 provider: "a" * 64 for provider in ("huggingface", "azure", "gcp", "runpod")
             }
         },
-        "activeServices": {"exchange": {"containerId": "a" * 64}},
+        "activeServices": _account_center_test_active_services(
+            exchange_container_id="a" * 64, exchange_image_id=_image_id(401)
+        ),
         "policy": {"healthTimeoutSeconds": 30},
     }
     journal = {
@@ -8719,13 +8933,19 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
     selected_connections: list[dict[str, Any]] = []
 
     def capture(argv: list[str], **_kwargs: Any) -> str:
-        selected_connections.extend(json.loads(argv[-7]))
+        if "top" in argv:
+            return "PID COMMAND\n"
+        selected_connections.extend(json.loads(argv[-11]))
         return json.dumps(
             {
                 "selectedProviderCount": 5,
                 "monitorStateCount": 14,
                 "activeMonitorLeaseCount": 0,
                 "inFlightConnectorCallCount": 0,
+                "preservedUnknownResultCount": 0,
+                "preservedUnknownRowSha256": None,
+                "activeOutboxJobCount": 0,
+                "activeOutboxJobLeaseCount": 0,
                 "nextCheckSecondsRemaining": 120,
                 "requiredWindowSeconds": 90,
                 "nextCheckWindowSatisfied": True,
@@ -8734,6 +8954,7 @@ def test_account_center_monitor_gate_checks_existing_non_graph_connections_reado
         )
 
     monkeypatch.setattr(runtime_update, "_checked_stdout", capture)
+    monkeypatch.setattr(stage_transition, "_account_center_host_gh_cli_process_count", lambda: 0)
     monkeypatch.setattr(
         stage_transition,
         "_candidate_config_json",
@@ -8803,7 +9024,9 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
     plan = {
         "phase": phase,
         "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "activeServices": _account_center_test_active_services(
+            exchange_container_id=exchange_id, exchange_image_id=exchange_image_id
+        ),
         "candidateServices": {
             "exchange": {
                 "active": {
@@ -8829,14 +9052,20 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
     def checked(argv: list[str], *, label: str, **_kwargs: Any) -> str:
         if label == "pinned Exchange connector readiness readback":
             return json.dumps(current_snapshot, separators=(",", ":"))
+        if "top" in argv:
+            return "PID COMMAND\n"
         if label == "Connector authorization monitor quiescence readback":
-            selected_connections.extend(json.loads(argv[-7]))
+            selected_connections.extend(json.loads(argv[-11]))
             return json.dumps(
                 {
                     "selectedProviderCount": 5,
                     "monitorStateCount": 14,
                     "activeMonitorLeaseCount": 0,
                     "inFlightConnectorCallCount": 0,
+                    "preservedUnknownResultCount": 0,
+                    "preservedUnknownRowSha256": None,
+                    "activeOutboxJobCount": 0,
+                    "activeOutboxJobLeaseCount": 0,
                     "nextCheckSecondsRemaining": 120,
                     "requiredWindowSeconds": 90,
                     "nextCheckWindowSatisfied": True,
@@ -8846,6 +9075,7 @@ def test_account_center_unissued_graph_readiness_projects_real_non_graph_snapsho
         raise AssertionError(f"unexpected checked command label: {label}")
 
     monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    monkeypatch.setattr(stage_transition, "_account_center_host_gh_cli_process_count", lambda: 0)
     monkeypatch.setattr(
         stage_transition,
         "_write_journal",
@@ -9188,6 +9418,14 @@ def test_account_center_image_update_journal_reports_readonly_database_and_readi
 
     update_state["identityReadbackStatus"] = "VERIFIED"
     update_state["monitorQuiescence"] = {"verified": True}
+    update_state["afterMonitorQuiescence"] = {
+        "verified": True,
+        "preservedUnknownStatus": "NO_UNKNOWN_RESULT",
+        "preservedUnknownRowSha256": None,
+        "rawNonterminalConnectorInvocationCount": 0,
+        "preservedUnknownResultCount": 0,
+        "activeInFlightConnectorCallCount": 0,
+    }
     update_state["beforeReadiness"] = {"verified": True}
     update_state["afterReadiness"] = {"verified": True}
     update_state["afterDatabaseIdentity"] = database_state
@@ -9726,6 +9964,533 @@ def _create_github_monitor_database(
     connection.close()
 
 
+def _create_account_center_unknown_monitor_database(
+    path: Path,
+    *,
+    connection_refs: dict[str, list[str]],
+    actor: dict[str, str],
+    invocations: list[tuple[Any, ...]],
+    outbox_rows: list[tuple[Any, ...]] | None = None,
+) -> None:
+    """Build exact non-Graph monitor rows and 20-column connector invocation records."""
+
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE integration_connections (
+            id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+            actor_issuer TEXT NOT NULL, actor_subject TEXT NOT NULL, enabled INTEGER NOT NULL,
+            document TEXT NOT NULL
+        );
+        CREATE TABLE authorization_monitor_state (
+            connection_id TEXT PRIMARY KEY, next_check_at TEXT NOT NULL, last_checked_at TEXT,
+            claim_owner TEXT, claim_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT
+        );
+        CREATE TABLE connector_invocations (
+            organization_id TEXT NOT NULL, workspace_id TEXT NOT NULL, actor_issuer TEXT NOT NULL,
+            actor_subject TEXT NOT NULL, request_id TEXT NOT NULL, connection_ref TEXT NOT NULL,
+            provider_id TEXT NOT NULL, profile_ref TEXT NOT NULL, operation_id TEXT NOT NULL,
+            resource_ref TEXT NOT NULL, arguments_sha256 TEXT NOT NULL,
+            envelope_sha256 TEXT NOT NULL, state TEXT NOT NULL, operation_ref TEXT,
+            grant_ref TEXT NOT NULL DEFAULT '', is_mutating INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, response_json TEXT,
+            response_status INTEGER NOT NULL DEFAULT 200
+        );
+        CREATE TABLE outbox_jobs (
+            id TEXT PRIMARY KEY, kind TEXT NOT NULL, organization_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL, actor_issuer TEXT NOT NULL, actor_subject TEXT NOT NULL,
+            connection_id TEXT NOT NULL, binding_id TEXT, operation_id TEXT,
+            idempotency_key TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL,
+            available_at TEXT NOT NULL, claim_owner TEXT, claim_fence INTEGER NOT NULL DEFAULT 0,
+            lease_expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            document TEXT NOT NULL
+        );
+        """
+    )
+    stored_providers = {
+        "github": "github",
+        "huggingface": "hf",
+        "azure": "azure",
+        "gcp": "gcp",
+        "runpod": "runpod",
+    }
+    next_check_at = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+    for provider, refs in sorted(connection_refs.items()):
+        for connection_ref in refs:
+            document = {
+                "id": connection_ref,
+                "organizationId": actor["organizationId"],
+                "workspaceId": actor["workspaceId"],
+                "actorIssuer": actor["issuer"],
+                "actorSubject": actor["subject"],
+                "provider": stored_providers[provider],
+                "enabled": True,
+            }
+            connection.execute(
+                "INSERT INTO integration_connections VALUES(?,?,?,?,?,?,?)",
+                (
+                    connection_ref,
+                    actor["organizationId"],
+                    actor["workspaceId"],
+                    actor["issuer"],
+                    actor["subject"],
+                    1,
+                    json.dumps(document),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO authorization_monitor_state VALUES(?,?,?,?,?,?)",
+                (connection_ref, next_check_at, None, None, 0, None),
+            )
+    if any(
+        len(row) != len(stage_transition.ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+        for row in invocations
+    ):
+        raise AssertionError("test invocation row must match all 20 canonical columns")
+    connection.executemany(
+        "INSERT INTO connector_invocations VALUES("
+        + ",".join("?" for _ in stage_transition.ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+        + ")",
+        invocations,
+    )
+    outbox_rows = outbox_rows or []
+    if any(len(row) != len(stage_transition.EXCHANGE_OUTBOX_JOB_COLUMNS) for row in outbox_rows):
+        raise AssertionError("test outbox row must match the pinned 19-column ABI")
+    connection.executemany(
+        "INSERT INTO outbox_jobs VALUES("
+        + ",".join("?" for _ in stage_transition.EXCHANGE_OUTBOX_JOB_COLUMNS)
+        + ")",
+        outbox_rows,
+    )
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "changed-row",
+        "extra-call",
+        "outbox-job",
+        "outbox-claim",
+        "gh-container",
+        "gh-host",
+    ],
+)
+def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Verify the exact sealed UNKNOWN with live readiness and read-only SQLite probes."""
+
+    phase = stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    snapshot, compose, database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
+    )
+    actor = snapshot["actor"]
+    connection_refs = {
+        provider: sorted(
+            row["connectionRef"] for row in snapshot["connections"] if row["providerId"] == provider
+        )
+        for provider in ("github", "huggingface", "azure", "gcp", "runpod")
+    }
+    github_connection_ref = connection_refs["github"][0]
+    now = int(datetime.now(UTC).timestamp())
+    unknown_row = (
+        actor["organizationId"],
+        actor["workspaceId"],
+        actor["issuer"],
+        actor["subject"],
+        "sealed-unknown-request",
+        github_connection_ref,
+        "github",
+        "github-primary",
+        "issues.create",
+        "repo:owner/project#123",
+        "a" * 64,
+        "b" * 64,
+        "UNKNOWN_RESULT",
+        None,
+        "",
+        1,
+        now,
+        0,
+        None,
+        409,
+    )
+    unknown_row_sha256 = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(
+            [{"sqliteType": type(value).__name__, "value": value} for value in unknown_row]
+        )
+    )
+    database_path = tmp_path / "exchange.sqlite3"
+    outbox_rows = []
+    if case in {"outbox-job", "outbox-claim"}:
+        available_at = datetime.now(UTC)
+        claimed = case == "outbox-claim"
+        outbox_rows.append(
+            (
+                "job-unknown-guard",
+                "ISSUE_ACTION",
+                actor["organizationId"],
+                actor["workspaceId"],
+                actor["issuer"],
+                actor["subject"],
+                github_connection_ref,
+                "github-binding",
+                "issues.create",
+                "idempotency-unknown-guard",
+                "CLAIMED" if claimed else "READY",
+                1 if claimed else 0,
+                available_at.isoformat(),
+                "dispatcher" if claimed else None,
+                1 if claimed else 0,
+                (available_at + timedelta(minutes=2)).isoformat() if claimed else None,
+                available_at.isoformat(),
+                available_at.isoformat(),
+                "{}",
+            )
+        )
+    _create_account_center_unknown_monitor_database(
+        database_path,
+        connection_refs=connection_refs,
+        actor=actor,
+        invocations=[unknown_row],
+        outbox_rows=outbox_rows,
+    )
+    if case == "changed-row":
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "UPDATE connector_invocations SET response_status=200 "
+            "WHERE request_id='sealed-unknown-request'"
+        )
+        connection.commit()
+        connection.close()
+    elif case == "extra-call":
+        extra_row = list(unknown_row)
+        extra_row[4] = "other-in-progress-request"
+        extra_row[12] = "IN_PROGRESS"
+        extra_row[15] = 0
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "INSERT INTO connector_invocations VALUES("
+            + ",".join("?" for _ in stage_transition.ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+            + ")",
+            extra_row,
+        )
+        connection.commit()
+        connection.close()
+
+    candidate_image_id = _image_id(701)
+    candidate_lock_sha256 = "f" * 64
+    snapshot_sha256 = "8" * 64
+    schema_sha256 = database_state["schemaSha256"]
+    protected_digest = database_state["protectedProvidersSha256"]
+    recovery_counts = {
+        key: 0 for key in stage_transition.ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+    }
+    lease_counts = {key: 0 for key in stage_transition.ACCOUNT_CENTER_LIVE_IDLE_COUNTS}
+    database_state = {
+        **database_state,
+        "recoveryPredicateCounts": recovery_counts,
+        "liveCredentialLeaseCounts": lease_counts,
+    }
+    evidence = {
+        "schemaVersion": stage_transition.ACCOUNT_CENTER_UNKNOWN_PRESERVATION_SCHEMA,
+        "state": "OPERATOR_RECORDED_STARTUP_REPLAY_PASS",
+        "createdAtUtc": stage_transition._utc_now(),
+        "currentDatabase": {
+            "snapshotSha256": snapshot_sha256,
+            "schemaVersion": stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION,
+            "schemaSha256": schema_sha256,
+            "foreignKeyViolationCount": 0,
+            "quickCheck": ["ok"],
+            "protectedProviderCount": 5,
+            "protectedProvidersSha256": protected_digest,
+            "additionalMicrosoftProfileCount": 0,
+            "additionalMicrosoftProfileIdentitySha256": None,
+            "recoveryPredicateCounts": recovery_counts,
+            "liveCredentialLeaseCounts": lease_counts,
+        },
+        "historicalUnknown": {
+            "providerId": "github",
+            "connectionRef": github_connection_ref,
+            "actorSha256": stage_transition._sha256_bytes(stage_transition._canonical_json(actor)),
+            "rowSha256": unknown_row_sha256,
+            "requestIdSha256": stage_transition._sha256_bytes(unknown_row[4].encode("utf-8")),
+            "operationIdSha256": stage_transition._sha256_bytes(unknown_row[8].encode("utf-8")),
+            "state": "UNKNOWN_RESULT",
+            "rowCount": 1,
+            "columnCount": 20,
+        },
+        "candidateStartupReplay": {
+            "state": "PASS",
+            "candidateImageId": candidate_image_id,
+            "candidateImageLockSha256": candidate_lock_sha256,
+            "sourceDatabaseSnapshotSha256": snapshot_sha256,
+            "sourceSchemaVersion": stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION,
+            "sourceSchemaSha256": schema_sha256,
+            "schemaBeforeSha256": schema_sha256,
+            "schemaAfterSha256": schema_sha256,
+            "allTableLogicalDigestBeforeSha256": "9" * 64,
+            "allTableLogicalDigestAfterSha256": "9" * 64,
+            "protectedFiveCredentialDigestBeforeSha256": protected_digest,
+            "protectedFiveCredentialDigestAfterSha256": protected_digest,
+            "networkMode": "NONE",
+            "liveDatabaseMounted": False,
+            "secretMountsReadOnly": True,
+            "credentialsExported": False,
+            "activeContainerIdsUnchanged": True,
+            "recoveryPredicateCounts": recovery_counts,
+            "replayScriptSha256": "d" * 64,
+        },
+    }
+    private_dir = tmp_path / ".artifacts"
+    private_dir.mkdir()
+    evidence_path = private_dir / "unknown-preservation.json"
+    evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+    evidence_path.chmod(0o600)
+    evidence_record = stage_transition._operator_private_file_record(
+        evidence_path, "test unknown-preservation evidence"
+    )
+    preserved_unknown = stage_transition._account_center_preserved_unknown_summary(
+        evidence_path=evidence_path,
+        evidence_record=evidence_record,
+        database_state=database_state,
+        candidate_compose=compose,
+        candidate_image_id=candidate_image_id,
+        candidate_image_lock_sha256=candidate_lock_sha256,
+    )
+
+    exchange_container_id = "a" * 64
+    exchange_image_id = _image_id(702)
+    active_services = _account_center_test_active_services(
+        exchange_container_id=exchange_container_id,
+        exchange_image_id=exchange_image_id,
+    )
+    replacement_account_center_id = "c" * 64
+    plan = {
+        "phase": phase,
+        "imageUpdateTarget": stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        "activeServices": active_services,
+        "candidateServices": {
+            "exchange": {
+                "active": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "candidate": {
+                    "imageRef": "example.invalid/exchange:locked",
+                    "imageId": exchange_image_id,
+                },
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
+        "accountCenterImageUpdateState": {
+            "database": database_state,
+            "preservedUnknown": preserved_unknown,
+        },
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "exchangeReadiness": {"required": True, "verified": False, "receipt": None},
+        "accountCenterImageUpdate": {
+            "required": True,
+            "monitorQuiescence": None,
+            "afterMonitorQuiescence": None,
+        },
+        "targetProgress": {
+            "account-center": {
+                "phase": "APPLIED",
+                "candidateContainerId": replacement_account_center_id,
+            }
+        },
+    }
+    process_check_outputs = {
+        service_name: "PID COMMAND\n"
+        for service_name in stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+    }
+    if case == "gh-container":
+        process_check_outputs["navigator"] = "PID COMMAND\n123 gh\n"
+    monitor_script_calls: list[str] = []
+    process_container_ids: dict[str, list[str]] = {}
+    phases: list[str] = []
+
+    def checked(argv: list[str], *, label: str, **_kwargs: Any) -> str:
+        if label == "pinned Exchange connector readiness readback":
+            return json.dumps(snapshot, separators=(",", ":"))
+        if label.endswith("active GitHub CLI process readback"):
+            service_name = label.partition(" active GitHub CLI")[0]
+            process_container_ids.setdefault(service_name, []).append(argv[argv.index("top") + 1])
+            return process_check_outputs[service_name]
+        if label == "Connector authorization monitor quiescence readback":
+            monitor_script_calls.append(label)
+            script_index = argv.index("-c")
+            script = argv[script_index + 1]
+            arguments = list(argv[script_index + 2 :])
+            arguments[0] = str(database_path)
+            result = subprocess.run(
+                [sys.executable, "-c", script, *arguments],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise runtime_update.RuntimeUpdateError("test monitor SQL rejected the row")
+            return result.stdout
+        raise AssertionError(f"unexpected read-only command: {label}")
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_account_center_host_gh_cli_process_count",
+        lambda: 1 if case == "gh-host" else 0,
+    )
+
+    readiness = stage_transition._read_live_exchange_readiness(
+        plan=plan,
+        compose=compose,
+        container_id=exchange_container_id,
+        image_id=exchange_image_id,
+        docker_prefix=["docker"],
+    )
+    journal["exchangeReadiness"]["receipt"] = readiness
+    before_checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
+    assert before_checkpoint["verified"] is True
+    assert readiness["microsoftGraphStatus"] == "NOT_CONNECTED_NOT_VERIFIED"
+
+    if case == "changed-row":
+        with pytest.raises(
+            stage_transition.StageTransitionError, match="could not be verified read-only"
+        ):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        return
+    if case == "extra-call":
+        with pytest.raises(
+            stage_transition.StageTransitionError, match="blocked because a nonterminal"
+        ):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        return
+    if case in {"gh-container", "gh-host"}:
+        expected = "host GitHub CLI process" if case == "gh-host" else "GitHub CLI process"
+        with pytest.raises(stage_transition.StageTransitionError, match=expected):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        assert monitor_script_calls == []
+        return
+    if case in {"outbox-job", "outbox-claim"}:
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="blocked because Exchange has selected-actor connector jobs",
+        ):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        return
+
+    before = stage_transition._verify_provider_monitor_quiescence(
+        plan=plan,
+        candidate_compose=compose,
+        journal=journal,
+        journal_path=tmp_path / "monitor.journal.json",
+        docker_prefix=["docker"],
+    )
+    post_readiness = stage_transition._read_live_exchange_readiness(
+        plan=plan,
+        compose=compose,
+        container_id=exchange_container_id,
+        image_id=exchange_image_id,
+        docker_prefix=["docker"],
+    )
+    journal["exchangeReadiness"]["receipt"] = post_readiness
+    after_checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
+    assert after_checkpoint["verified"] is True
+    after = stage_transition._verify_provider_monitor_quiescence(
+        plan=plan,
+        candidate_compose=compose,
+        journal=journal,
+        journal_path=tmp_path / "monitor.journal.json",
+        docker_prefix=["docker"],
+        checkpoint="after",
+    )
+    assert before["verified"] is True
+    assert before["rawNonterminalConnectorInvocationCount"] == 1
+    assert before["preservedUnknownResultCount"] == 1
+    assert before["activeInFlightConnectorCallCount"] == 0
+    assert before["preservedUnknownStatus"] == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+    assert before["preservedUnknownRowSha256"] == unknown_row_sha256
+    assert before["activeGitHubCliProcessCountByService"] == {
+        service_name: 0 for service_name in stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+    }
+    assert before["activeHostGitHubCliProcessCount"] == 0
+    assert before["activeOutboxJobCount"] == 0
+    assert before["activeOutboxJobLeaseCount"] == 0
+    assert after["verified"] is True
+    assert after["preservedUnknownRowSha256"] == before["preservedUnknownRowSha256"]
+    assert after["activeGitHubCliProcessCountByService"]["account-center"] == 0
+    assert process_container_ids["account-center"] == [
+        active_services["account-center"]["containerId"],
+        replacement_account_center_id,
+    ]
+    assert journal["accountCenterImageUpdate"]["monitorQuiescence"] == before
+    assert journal["accountCenterImageUpdate"]["afterMonitorQuiescence"] == after
+    assert phases == [
+        "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+        "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+    ]
+
+    journal["state"] = "APPLIED"
+    journal["accountCenterImageUpdate"].update(
+        {
+            "preservedUnknownPlan": preserved_unknown,
+            "identityReadbackStatus": "VERIFIED",
+            "beforeReadiness": before_checkpoint,
+            "afterReadiness": after_checkpoint,
+        }
+    )
+    summary = stage_transition._journal_summary(journal)
+    assert summary["accountCenterUnknownPreservationStatus"] == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+    assert summary["accountCenterRawNonterminalConnectorInvocationCount"] == 1
+    assert summary["accountCenterPreservedUnknownResultCount"] == 1
+    assert summary["accountCenterActiveInFlightConnectorCallCount"] == 0
+    assert summary["accountCenterActiveOutboxJobCount"] == 0
+    assert summary["accountCenterActiveOutboxJobLeaseCount"] == 0
+
+
 @pytest.mark.parametrize(
     ("blocker", "verified"),
     [
@@ -9781,7 +10546,7 @@ def test_github_issued_monitor_guard_checks_all_ten_exact_bindings(
         assert json.loads(arguments[1]) == [
             {"providerId": "github", "connectionRef": ref} for ref in connection_refs
         ]
-        assert arguments[-1] == "false"
+        assert arguments[7] == "false"
         arguments[0] = str(database_path)
         result = subprocess.run(
             [sys.executable, "-c", script, *arguments],
@@ -9970,7 +10735,7 @@ def test_cloud_issued_monitor_guard_checks_only_configured_bindings_and_restart_
             {"providerId": provider, "connectionRef": connection_refs[provider]}
             for provider in providers
         ]
-        assert arguments[-1] == "true"
+        assert arguments[7] == "true"
         arguments[0] = str(database_path)
         result = subprocess.run(
             [sys.executable, "-c", script, *arguments],

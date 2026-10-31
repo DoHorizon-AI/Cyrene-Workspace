@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -122,8 +122,84 @@ OFFICE_GRAPH_RUNTIME_SERVICE_SET = RUNTIME_SERVICE_SET | {"microsoft-graph"}
 ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET = OFFICE_GRAPH_RUNTIME_SERVICE_SET
 ACCOUNT_CENTER_DATABASE_USER_VERSION = 9
 ACCOUNT_CENTER_PROFILE_COLUMNS = (
-    "profile_ref,anchor_issuer,anchor_subject,organization_id,workspace_id,"
-    "provider,identity_ref,target_scope_json,external_subject,status,auth_mode"
+    "profile_ref,anchor_issuer,anchor_subject,organization_id,workspace_id,provider,"
+    "identity_ref,target_scope_json,auth_status,external_subject,credential_blob,"
+    "credential_expires_at,credential_secret_ref,status,created_at,updated_at,auth_mode,"
+    "credential_refresh_blob,credential_refresh_expires_at,oauth_client_id,oauth_scopes_json,"
+    "refresh_claim_id,refresh_claim_owner,refresh_claimed_at,credential_revision,access_mode"
+)
+ACCOUNT_CENTER_PROFILE_COLUMN_NAMES = tuple(ACCOUNT_CENTER_PROFILE_COLUMNS.split(","))
+ACCOUNT_CENTER_PROFILE_BLOB_COLUMN_INDICES = (10, 17)
+ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS = (
+    "organization_id",
+    "workspace_id",
+    "actor_issuer",
+    "actor_subject",
+    "request_id",
+    "connection_ref",
+    "provider_id",
+    "profile_ref",
+    "operation_id",
+    "resource_ref",
+    "arguments_sha256",
+    "envelope_sha256",
+    "state",
+    "operation_ref",
+    "grant_ref",
+    "is_mutating",
+    "created_at",
+    "expires_at",
+    "response_json",
+    "response_status",
+)
+EXCHANGE_OUTBOX_JOB_COLUMNS = (
+    "id",
+    "kind",
+    "organization_id",
+    "workspace_id",
+    "actor_issuer",
+    "actor_subject",
+    "connection_id",
+    "binding_id",
+    "operation_id",
+    "idempotency_key",
+    "state",
+    "attempts",
+    "available_at",
+    "claim_owner",
+    "claim_fence",
+    "lease_expires_at",
+    "created_at",
+    "updated_at",
+    "document",
+)
+ACCOUNT_CENTER_UNKNOWN_PRESERVATION_SCHEMA = "cyrene-account-center-unknown-preservation-v1"
+ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES = 256 * 1024
+ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS = 30 * 60
+ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES = frozenset(
+    {
+        "provider_profiles_active_refresh_claims",
+        "provider_profiles_active_stale_refresh_claims",
+        "accounts_refresh_pending",
+        "accounts_active_refresh_claims",
+        "provider_profiles_hf_reauth_lease_deletions",
+        "accounts_reauth_lease_deletions",
+        "accounts_pending_remote_revocation",
+        "microsoft_entra_processing_sessions",
+        "github_processing_link_sessions_without_blob",
+        "github_interrupted_callback_revocations",
+        "hf_device_starting_stale",
+        "hf_device_active_poll_claims",
+        "hf_device_poll_stale_foreign_claim",
+        "accounts_interrupted_unlink_commands",
+        "pending_idempotency",
+    }
+)
+ACCOUNT_CENTER_LIVE_IDLE_COUNTS = frozenset(
+    {
+        "activeProviderCredentialLeases",
+        "activeAccountCredentialLeases",
+    }
 )
 ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS = frozenset(
     {"github", "huggingface", "azure", "gcp", "runpod"}
@@ -601,6 +677,46 @@ def _file_record(path: Path, label: str) -> dict[str, str]:
     return {"path": str(resolved), "sha256": _sha256_file(resolved)}
 
 
+def _operator_private_file_record(path: Path, label: str) -> dict[str, str]:
+    """Bind one owner-only operator evidence file without allowing symlinks or hard links."""
+
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError as error:
+        raise StageTransitionError(f"{label} is unavailable") from error
+    if (
+        not preflight._private_artifact(path)
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size > ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES
+        or str(resolved) != str(path)
+    ):
+        raise StageTransitionError(f"{label} must be a bounded owner-only single-link artifact")
+    return {"path": str(resolved), "sha256": _sha256_file(resolved)}
+
+
+def _verify_operator_private_file_record(record: Any, label: str) -> None:
+    """Recheck the private artifact mode, owner, link count, path and digest."""
+
+    if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+        raise StageTransitionError(f"{label} record is malformed")
+    path_text = record.get("path")
+    digest = record.get("sha256")
+    if (
+        not isinstance(path_text, str)
+        or not isinstance(digest, str)
+        or SHA256_RE.fullmatch(digest) is None
+    ):
+        raise StageTransitionError(f"{label} record is malformed")
+    current = _operator_private_file_record(Path(path_text), label)
+    if current != record:
+        raise StageTransitionError(f"{label} changed after planning")
+
+
 def _file_records(paths: list[Path], label: str) -> list[dict[str, str]]:
     """Bind an ordered set of Compose or environment inputs to their digests."""
 
@@ -1051,6 +1167,32 @@ def _exchange_cloud_runner_idle_counts(
     return report
 
 
+def _account_center_host_gh_cli_process_count() -> int:
+    """Count host GitHub CLI processes without reading or returning their argv."""
+
+    process_root = Path("/proc")
+    try:
+        process_entries = list(process_root.iterdir())
+    except OSError as error:
+        raise StageTransitionError(
+            "host GitHub CLI process state could not be verified read-only"
+        ) from error
+    count = 0
+    for process_entry in process_entries:
+        if not process_entry.name.isdecimal():
+            continue
+        try:
+            process_name = (process_entry / "comm").read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise StageTransitionError(
+                "host GitHub CLI process state could not be verified read-only"
+            ) from error
+        count += int(process_name == "gh")
+    return count
+
+
 def _verify_provider_monitor_quiescence(
     *,
     plan: dict[str, Any],
@@ -1058,6 +1200,7 @@ def _verify_provider_monitor_quiescence(
     journal: dict[str, Any],
     journal_path: Path,
     docker_prefix: list[str],
+    checkpoint: str = "before",
 ) -> dict[str, Any]:
     """Require the selected connector monitors and calls to stay clear through startup.
 
@@ -1066,7 +1209,17 @@ def _verify_provider_monitor_quiescence(
     durable refresh outbox to be empty. 中文：按实际签发连接只读检查监视器与调用窗口。
     """
 
+    if checkpoint not in {"before", "after"}:
+        raise StageTransitionError("connector monitor checkpoint is unsupported")
     target = plan.get("imageUpdateTarget")
+    preserved_unknown = None
+    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        image_state = plan.get("accountCenterImageUpdateState")
+        preserved_unknown = (
+            image_state.get("preservedUnknown") if isinstance(image_state, dict) else None
+        )
+        if preserved_unknown is not None:
+            _validate_account_center_preserved_unknown_state(preserved_unknown)
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
         target_journal_key = "huggingfaceImageUpdate"
         required_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
@@ -1168,6 +1321,13 @@ def _verify_provider_monitor_quiescence(
             canonical_provider_refs.append(canonical)
         canonical_refs[provider] = sorted(canonical_provider_refs)
 
+    if preserved_unknown is not None and (
+        canonical_refs.get("github", []).count(preserved_unknown["connectionRef"]) != 1
+    ):
+        raise StageTransitionError(
+            "sealed GitHub UNKNOWN row does not belong to the exact live monitor binding set"
+        )
+
     bindings = _candidate_config_json(candidate_compose, "connector-bindings").get("bindings")
     rows = bindings if isinstance(bindings, list) else []
     for provider, provider_refs in canonical_refs.items():
@@ -1201,6 +1361,95 @@ def _verify_provider_monitor_quiescence(
     actor = preflight._connector_bootstrap_actor(candidate_compose)
     if any(not isinstance(value, str) or not value for value in actor.values()):
         raise StageTransitionError("candidate Exchange actor is incomplete for the monitor gate")
+    active_gh_process_count_by_service: dict[str, int] = {}
+    active_host_gh_process_count: int | None = None
+    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        active_services = plan.get("activeServices")
+        if (
+            not isinstance(active_services, dict)
+            or set(active_services) != ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+        ):
+            raise StageTransitionError(
+                "Account Center process guard requires the exact 15-service inventory"
+            )
+        process_container_by_service = {
+            service_name: service.get("containerId")
+            for service_name, service in active_services.items()
+            if isinstance(service, dict)
+        }
+        if len(process_container_by_service) != len(ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET):
+            raise StageTransitionError("Account Center process service identity map is malformed")
+        if checkpoint == "after":
+            progress = journal.get("targetProgress")
+            target_progress = (
+                progress.get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
+                if isinstance(progress, dict)
+                else None
+            )
+            replacement_id = (
+                target_progress.get("candidateContainerId")
+                if isinstance(target_progress, dict)
+                else None
+            )
+            if (
+                not isinstance(target_progress, dict)
+                or target_progress.get("phase") != "APPLIED"
+                or not isinstance(replacement_id, str)
+                or FULL_CONTAINER_ID_RE.fullmatch(replacement_id) is None
+            ):
+                raise StageTransitionError(
+                    "post-update GitHub CLI guard lacks the applied Account Center container identity"
+                )
+            process_container_by_service[ACCOUNT_CENTER_IMAGE_UPDATE_TARGET] = replacement_id
+        for service_name in sorted(ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET):
+            process_container_id = process_container_by_service.get(service_name)
+            if (
+                not isinstance(process_container_id, str)
+                or FULL_CONTAINER_ID_RE.fullmatch(process_container_id) is None
+            ):
+                raise StageTransitionError(
+                    f"active {service_name} service identity is malformed for the GitHub CLI guard"
+                )
+            try:
+                output = runtime_update._checked_stdout(
+                    [*docker_prefix, "top", process_container_id, "-eo", "pid,comm"],
+                    label=f"{service_name} active GitHub CLI process readback",
+                    timeout_seconds=15,
+                )
+            except (
+                OSError,
+                runtime_update.RuntimeUpdateError,
+                subprocess.SubprocessError,
+            ) as error:
+                raise StageTransitionError(
+                    f"{service_name} GitHub CLI process state could not be verified read-only"
+                ) from error
+            if len(output.encode("utf-8")) > 64 * 1024:
+                raise StageTransitionError(
+                    f"{service_name} process inventory exceeds its bounded size"
+                )
+            process_rows = [line.split() for line in output.splitlines() if line.strip()]
+            if not process_rows or [value.upper() for value in process_rows[0]] != [
+                "PID",
+                "COMMAND",
+            ]:
+                raise StageTransitionError(f"{service_name} process inventory header is malformed")
+            if any(
+                len(row) != 2 or not row[0].isdecimal() or not row[1] for row in process_rows[1:]
+            ):
+                raise StageTransitionError(f"{service_name} process inventory rows are malformed")
+            active_gh_process_count_by_service[service_name] = sum(
+                row[1].casefold() in {"gh", "gh.exe"} for row in process_rows[1:]
+            )
+            if active_gh_process_count_by_service[service_name] != 0:
+                raise StageTransitionError(
+                    "an active GitHub CLI process could replay a provider operation"
+                )
+        active_host_gh_process_count = _account_center_host_gh_cli_process_count()
+        if active_host_gh_process_count != 0:
+            raise StageTransitionError(
+                "an active host GitHub CLI process could issue a provider operation"
+            )
     timeout_seconds = plan.get("policy", {}).get("healthTimeoutSeconds")
     if (
         isinstance(timeout_seconds, bool)
@@ -1219,14 +1468,40 @@ def _verify_provider_monitor_quiescence(
     selected_connections_json = json.dumps(
         selected_connections, sort_keys=True, separators=(",", ":")
     )
+    preservation_json = json.dumps(
+        None
+        if preserved_unknown is None
+        else {
+            "connectionRef": preserved_unknown["connectionRef"],
+            "rowSha256": preserved_unknown["invocationRowSha256"],
+            "requestIdSha256": preserved_unknown["requestIdSha256"],
+            "operationIdSha256": preserved_unknown["operationIdSha256"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    invocation_columns_json = json.dumps(
+        list(ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS),
+        separators=(",", ":"),
+    )
+    check_outbox_required = target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    outbox_columns_json = json.dumps(list(EXCHANGE_OUTBOX_JOB_COLUMNS), separators=(",", ":"))
     script = (
-        "import json,sqlite3,sys\n"
+        "import hashlib,json,sqlite3,sys\n"
         "from datetime import datetime,timedelta,timezone\n"
-        "database_path,selected_text,issuer,subject,organization_id,workspace_id,window_text,cloud_text=sys.argv[1:9]\n"
+        "database_path,selected_text,issuer,subject,organization_id,workspace_id,window_text,cloud_text,preservation_text,columns_text,outbox_text,outbox_columns_text=sys.argv[1:13]\n"
         "selected=json.loads(selected_text)\n"
         "window=int(window_text)\n"
         "cloud_refresh_required=cloud_text=='true'\n"
+        "preservation=json.loads(preservation_text)\n"
+        "invocation_columns=json.loads(columns_text)\n"
+        "outbox_idle_required=outbox_text=='true'\n"
+        "outbox_columns=json.loads(outbox_columns_text)\n"
         "now=datetime.now(timezone.utc)\n"
+        "def canonical(value): return json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False,allow_nan=False).encode()\n"
+        "def cell(value):\n"
+        " if isinstance(value,bytes): return {'sqliteType':'blob','sha256':hashlib.sha256(value).hexdigest(),'bytes':len(value)}\n"
+        " return {'sqliteType':type(value).__name__,'value':value}\n"
         "def utc(value,label):\n"
         " if not isinstance(value,str) or not value: raise RuntimeError(label+' is missing')\n"
         " parsed=datetime.fromisoformat(value[:-1]+'+00:00' if value.endswith('Z') else value)\n"
@@ -1240,6 +1515,13 @@ def _verify_provider_monitor_quiescence(
         " stored_provider={'github':'github','huggingface':'hf','azure':'azure','gcp':'gcp','runpod':'runpod'}\n"
         " active_leases=0\n"
         " inflight_calls=0\n"
+        " active_outbox_jobs=0\n"
+        " active_outbox_leases=0\n"
+        " preserved_unknown_count=0\n"
+        " preserved_unknown_sha=None\n"
+        " if preservation is not None:\n"
+        "  if not isinstance(preservation,dict) or set(preservation)!={'connectionRef','rowSha256','requestIdSha256','operationIdSha256'}: raise RuntimeError('preserved UNKNOWN binding is malformed')\n"
+        "  if [r[1] for r in db.execute('PRAGMA table_info(connector_invocations)')]!=invocation_columns or len(invocation_columns)!=20: raise RuntimeError('connector invocation schema differs from the sealed 20-column evidence')\n"
         " next_check_remaining=[]\n"
         " monitor_count=0\n"
         " for item in selected:\n"
@@ -1262,12 +1544,42 @@ def _verify_provider_monitor_quiescence(
         "  if lease_text is not None:\n"
         "   lease_expiry=utc(lease_text,provider+' monitor lease expiry')\n"
         "   active_leases+=int(lease_expiry>now)\n"
-        "  inflight_calls+=int(db.execute(\"SELECT COUNT(*) FROM connector_invocations WHERE organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND connection_ref=? AND provider_id=? AND state NOT IN ('SUCCEEDED','FAILED','REJECTED','RATE_LIMITED')\",(organization_id,workspace_id,issuer,subject,connection_ref,provider)).fetchone()[0])\n"
+        "  if preservation is None:\n"
+        "   inflight_calls+=int(db.execute(\"SELECT COUNT(*) FROM connector_invocations WHERE organization_id=? AND workspace_id=? AND actor_issuer=? AND actor_subject=? AND connection_ref=? AND provider_id=? AND state NOT IN ('SUCCEEDED','FAILED','REJECTED','RATE_LIMITED')\",(organization_id,workspace_id,issuer,subject,connection_ref,provider)).fetchone()[0])\n"
+        "  else:\n"
+        "   rows=db.execute(\"SELECT * FROM connector_invocations WHERE connection_ref=? AND state NOT IN ('SUCCEEDED','FAILED','REJECTED','RATE_LIMITED')\",(connection_ref,)).fetchall()\n"
+        "   for row in rows:\n"
+        "    if len(row)!=len(invocation_columns): raise RuntimeError('connector invocation row width changed')\n"
+        "    invocation=dict(zip(invocation_columns,row))\n"
+        "    if invocation['provider_id']!=provider or invocation['organization_id']!=organization_id or invocation['workspace_id']!=workspace_id or invocation['actor_issuer']!=issuer or invocation['actor_subject']!=subject: raise RuntimeError('nonterminal connector invocation is outside the exact selected actor binding')\n"
+        "    row_sha=hashlib.sha256(canonical([cell(value) for value in row])).hexdigest()\n"
+        "    inflight_calls+=1\n"
+        "    if provider=='github' and connection_ref==preservation['connectionRef'] and invocation['state']=='UNKNOWN_RESULT':\n"
+        "     request_sha=hashlib.sha256(str(invocation['request_id']).encode()).hexdigest()\n"
+        "     operation_sha=hashlib.sha256(str(invocation['operation_id']).encode()).hexdigest()\n"
+        "     if row_sha!=preservation['rowSha256'] or request_sha!=preservation['requestIdSha256'] or operation_sha!=preservation['operationIdSha256'] or preserved_unknown_count!=0: raise RuntimeError('historical GitHub UNKNOWN row differs from its sealed evidence')\n"
+        "     preserved_unknown_count=1\n"
+        "     preserved_unknown_sha=row_sha\n"
         "  next_check_remaining.append(int((next_check_at-now).total_seconds()))\n"
+        " if outbox_idle_required:\n"
+        "  if [r[1] for r in db.execute('PRAGMA table_info(outbox_jobs)')]!=outbox_columns or len(outbox_columns)!=19: raise RuntimeError('Exchange outbox schema differs from the pinned worker ABI')\n"
+        "  connection_ids=[item['connectionRef'] for item in selected]\n"
+        "  if len(connection_ids)!=len(set(connection_ids)): raise RuntimeError('selected outbox connection set has duplicates')\n"
+        "  placeholders=','.join('?' for _ in connection_ids)\n"
+        "  outbox_rows=db.execute('SELECT connection_id,organization_id,workspace_id,actor_issuer,actor_subject,state,claim_owner,lease_expires_at FROM outbox_jobs WHERE connection_id IN ('+placeholders+')',tuple(connection_ids)).fetchall()\n"
+        "  terminal_job_states={'ACCEPTED','SUCCEEDED','FAILED','UNKNOWN'}\n"
+        "  for outbox_row in outbox_rows:\n"
+        "   connection_id,job_org,job_workspace,job_issuer,job_subject,job_state,claim_owner,lease_text=outbox_row\n"
+        "   if connection_id not in connection_ids or job_org!=organization_id or job_workspace!=workspace_id or job_issuer!=issuer or job_subject!=subject: raise RuntimeError('Exchange outbox row is outside the exact selected actor connection scope')\n"
+        "   if not isinstance(job_state,str) or not job_state: raise RuntimeError('Exchange outbox state is malformed')\n"
+        "   active_outbox_jobs+=int(job_state not in terminal_job_states)\n"
+        "   if claim_owner is not None and (not isinstance(claim_owner,str) or not claim_owner): raise RuntimeError('Exchange outbox claim owner is malformed')\n"
+        "   if (claim_owner is None)!=(lease_text is None): raise RuntimeError('Exchange outbox claim lease fields are inconsistent')\n"
+        "   if lease_text is not None: active_outbox_leases+=int(utc(lease_text,'Exchange outbox lease expiry')>now)\n"
         " cloud_refresh=0\n"
         " if cloud_refresh_required:\n"
         "  cloud_refresh=int(db.execute(\"SELECT COUNT(*) FROM cloud_refresh_outbox WHERE state IN ('QUEUED','RUNNING')\").fetchone()[0])\n"
-        " report={'selectedProviderCount':len({item['providerId'] for item in selected}),'monitorStateCount':monitor_count,'activeMonitorLeaseCount':active_leases,'inFlightConnectorCallCount':inflight_calls,'nextCheckSecondsRemaining':min(next_check_remaining),'requiredWindowSeconds':window,'nextCheckWindowSatisfied':all(value>window for value in next_check_remaining),'cloudRefreshNonterminalCount':cloud_refresh}\n"
+        " report={'selectedProviderCount':len({item['providerId'] for item in selected}),'monitorStateCount':monitor_count,'activeMonitorLeaseCount':active_leases,'inFlightConnectorCallCount':inflight_calls,'preservedUnknownResultCount':preserved_unknown_count,'preservedUnknownRowSha256':preserved_unknown_sha,'activeOutboxJobCount':active_outbox_jobs,'activeOutboxJobLeaseCount':active_outbox_leases,'nextCheckSecondsRemaining':min(next_check_remaining),'requiredWindowSeconds':window,'nextCheckWindowSatisfied':all(value>window for value in next_check_remaining),'cloudRefreshNonterminalCount':cloud_refresh}\n"
         " print(json.dumps(report,sort_keys=True,separators=(',',':')))\n"
         "finally:\n"
         " db.close()\n"
@@ -1291,6 +1603,10 @@ def _verify_provider_monitor_quiescence(
                 actor["workspaceId"],
                 str(required_window_seconds),
                 "true" if include_cloud_refresh else "false",
+                preservation_json,
+                invocation_columns_json,
+                "true" if check_outbox_required else "false",
+                outbox_columns_json,
             ],
             label="Connector authorization monitor quiescence readback",
             timeout_seconds=15,
@@ -1308,6 +1624,10 @@ def _verify_provider_monitor_quiescence(
         "monitorStateCount",
         "activeMonitorLeaseCount",
         "inFlightConnectorCallCount",
+        "preservedUnknownResultCount",
+        "preservedUnknownRowSha256",
+        "activeOutboxJobCount",
+        "activeOutboxJobLeaseCount",
         "nextCheckSecondsRemaining",
         "requiredWindowSeconds",
         "nextCheckWindowSatisfied",
@@ -1323,6 +1643,9 @@ def _verify_provider_monitor_quiescence(
                 "monitorStateCount",
                 "activeMonitorLeaseCount",
                 "inFlightConnectorCallCount",
+                "preservedUnknownResultCount",
+                "activeOutboxJobCount",
+                "activeOutboxJobLeaseCount",
                 "nextCheckSecondsRemaining",
                 "requiredWindowSeconds",
                 "cloudRefreshNonterminalCount",
@@ -1332,17 +1655,45 @@ def _verify_provider_monitor_quiescence(
         or report.get("monitorStateCount") != expected_monitor_count
         or report.get("activeMonitorLeaseCount", -1) < 0
         or report.get("inFlightConnectorCallCount", -1) < 0
+        or report.get("preservedUnknownResultCount", -1) < 0
+        or report.get("activeOutboxJobCount", -1) < 0
+        or report.get("activeOutboxJobLeaseCount", -1) < 0
         or report.get("requiredWindowSeconds") != required_window_seconds
         or report.get("cloudRefreshNonterminalCount", -1) < 0
+        or (
+            report.get("preservedUnknownRowSha256") is not None
+            and (
+                not isinstance(report.get("preservedUnknownRowSha256"), str)
+                or SHA256_RE.fullmatch(report["preservedUnknownRowSha256"]) is None
+            )
+        )
         or not isinstance(report.get("nextCheckWindowSatisfied"), bool)
     ):
         raise StageTransitionError("connector authorization monitor report is malformed")
 
+    expected_preserved_count = 1 if preserved_unknown is not None else 0
+    expected_preserved_sha256 = (
+        preserved_unknown.get("invocationRowSha256")
+        if isinstance(preserved_unknown, dict)
+        else None
+    )
+    active_in_flight_count = (
+        report["inFlightConnectorCallCount"] - report["preservedUnknownResultCount"]
+    )
+    if active_in_flight_count < 0:
+        raise StageTransitionError("connector monitor report has an impossible UNKNOWN count")
     verified = (
         report["activeMonitorLeaseCount"] == 0
-        and report["inFlightConnectorCallCount"] == 0
+        and active_in_flight_count == 0
+        and report["inFlightConnectorCallCount"] == expected_preserved_count
+        and report["preservedUnknownResultCount"] == expected_preserved_count
+        and report["preservedUnknownRowSha256"] == expected_preserved_sha256
+        and report["activeOutboxJobCount"] == 0
+        and report["activeOutboxJobLeaseCount"] == 0
         and report["nextCheckWindowSatisfied"] is True
         and report["cloudRefreshNonterminalCount"] == 0
+        and all(value == 0 for value in active_gh_process_count_by_service.values())
+        and (target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET or active_host_gh_process_count == 0)
     )
     reference_hashes = {
         provider: [_sha256_bytes(connection_ref.encode("utf-8")) for connection_ref in refs]
@@ -1355,6 +1706,19 @@ def _verify_provider_monitor_quiescence(
         "connectionRefsSha256": _sha256_bytes(_canonical_json(reference_hashes)),
         "activeMonitorLeaseCount": report["activeMonitorLeaseCount"],
         "inFlightConnectorCallCount": report["inFlightConnectorCallCount"],
+        "rawNonterminalConnectorInvocationCount": report["inFlightConnectorCallCount"],
+        "preservedUnknownResultCount": report["preservedUnknownResultCount"],
+        "activeInFlightConnectorCallCount": active_in_flight_count,
+        "preservedUnknownRowSha256": report["preservedUnknownRowSha256"],
+        "preservedUnknownStatus": (
+            "PRESERVED_UNKNOWN_NOT_RESOLVED"
+            if preserved_unknown is not None
+            else "NO_UNKNOWN_RESULT"
+        ),
+        "activeGitHubCliProcessCountByService": active_gh_process_count_by_service,
+        "activeHostGitHubCliProcessCount": active_host_gh_process_count,
+        "activeOutboxJobCount": report["activeOutboxJobCount"],
+        "activeOutboxJobLeaseCount": report["activeOutboxJobLeaseCount"],
         "nextCheckSecondsRemaining": report["nextCheckSecondsRemaining"],
         "requiredWindowSeconds": required_window_seconds,
         "cloudRefreshNonterminalCount": report["cloudRefreshNonterminalCount"],
@@ -1363,7 +1727,10 @@ def _verify_provider_monitor_quiescence(
     update_state = journal.get(target_journal_key)
     if not isinstance(update_state, dict) or update_state.get("required") is not True:
         raise StageTransitionError("connector image update journal state is malformed")
-    update_state["monitorQuiescence"] = evidence
+    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and checkpoint == "after":
+        update_state["afterMonitorQuiescence"] = evidence
+    else:
+        update_state["monitorQuiescence"] = evidence
     _write_journal(
         journal_path,
         journal,
@@ -1372,8 +1739,16 @@ def _verify_provider_monitor_quiescence(
     if not verified:
         if report["activeMonitorLeaseCount"]:
             reason = "a live provider authorization monitor lease exists"
-        elif report["inFlightConnectorCallCount"]:
-            reason = "a nonterminal provider connector invocation exists"
+        elif active_in_flight_count:
+            reason = "a nonterminal provider connector invocation exists besides the sealed UNKNOWN result"
+        elif report["preservedUnknownResultCount"] != expected_preserved_count:
+            reason = "the exact sealed UNKNOWN result is not still present"
+        elif any(active_gh_process_count_by_service.values()):
+            reason = "a GitHub CLI process could replay the preserved UNKNOWN operation"
+        elif active_host_gh_process_count:
+            reason = "a host GitHub CLI process could issue a provider operation"
+        elif report["activeOutboxJobCount"] or report["activeOutboxJobLeaseCount"]:
+            reason = "Exchange has selected-actor connector jobs or active dispatcher leases"
         elif report["cloudRefreshNonterminalCount"]:
             reason = "the Exchange cloud refresh outbox is not empty"
         else:
@@ -4054,7 +4429,14 @@ def _validate_account_center_database_state(database: Any) -> None:
         "additionalMicrosoftProfileCount",
         "additionalMicrosoftProfileIdentitySha256",
     }
-    if not isinstance(database, dict) or set(database) != database_fields:
+    optional_count_fields = {
+        "recoveryPredicateCounts",
+        "liveCredentialLeaseCounts",
+    }
+    if not isinstance(database, dict) or set(database) not in (
+        database_fields,
+        database_fields | optional_count_fields,
+    ):
         raise StageTransitionError("Account Center database identity record is malformed")
     microsoft_count = database.get("additionalMicrosoftProfileCount")
     microsoft_digest = database.get("additionalMicrosoftProfileIdentitySha256")
@@ -4092,6 +4474,23 @@ def _validate_account_center_database_state(database: Any) -> None:
         raise StageTransitionError(
             "Account Center image update requires schema 9 and the five fixed provider identities"
         )
+    if optional_count_fields <= set(database):
+        for field, expected_names in (
+            ("recoveryPredicateCounts", ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES),
+            ("liveCredentialLeaseCounts", ACCOUNT_CENTER_LIVE_IDLE_COUNTS),
+        ):
+            counts = database.get(field)
+            if (
+                not isinstance(counts, dict)
+                or set(counts) != expected_names
+                or any(
+                    isinstance(count, bool) or not isinstance(count, int) or count < 0
+                    for count in counts.values()
+                )
+            ):
+                raise StageTransitionError(
+                    "Account Center startup-recovery/idle count record is malformed"
+                )
 
 
 def _account_center_database_state_matches_baseline(expected: Any, actual: Any) -> bool:
@@ -4102,12 +4501,283 @@ def _account_center_database_state_matches_baseline(expected: Any, actual: Any) 
     return actual == expected
 
 
+def _parse_private_utc_timestamp(value: Any, label: str) -> datetime:
+    """Parse a strict UTC timestamp used by the private startup-replay receipt."""
+
+    if not isinstance(value, str) or not value:
+        raise StageTransitionError(f"{label} timestamp is malformed")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as error:
+        raise StageTransitionError(f"{label} timestamp is malformed") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise StageTransitionError(f"{label} timestamp is not UTC")
+    return parsed.astimezone(UTC)
+
+
+def _account_center_preserved_unknown_summary(
+    *,
+    evidence_path: Path,
+    evidence_record: dict[str, str],
+    database_state: dict[str, Any],
+    candidate_compose: dict[str, Any],
+    candidate_image_id: str,
+    candidate_image_lock_sha256: str,
+) -> dict[str, Any]:
+    """Seal one exact historical GitHub UNKNOWN row and its candidate startup replay proof."""
+
+    _verify_operator_private_file_record(
+        evidence_record, "Account Center unknown preservation evidence"
+    )
+    if evidence_record.get("path") != str(evidence_path.resolve(strict=True)):
+        raise StageTransitionError("Account Center unknown preservation evidence path changed")
+    evidence = _read_json(
+        evidence_path,
+        "Account Center unknown preservation evidence",
+        maximum_bytes=ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES,
+    )
+    evidence_fields = {
+        "schemaVersion",
+        "state",
+        "createdAtUtc",
+        "currentDatabase",
+        "historicalUnknown",
+        "candidateStartupReplay",
+    }
+    current_database_fields = {
+        "snapshotSha256",
+        "schemaVersion",
+        "schemaSha256",
+        "foreignKeyViolationCount",
+        "quickCheck",
+        "protectedProviderCount",
+        "protectedProvidersSha256",
+        "additionalMicrosoftProfileCount",
+        "additionalMicrosoftProfileIdentitySha256",
+        "recoveryPredicateCounts",
+        "liveCredentialLeaseCounts",
+    }
+    historical_fields = {
+        "providerId",
+        "connectionRef",
+        "actorSha256",
+        "rowSha256",
+        "requestIdSha256",
+        "operationIdSha256",
+        "state",
+        "rowCount",
+        "columnCount",
+    }
+    replay_fields = {
+        "state",
+        "candidateImageId",
+        "candidateImageLockSha256",
+        "sourceDatabaseSnapshotSha256",
+        "sourceSchemaVersion",
+        "sourceSchemaSha256",
+        "schemaBeforeSha256",
+        "schemaAfterSha256",
+        "allTableLogicalDigestBeforeSha256",
+        "allTableLogicalDigestAfterSha256",
+        "protectedFiveCredentialDigestBeforeSha256",
+        "protectedFiveCredentialDigestAfterSha256",
+        "networkMode",
+        "liveDatabaseMounted",
+        "secretMountsReadOnly",
+        "credentialsExported",
+        "activeContainerIdsUnchanged",
+        "recoveryPredicateCounts",
+        "replayScriptSha256",
+    }
+    if (
+        set(evidence) != evidence_fields
+        or evidence.get("schemaVersion") != ACCOUNT_CENTER_UNKNOWN_PRESERVATION_SCHEMA
+        or evidence.get("state") != "OPERATOR_RECORDED_STARTUP_REPLAY_PASS"
+    ):
+        raise StageTransitionError(
+            "Account Center unknown preservation evidence schema/state is invalid"
+        )
+    created_at = _parse_private_utc_timestamp(
+        evidence.get("createdAtUtc"), "Account Center preservation evidence"
+    )
+    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+    if age_seconds < -30 or age_seconds > ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS:
+        raise StageTransitionError("Account Center unknown preservation evidence is stale")
+
+    current_database = evidence.get("currentDatabase")
+    if not isinstance(current_database, dict) or set(current_database) != current_database_fields:
+        raise StageTransitionError("Account Center current database evidence is malformed")
+    database_baseline = {
+        key: current_database[key]
+        for key in current_database_fields
+        if key not in {"snapshotSha256"}
+    }
+    database_baseline["databasePathSha256"] = database_state.get("databasePathSha256")
+    _validate_account_center_database_state(database_baseline)
+    _account_center_zero_recovery_counts(
+        current_database.get("recoveryPredicateCounts"),
+        current_database.get("liveCredentialLeaseCounts"),
+        label="Account Center startup replay source snapshot",
+    )
+    if (
+        any(
+            current_database.get(field) != database_state.get(field)
+            for field in (
+                "schemaVersion",
+                "schemaSha256",
+                "foreignKeyViolationCount",
+                "quickCheck",
+                "protectedProviderCount",
+                "protectedProvidersSha256",
+                "additionalMicrosoftProfileCount",
+                "additionalMicrosoftProfileIdentitySha256",
+                "recoveryPredicateCounts",
+                "liveCredentialLeaseCounts",
+            )
+        )
+        or current_database.get("additionalMicrosoftProfileCount") != 0
+        or not isinstance(current_database.get("snapshotSha256"), str)
+        or SHA256_RE.fullmatch(current_database["snapshotSha256"]) is None
+    ):
+        raise StageTransitionError(
+            "Account Center preservation snapshot differs from the live schema-9 profile baseline"
+        )
+
+    historical = evidence.get("historicalUnknown")
+    if (
+        not isinstance(historical, dict)
+        or set(historical) != historical_fields
+        or historical.get("providerId") != "github"
+        or historical.get("state") != "UNKNOWN_RESULT"
+        or historical.get("rowCount") != 1
+        or isinstance(historical.get("rowCount"), bool)
+        or historical.get("columnCount") != 20
+        or isinstance(historical.get("columnCount"), bool)
+        or not isinstance(historical.get("connectionRef"), str)
+        or not isinstance(historical.get("actorSha256"), str)
+        or SHA256_RE.fullmatch(str(historical.get("actorSha256"))) is None
+        or not isinstance(historical.get("rowSha256"), str)
+        or SHA256_RE.fullmatch(str(historical.get("rowSha256"))) is None
+        or not isinstance(historical.get("requestIdSha256"), str)
+        or SHA256_RE.fullmatch(str(historical.get("requestIdSha256"))) is None
+        or not isinstance(historical.get("operationIdSha256"), str)
+        or SHA256_RE.fullmatch(str(historical.get("operationIdSha256"))) is None
+    ):
+        raise StageTransitionError("sealed historical GitHub UNKNOWN row is malformed")
+    try:
+        canonical_connection_ref = str(uuid.UUID(historical["connectionRef"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise StageTransitionError(
+            "sealed historical GitHub connection ref is malformed"
+        ) from error
+    if canonical_connection_ref != historical["connectionRef"]:
+        raise StageTransitionError("sealed historical GitHub connection ref is not canonical")
+    actor = preflight._connector_bootstrap_actor(candidate_compose)
+    actor_sha256 = _sha256_bytes(_canonical_json(actor))
+    if historical["actorSha256"] != actor_sha256:
+        raise StageTransitionError(
+            "historical GitHub UNKNOWN row actor differs from the selected owner"
+        )
+    bindings = _candidate_config_json(candidate_compose, "connector-bindings").get("bindings")
+    github_refs = (
+        {
+            row.get("connectionRef")
+            for row in bindings
+            if isinstance(row, dict) and row.get("providerId") == "github"
+        }
+        if isinstance(bindings, list)
+        else set()
+    )
+    if historical["connectionRef"] not in github_refs:
+        raise StageTransitionError(
+            "historical GitHub UNKNOWN row does not join a frozen GitHub binding"
+        )
+
+    replay = evidence.get("candidateStartupReplay")
+    if not isinstance(replay, dict) or set(replay) != replay_fields:
+        raise StageTransitionError("candidate startup replay receipt is malformed")
+    recovery_predicates = replay.get("recoveryPredicateCounts")
+    if (
+        replay.get("state") != "PASS"
+        or replay.get("candidateImageId") != candidate_image_id
+        or replay.get("candidateImageLockSha256") != candidate_image_lock_sha256
+        or replay.get("sourceDatabaseSnapshotSha256") != current_database["snapshotSha256"]
+        or replay.get("sourceSchemaVersion") != ACCOUNT_CENTER_DATABASE_USER_VERSION
+        or replay.get("sourceSchemaSha256") != current_database["schemaSha256"]
+        or replay.get("schemaBeforeSha256") != replay.get("schemaAfterSha256")
+        or replay.get("schemaBeforeSha256") != current_database["schemaSha256"]
+        or replay.get("allTableLogicalDigestBeforeSha256")
+        != replay.get("allTableLogicalDigestAfterSha256")
+        or replay.get("protectedFiveCredentialDigestBeforeSha256")
+        != replay.get("protectedFiveCredentialDigestAfterSha256")
+        or replay.get("protectedFiveCredentialDigestBeforeSha256")
+        != current_database["protectedProvidersSha256"]
+        or replay.get("networkMode") != "NONE"
+        or replay.get("liveDatabaseMounted") is not False
+        or replay.get("secretMountsReadOnly") is not True
+        or replay.get("credentialsExported") is not False
+        or replay.get("activeContainerIdsUnchanged") is not True
+        or not isinstance(replay.get("replayScriptSha256"), str)
+        or SHA256_RE.fullmatch(replay["replayScriptSha256"]) is None
+        or not isinstance(recovery_predicates, dict)
+        or set(recovery_predicates) != ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value != 0
+            for value in recovery_predicates.values()
+        )
+        or not isinstance(replay.get("schemaBeforeSha256"), str)
+        or SHA256_RE.fullmatch(replay["schemaBeforeSha256"]) is None
+        or not isinstance(replay.get("allTableLogicalDigestBeforeSha256"), str)
+        or SHA256_RE.fullmatch(replay["allTableLogicalDigestBeforeSha256"]) is None
+        or not isinstance(replay.get("protectedFiveCredentialDigestBeforeSha256"), str)
+        or SHA256_RE.fullmatch(replay["protectedFiveCredentialDigestBeforeSha256"]) is None
+    ):
+        raise StageTransitionError(
+            "candidate startup replay does not prove unchanged schema/data and zero recovery actions"
+        )
+    return {
+        "schemaVersion": 1,
+        "operatorEvidenceSha256": evidence_record["sha256"],
+        "providerId": "github",
+        "connectionRef": canonical_connection_ref,
+        "connectionRefSha256": _sha256_bytes(canonical_connection_ref.encode("utf-8")),
+        "actorSha256": actor_sha256,
+        "invocationRowSha256": historical["rowSha256"],
+        "requestIdSha256": historical["requestIdSha256"],
+        "operationIdSha256": historical["operationIdSha256"],
+        "startupReplaySha256": _sha256_bytes(_canonical_json(replay)),
+        "startupReplayScriptSha256": replay["replayScriptSha256"],
+        "candidateImageId": candidate_image_id,
+        "candidateImageLockSha256": candidate_image_lock_sha256,
+        "currentDatabaseSnapshotSha256": current_database["snapshotSha256"],
+    }
+
+
 def _validate_account_center_image_update_state(value: Any) -> None:
     """Require the sealed Account Center database state and exact 15-service budgets."""
 
-    if not isinstance(value, dict) or set(value) != {"database", "runtimeCapacity"}:
+    allowed_fields = {"database", "runtimeCapacity", "preservedUnknown"}
+    if not isinstance(value, dict) or set(value) not in (
+        allowed_fields - {"preservedUnknown"},
+        allowed_fields,
+    ):
         raise StageTransitionError("Account Center image update state is malformed")
-    _validate_account_center_database_state(value.get("database"))
+    database_state = value.get("database")
+    _validate_account_center_database_state(database_state)
+    if not isinstance(database_state, dict) or not {
+        "recoveryPredicateCounts",
+        "liveCredentialLeaseCounts",
+    } <= set(database_state):
+        raise StageTransitionError(
+            "Account Center image update requires a complete startup recovery baseline"
+        )
+    _account_center_zero_recovery_counts(
+        database_state["recoveryPredicateCounts"],
+        database_state["liveCredentialLeaseCounts"],
+        label="Account Center image update baseline",
+    )
+    if "preservedUnknown" in value:
+        _validate_account_center_preserved_unknown_state(value["preservedUnknown"])
     capacity = value.get("runtimeCapacity")
     capacity_fields = {
         "serviceCount",
@@ -4144,6 +4814,222 @@ def _validate_account_center_image_update_state(value: Any) -> None:
         )
 
 
+def _validate_account_center_preserved_unknown_state(value: Any) -> None:
+    """Validate one private, digest-bound GitHub UNKNOWN preservation plan record."""
+
+    fields = {
+        "schemaVersion",
+        "operatorEvidenceSha256",
+        "providerId",
+        "connectionRef",
+        "connectionRefSha256",
+        "actorSha256",
+        "invocationRowSha256",
+        "requestIdSha256",
+        "operationIdSha256",
+        "startupReplaySha256",
+        "startupReplayScriptSha256",
+        "candidateImageId",
+        "candidateImageLockSha256",
+        "currentDatabaseSnapshotSha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("schemaVersion") != 1
+        or isinstance(value.get("schemaVersion"), bool)
+        or value.get("providerId") != "github"
+        or not isinstance(value.get("connectionRef"), str)
+        or any(
+            not isinstance(value.get(field), str) or SHA256_RE.fullmatch(value[field]) is None
+            for field in (
+                "operatorEvidenceSha256",
+                "connectionRefSha256",
+                "actorSha256",
+                "invocationRowSha256",
+                "requestIdSha256",
+                "operationIdSha256",
+                "startupReplaySha256",
+                "startupReplayScriptSha256",
+                "candidateImageLockSha256",
+                "currentDatabaseSnapshotSha256",
+            )
+        )
+        or not isinstance(value.get("candidateImageId"), str)
+        or IMAGE_ID_RE.fullmatch(value["candidateImageId"]) is None
+    ):
+        raise StageTransitionError("Account Center preserved UNKNOWN plan record is malformed")
+    try:
+        canonical_connection_ref = str(uuid.UUID(value["connectionRef"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise StageTransitionError(
+            "Account Center preserved UNKNOWN connection reference is malformed"
+        ) from error
+    if canonical_connection_ref != value["connectionRef"]:
+        raise StageTransitionError(
+            "Account Center preserved UNKNOWN connection reference is not canonical"
+        )
+    if value["connectionRefSha256"] != _sha256_bytes(value["connectionRef"].encode("utf-8")):
+        raise StageTransitionError(
+            "Account Center preserved UNKNOWN connection reference digest changed"
+        )
+
+
+def _account_center_profile_logical_rows(rows: list[tuple[Any, ...]]) -> list[list[Any]]:
+    """Normalize all profile metadata while replacing encrypted blobs with local hashes."""
+
+    result: list[list[Any]] = []
+    for row in rows:
+        if len(row) != len(ACCOUNT_CENTER_PROFILE_COLUMN_NAMES):
+            raise StageTransitionError("Account Center provider profile schema changed")
+        normalized: list[dict[str, Any]] = []
+        for index, value in enumerate(row):
+            if index in ACCOUNT_CENTER_PROFILE_BLOB_COLUMN_INDICES:
+                if value is None:
+                    normalized.append({"sqliteType": "NoneType", "value": None})
+                elif isinstance(value, (bytes, bytearray, memoryview)):
+                    blob_bytes = bytes(value)
+                    normalized.append(
+                        {
+                            "sqliteType": "blob",
+                            "sha256": _sha256_bytes(blob_bytes),
+                            "bytes": len(blob_bytes),
+                        }
+                    )
+                else:
+                    raise StageTransitionError(
+                        "Account Center profile credential blob has an unsupported SQLite type"
+                    )
+            else:
+                normalized.append({"sqliteType": type(value).__name__, "value": value})
+        result.append(normalized)
+    return result
+
+
+def _account_center_startup_recovery_counts(
+    connection: sqlite3.Connection, *, now: int
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Count the exact 439 startup mutations and schema-valid live credential leases."""
+
+    def count(query: str, parameters: tuple[Any, ...] = ()) -> int:
+        row = connection.execute(query, parameters).fetchone()
+        if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
+            raise StageTransitionError("Account Center startup recovery count is malformed")
+        return row[0]
+
+    recovery = {
+        "provider_profiles_active_refresh_claims": count(
+            "SELECT COUNT(*) FROM provider_profiles WHERE status='active' "
+            "AND refresh_claim_id IS NOT NULL"
+        ),
+        "provider_profiles_active_stale_refresh_claims": count(
+            "SELECT COUNT(*) FROM provider_profiles WHERE status='active' "
+            "AND refresh_claim_id IS NOT NULL AND refresh_claimed_at<=?",
+            (now - 45,),
+        ),
+        "accounts_refresh_pending": count(
+            "SELECT COUNT(*) FROM accounts WHERE credential_status='refresh_pending'"
+        ),
+        "accounts_active_refresh_claims": count(
+            "SELECT COUNT(*) FROM accounts WHERE refresh_claim_id IS NOT NULL"
+        ),
+        "provider_profiles_hf_reauth_lease_deletions": count(
+            "SELECT COUNT(*) FROM provider_credential_leases WHERE profile_ref IN "
+            "(SELECT profile_ref FROM provider_profiles WHERE provider='huggingface' "
+            "AND auth_status='reauthorization_required')"
+        ),
+        "accounts_reauth_lease_deletions": count(
+            "SELECT COUNT(*) FROM credential_leases WHERE account_ref IN "
+            "(SELECT account_ref FROM accounts WHERE credential_status='reauthorization_required')"
+        ),
+        "accounts_pending_remote_revocation": count(
+            "SELECT COUNT(*) FROM accounts WHERE status='unlinked' "
+            "AND remote_revocation_status='pending'"
+        ),
+        "microsoft_entra_processing_sessions": count(
+            "SELECT COUNT(*) FROM microsoft_entra_oauth_sessions WHERE status='processing'"
+        ),
+        "github_processing_link_sessions_without_blob": count(
+            "SELECT COUNT(*) FROM link_sessions WHERE provider='github' AND status='processing' "
+            "AND pending_credential_blob IS NULL"
+        ),
+        "github_interrupted_callback_revocations": count(
+            "SELECT COUNT(*) FROM link_sessions WHERE provider='github' AND status='processing' "
+            "AND pending_credential_blob IS NOT NULL"
+        ),
+        "hf_device_starting_stale": count(
+            "SELECT COUNT(*) FROM huggingface_device_renewal_sessions WHERE status='starting' "
+            "AND created_at<=?",
+            (now - 60,),
+        ),
+        "hf_device_active_poll_claims": count(
+            "SELECT COUNT(*) FROM huggingface_device_renewal_sessions "
+            "WHERE poll_claim_id IS NOT NULL"
+        ),
+        "hf_device_poll_stale_foreign_claim": count(
+            "SELECT COUNT(*) FROM huggingface_device_renewal_sessions "
+            "WHERE status='waiting_user' AND poll_claim_id IS NOT NULL "
+            "AND poll_claimed_at<=?",
+            (now - 45,),
+        ),
+        "accounts_interrupted_unlink_commands": count(
+            "SELECT COUNT(*) FROM accounts WHERE status='unlinked' "
+            "AND remote_revocation_status='unknown' AND remote_revocation_command_hash IS NOT NULL"
+        ),
+        "pending_idempotency": count(
+            "SELECT COUNT(*) FROM command_idempotency WHERE status='pending'"
+        ),
+    }
+    live_leases = {
+        "activeProviderCredentialLeases": count(
+            "SELECT COUNT(*) FROM provider_credential_leases AS lease "
+            "JOIN provider_profiles AS profile ON profile.profile_ref=lease.profile_ref "
+            "WHERE lease.redeemed_at IS NULL AND lease.expires_at>? "
+            "AND profile.status='active' AND profile.auth_status='healthy' "
+            "AND lease.anchor_issuer=profile.anchor_issuer "
+            "AND lease.anchor_subject=profile.anchor_subject "
+            "AND lease.organization_id=profile.organization_id "
+            "AND lease.workspace_id IS profile.workspace_id",
+            (now,),
+        ),
+        "activeAccountCredentialLeases": count(
+            "SELECT COUNT(*) FROM credential_leases AS lease "
+            "JOIN accounts AS account ON account.account_ref=lease.account_ref "
+            "WHERE lease.redeemed_at IS NULL AND lease.expires_at>? "
+            "AND account.status='active' AND account.credential_status IN ('ready','refresh_pending') "
+            "AND account.credential_blob IS NOT NULL "
+            "AND lease.anchor_issuer=account.anchor_issuer "
+            "AND lease.anchor_subject=account.anchor_subject "
+            "AND lease.organization_id=account.organization_id "
+            "AND lease.workspace_id IS account.workspace_id",
+            (now,),
+        ),
+    }
+    return recovery, live_leases
+
+
+def _account_center_zero_recovery_counts(recovery: Any, live_leases: Any, *, label: str) -> None:
+    """Require every pinned 439 startup mutation and live credential lease count to be empty."""
+
+    if (
+        not isinstance(recovery, dict)
+        or set(recovery) != ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value != 0
+            for value in recovery.values()
+        )
+        or not isinstance(live_leases, dict)
+        or set(live_leases) != ACCOUNT_CENTER_LIVE_IDLE_COUNTS
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value != 0
+            for value in live_leases.values()
+        )
+    ):
+        raise StageTransitionError(
+            f"{label} has Account Center startup recovery or credential claims"
+        )
+
+
 def _account_center_database_state(
     *,
     compose: dict[str, Any],
@@ -4152,6 +5038,7 @@ def _account_center_database_state(
     image_ref: str,
     image_id: str,
     docker_prefix: list[str],
+    include_startup_recovery_counts: bool = False,
 ) -> dict[str, Any]:
     """Read the mounted Account Center database without exposing profile values."""
 
@@ -4241,6 +5128,8 @@ def _account_center_database_state(
             "live Account Center environment differs from the sealed Compose configuration"
         )
     connection: sqlite3.Connection | None = None
+    startup_recovery_counts: dict[str, int] | None = None
+    live_idle_counts: dict[str, int] | None = None
     try:
         activation = json.loads(
             environment_values["CYRENE_CAPABILITY_CONFIGURATION_JSON"],
@@ -4282,12 +5171,23 @@ def _account_center_database_state(
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
         foreign_key_count = len(connection.execute("PRAGMA foreign_key_check").fetchall())
         quick_check = [row[0] for row in connection.execute("PRAGMA quick_check")]
+        profile_column_names = tuple(
+            row[1] for row in connection.execute("PRAGMA table_info(provider_profiles)")
+        )
+        if profile_column_names != ACCOUNT_CENTER_PROFILE_COLUMN_NAMES:
+            raise StageTransitionError(
+                "Account Center provider profile columns differ from the pinned schema-9 ABI"
+            )
         profiles = list(
             connection.execute(
                 f"SELECT {ACCOUNT_CENTER_PROFILE_COLUMNS} "
                 "FROM provider_profiles ORDER BY profile_ref"
             )
         )
+        if include_startup_recovery_counts:
+            startup_recovery_counts, live_idle_counts = _account_center_startup_recovery_counts(
+                connection, now=int(time.time())
+            )
     except sqlite3.Error as error:
         raise StageTransitionError(
             "Account Center SQLite read-only identity check failed"
@@ -4296,11 +5196,30 @@ def _account_center_database_state(
         if connection is not None:
             connection.close()
 
-    protected = [row for row in profiles if row[5] in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS]
-    extras = [row for row in profiles if row[5] not in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS]
+    logical_profiles = _account_center_profile_logical_rows(profiles)
+    row_digests_by_provider: dict[str, str] = {}
+    for row in logical_profiles:
+        provider_cell = row[5]
+        if not isinstance(provider_cell, dict) or provider_cell.get("sqliteType") != "str":
+            raise StageTransitionError("Account Center provider profile identity is malformed")
+        provider = provider_cell.get("value")
+        if not isinstance(provider, str) or provider in row_digests_by_provider:
+            raise StageTransitionError(
+                "Account Center provider profile identity is duplicate or malformed"
+            )
+        row_digests_by_provider[provider] = _sha256_bytes(_canonical_json(row))
+    protected_provider_digests = {
+        provider: row_digests_by_provider[provider]
+        for provider in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS
+        if provider in row_digests_by_provider
+    }
+    extras = {
+        provider: digest
+        for provider, digest in row_digests_by_provider.items()
+        if provider not in ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS
+    }
     if (
-        len(protected) != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
-        or {row[5] for row in protected} != ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS
+        len(protected_provider_digests) != len(ACCOUNT_CENTER_PROTECTED_PROFILE_PROVIDERS)
         or len(extras) > 1
     ):
         raise StageTransitionError(
@@ -4308,7 +5227,8 @@ def _account_center_database_state(
         )
     additional_microsoft_digest = None
     if extras:
-        extra = extras[0]
+        extra_provider = next(iter(extras))
+        extra = next(row for row in logical_profiles if row[5].get("value") == extra_provider)
         try:
             actor = preflight._connector_bootstrap_actor(compose)
         except preflight.PreflightError as error:
@@ -4321,26 +5241,49 @@ def _account_center_database_state(
                 not isinstance(actor.get(field), str) or not actor[field]
                 for field in ("issuer", "subject", "workspaceId")
             )
-            or extra[5] != ACCOUNT_CENTER_MICROSOFT_PROFILE_PROVIDER
-            or extra[1] != actor.get("issuer")
-            or extra[2] != actor.get("subject")
-            or extra[4] != actor.get("workspaceId")
+            or extra_provider != ACCOUNT_CENTER_MICROSOFT_PROFILE_PROVIDER
+            or extra[1].get("value") != actor.get("issuer")
+            or extra[2].get("value") != actor.get("subject")
+            or extra[4].get("value") != actor.get("workspaceId")
         ):
             raise StageTransitionError(
                 "additional Microsoft profile is not bound to the selected Office owner/workspace"
             )
-        additional_microsoft_digest = _sha256_bytes(_canonical_json(extras))
+        additional_microsoft_digest = _sha256_bytes(
+            _canonical_json(
+                {
+                    "columns": list(ACCOUNT_CENTER_PROFILE_COLUMN_NAMES),
+                    "providers": {extra_provider: extras[extra_provider]},
+                }
+            )
+        )
+    protected_digest = _sha256_bytes(
+        _canonical_json(
+            {
+                "columns": list(ACCOUNT_CENTER_PROFILE_COLUMN_NAMES),
+                "providers": protected_provider_digests,
+            }
+        )
+    )
     result = {
         "databasePathSha256": _sha256_bytes(str(resolved_database_path).encode("utf-8")),
         "schemaVersion": user_version,
         "schemaSha256": _sha256_bytes(_canonical_json(schema)),
         "foreignKeyViolationCount": foreign_key_count,
         "quickCheck": quick_check,
-        "protectedProviderCount": len(protected),
-        "protectedProvidersSha256": _sha256_bytes(_canonical_json(protected)),
+        "protectedProviderCount": len(protected_provider_digests),
+        "protectedProvidersSha256": protected_digest,
         "additionalMicrosoftProfileCount": len(extras),
         "additionalMicrosoftProfileIdentitySha256": additional_microsoft_digest,
     }
+    if include_startup_recovery_counts:
+        if startup_recovery_counts is None or live_idle_counts is None:
+            raise StageTransitionError("Account Center recovery counts were not captured")
+        _account_center_zero_recovery_counts(
+            startup_recovery_counts, live_idle_counts, label="Account Center database"
+        )
+        result["recoveryPredicateCounts"] = startup_recovery_counts
+        result["liveCredentialLeaseCounts"] = live_idle_counts
     _validate_account_center_database_state(result)
     return result
 
@@ -6757,6 +7700,7 @@ def create_plan(
     max_cpus: float,
     required_free_gib: float,
     minimum_mem_available_mib: int,
+    account_center_unknown_preservation_evidence: Path | None = None,
     ingress_exposure: str = "public-cutover",
     host_caddy_binary: str = "/usr/local/bin/caddy",
     openssl_binary: str = "openssl",
@@ -6781,6 +7725,12 @@ def create_plan(
     ):
         raise StageTransitionError(
             "Account Center image updates require the selected Graph phase and 3584 MiB/1.95 CPU budget"
+        )
+    if account_center_unknown_preservation_evidence is not None and (
+        image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    ):
+        raise StageTransitionError(
+            "historical UNKNOWN preservation evidence is only valid for an Account Center image update"
         )
     if image_update_target is not None and memory_update_target is not None:
         raise StageTransitionError("image and memory update modes are mutually exclusive")
@@ -6922,6 +7872,13 @@ def create_plan(
             else None
         ),
     }
+    if account_center_unknown_preservation_evidence is not None:
+        candidate_inputs["accountCenterUnknownPreservationEvidence"] = (
+            _operator_private_file_record(
+                account_center_unknown_preservation_evidence.resolve(strict=True),
+                "Account Center unknown preservation evidence",
+            )
+        )
     active_lock = runtime_update._load_lock(active_image_lock)
     candidate_lock = runtime_update._load_lock(candidate_image_lock)
     try:
@@ -7182,6 +8139,7 @@ def create_plan(
                 image_ref=account_center["imageRef"],
                 image_id=account_center["imageId"],
                 docker_prefix=docker_prefix,
+                include_startup_recovery_counts=True,
             ),
             "runtimeCapacity": _memory_update_actual_capacity(
                 compose=active_compose,
@@ -7191,6 +8149,28 @@ def create_plan(
                 docker_prefix=docker_prefix,
             ),
         }
+        preservation_evidence_record = candidate_inputs.get(
+            "accountCenterUnknownPreservationEvidence"
+        )
+        if preservation_evidence_record is not None:
+            selected_image = target_images.get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
+            candidate_image = (
+                selected_image.get("candidate") if isinstance(selected_image, dict) else None
+            )
+            if not isinstance(candidate_image, dict):
+                raise StageTransitionError(
+                    "Account Center candidate image is unavailable for UNKNOWN preservation"
+                )
+            account_center_image_update_state["preservedUnknown"] = (
+                _account_center_preserved_unknown_summary(
+                    evidence_path=Path(preservation_evidence_record["path"]),
+                    evidence_record=preservation_evidence_record,
+                    database_state=account_center_image_update_state["database"],
+                    candidate_compose=candidate_compose,
+                    candidate_image_id=candidate_image.get("imageId"),
+                    candidate_image_lock_sha256=candidate_inputs["imageLock"]["sha256"],
+                )
+            )
         _validate_account_center_image_update_state(account_center_image_update_state)
 
     operation_id = str(uuid.uuid4())
@@ -7644,6 +8624,20 @@ def _validate_plan(plan: dict[str, Any]) -> None:
                     f"Account Center image update changes an unselected image: {service_name}"
                 )
         _validate_account_center_image_update_state(plan.get("accountCenterImageUpdateState"))
+        account_center_state = plan["accountCenterImageUpdateState"]
+        preserved_unknown = account_center_state.get("preservedUnknown")
+        evidence_record = plan["candidateInputs"].get("accountCenterUnknownPreservationEvidence")
+        if preserved_unknown is None:
+            if evidence_record is not None:
+                raise StageTransitionError(
+                    "Account Center UNKNOWN evidence is present without explicit plan opt-in"
+                )
+        elif not isinstance(evidence_record, dict) or evidence_record.get(
+            "sha256"
+        ) != preserved_unknown.get("operatorEvidenceSha256"):
+            raise StageTransitionError(
+                "Account Center preserved UNKNOWN state is not bound to its private evidence input"
+            )
     if listener_repair:
         if (
             _runtime_service_shape(plan["activeServices"], "listener repair active plan")
@@ -8013,6 +9007,11 @@ def _verify_all_inputs(plan: dict[str, Any]) -> None:
             "configDirectoryFiles",
             "secretFiles",
         }:
+            continue
+        if key == "accountCenterUnknownPreservationEvidence":
+            _verify_operator_private_file_record(
+                value, "Account Center unknown preservation evidence"
+            )
             continue
         if value is None:
             continue
@@ -10107,7 +11106,11 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             "afterRuntimeCapacity": None,
             "beforeReadiness": None,
             "monitorQuiescence": None,
+            "afterMonitorQuiescence": None,
             "afterReadiness": None,
+            "preservedUnknownPlan": copy.deepcopy(
+                plan.get("accountCenterImageUpdateState", {}).get("preservedUnknown")
+            ),
             "identityReadbackStatus": "PENDING",
         },
         "cloudRunnerIdle": {
@@ -10482,6 +11485,11 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(account_center_update, dict)
         else None
     )
+    account_center_after_monitor = (
+        account_center_update.get("afterMonitorQuiescence")
+        if isinstance(account_center_update, dict)
+        else None
+    )
     account_center_before = (
         account_center_update.get("beforeReadiness")
         if isinstance(account_center_update, dict)
@@ -10492,15 +11500,41 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(account_center_update, dict)
         else None
     )
+    account_center_unknown_expected = isinstance(
+        account_center_update.get("preservedUnknownPlan"), dict
+    )
+    account_center_before_monitor_blocked = (
+        isinstance(account_center_monitor, dict) and account_center_monitor.get("verified") is False
+    )
+    account_center_after_monitor_blocked = (
+        isinstance(account_center_after_monitor, dict)
+        and account_center_after_monitor.get("verified") is False
+    )
     account_center_monitor_status = (
         "NOT_REQUIRED"
         if not account_center_update_required
         else "VERIFIED"
         if isinstance(account_center_monitor, dict)
         and account_center_monitor.get("verified") is True
+        and isinstance(account_center_after_monitor, dict)
+        and account_center_after_monitor.get("verified") is True
         else "BLOCKED"
+        if account_center_before_monitor_blocked or account_center_after_monitor_blocked
+        else "PENDING"
+    )
+    account_center_unknown_status = (
+        "NOT_REQUIRED"
+        if not account_center_unknown_expected
+        else "PRESERVED_UNKNOWN_NOT_RESOLVED"
         if isinstance(account_center_monitor, dict)
-        and account_center_monitor.get("verified") is False
+        and account_center_monitor.get("preservedUnknownStatus") == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+        and isinstance(account_center_after_monitor, dict)
+        and account_center_after_monitor.get("preservedUnknownStatus")
+        == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+        and account_center_monitor.get("preservedUnknownRowSha256")
+        == account_center_after_monitor.get("preservedUnknownRowSha256")
+        else "BLOCKED"
+        if account_center_monitor_status == "BLOCKED"
         else "PENDING"
     )
     account_center_update_status = (
@@ -10615,6 +11649,32 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "accountCenterImageUpdateRequired": account_center_update_required,
         "accountCenterImageUpdateStatus": account_center_update_status,
         "accountCenterMonitorQuiescenceStatus": account_center_monitor_status,
+        "accountCenterUnknownPreservationStatus": account_center_unknown_status,
+        "accountCenterRawNonterminalConnectorInvocationCount": (
+            account_center_after_monitor.get("rawNonterminalConnectorInvocationCount")
+            if isinstance(account_center_after_monitor, dict)
+            else None
+        ),
+        "accountCenterPreservedUnknownResultCount": (
+            account_center_after_monitor.get("preservedUnknownResultCount")
+            if isinstance(account_center_after_monitor, dict)
+            else None
+        ),
+        "accountCenterActiveInFlightConnectorCallCount": (
+            account_center_after_monitor.get("activeInFlightConnectorCallCount")
+            if isinstance(account_center_after_monitor, dict)
+            else None
+        ),
+        "accountCenterActiveOutboxJobCount": (
+            account_center_after_monitor.get("activeOutboxJobCount")
+            if isinstance(account_center_after_monitor, dict)
+            else None
+        ),
+        "accountCenterActiveOutboxJobLeaseCount": (
+            account_center_after_monitor.get("activeOutboxJobLeaseCount")
+            if isinstance(account_center_after_monitor, dict)
+            else None
+        ),
         "accountCenterBeforeReadinessStatus": (
             "NOT_REQUIRED"
             if not account_center_update_required
@@ -10630,6 +11690,13 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             if isinstance(account_center_after, dict)
             and account_center_after.get("verified") is True
             else "PENDING"
+        ),
+        "accountCenterMicrosoftGraphStatus": (
+            account_center_after.get("microsoftGraphStatus")
+            if isinstance(account_center_after, dict)
+            else account_center_before.get("microsoftGraphStatus")
+            if isinstance(account_center_before, dict)
+            else None
         ),
         "accountCenterSchemaVersion": (
             account_center_before_database.get("schemaVersion")
@@ -11988,6 +13055,7 @@ def apply_plan_file(
                 image_ref=account_center["imageRef"],
                 image_id=account_center["imageId"],
                 docker_prefix=docker_prefix,
+                include_startup_recovery_counts=True,
             )
             capacity_state = _memory_update_actual_capacity(
                 compose=active_compose,
@@ -12186,6 +13254,7 @@ def apply_plan_file(
                         image_ref=account_center["imageRef"],
                         image_id=account_center["imageId"],
                         docker_prefix=docker_prefix,
+                        include_startup_recovery_counts=True,
                     )
                     capacity_state = _memory_update_actual_capacity(
                         compose=active_compose,
@@ -12285,6 +13354,15 @@ def apply_plan_file(
                             plan, journal, candidate_compose=candidate_compose
                         )
                     )
+                    if update_key == "accountCenterImageUpdate":
+                        _verify_provider_monitor_quiescence(
+                            plan=plan,
+                            candidate_compose=candidate_compose,
+                            journal=journal,
+                            journal_path=journal_path,
+                            docker_prefix=docker_prefix,
+                            checkpoint="after",
+                        )
                     _write_journal(
                         journal_path,
                         journal,
@@ -12427,6 +13505,7 @@ def apply_plan_file(
                         image_ref=candidate_account_center["imageRef"],
                         image_id=candidate_account_center["imageId"],
                         docker_prefix=docker_prefix,
+                        include_startup_recovery_counts=True,
                     )
                 except StageTransitionError as error:
                     account_center_state["identityReadbackStatus"] = "UNREADABLE"
@@ -12754,6 +13833,7 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate-runpod-key-file", type=Path)
     parser.add_argument("--connector-auth-evidence", type=Path, required=True)
     parser.add_argument("--connector-auth-task-id", required=True)
+    parser.add_argument("--account-center-unknown-preservation-evidence", type=Path)
     parser.add_argument("--notification-anchor-file", type=Path)
     parser.add_argument("--notification-provenance-file", type=Path)
     parser.add_argument("--active-selection", type=Path)
@@ -12836,6 +13916,11 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 connector_auth_evidence=arguments.connector_auth_evidence.resolve(),
                 connector_auth_task_id=arguments.connector_auth_task_id,
+                account_center_unknown_preservation_evidence=(
+                    arguments.account_center_unknown_preservation_evidence.resolve()
+                    if arguments.account_center_unknown_preservation_evidence is not None
+                    else None
+                ),
                 notification_anchor_file=(
                     arguments.notification_anchor_file.resolve()
                     if arguments.notification_anchor_file
