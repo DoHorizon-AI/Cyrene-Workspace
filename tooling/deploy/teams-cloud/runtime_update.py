@@ -399,6 +399,21 @@ def _validate_compose_pair(
 
     if active.get("name") != candidate.get("name"):
         raise RuntimeUpdateError("active and candidate Compose project names differ")
+    if targets == ["workspace-authority"]:
+        for config in (active, candidate):
+            services = config.get("services")
+            authority = services.get("workspace-authority") if isinstance(services, dict) else None
+            operator = services.get("directory-operator") if isinstance(services, dict) else None
+            if (
+                not isinstance(authority, dict)
+                or not isinstance(operator, dict)
+                or not isinstance(authority.get("image"), str)
+                or not isinstance(operator.get("image"), str)
+                or operator["image"] != authority["image"]
+            ):
+                raise RuntimeUpdateError(
+                    "directory-operator image must remain an exact alias of Workspace Authority"
+                )
     active_without_images = json.loads(json.dumps(active))
     candidate_without_images = json.loads(json.dumps(candidate))
     for target in targets:
@@ -408,6 +423,13 @@ def _validate_compose_pair(
             if not isinstance(service, dict) or not isinstance(service.get("image"), str):
                 raise RuntimeUpdateError(f"Compose target {target} is missing its image reference")
             service.pop("image")
+    if targets == ["workspace-authority"]:
+        for config in (active_without_images, candidate_without_images):
+            services = config.get("services")
+            operator = services.get("directory-operator") if isinstance(services, dict) else None
+            if not isinstance(operator, dict):
+                raise RuntimeUpdateError("Compose directory-operator service is unavailable")
+            operator.pop("image")
     if active_without_images != candidate_without_images:
         raise RuntimeUpdateError(
             "candidate Compose changes configuration outside the selected immutable images"

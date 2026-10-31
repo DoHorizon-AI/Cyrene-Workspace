@@ -713,6 +713,9 @@ def _listener_repair_pair(
         lock_rows.append(
             (runtime_update.LOCK_SERVICE_FOR_TARGET.get(service_name, service_name), image, index)
         )
+    active["services"]["directory-operator"]["image"] = active["services"]["workspace-authority"][
+        "image"
+    ]
 
     persistence = active["services"]["navigator-persistence"]
     persistence["environment"]["NAVIGATOR_DATABASE_PATH"] = stage_transition.DATABASE_PATH
@@ -1843,6 +1846,8 @@ def test_workspace_authority_image_update_changes_only_its_image_in_exact_graph_
     candidate_lock = copy.deepcopy(active_lock)
     candidate_ref = "example.invalid/workspace-authority:office-update"
     candidate["services"][target]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
     authority_row = next(
         row
         for row in candidate_lock["images"]
@@ -1882,6 +1887,8 @@ def test_workspace_authority_image_update_rejects_other_phase_and_non_target_loc
     candidate_lock = copy.deepcopy(active_lock)
     candidate_ref = "example.invalid/workspace-authority:office-update"
     candidate["services"][target]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
     candidate_row = next(
         row for row in candidate_lock["images"] if row["service"] == "workspace-authority"
     )
@@ -1897,6 +1904,23 @@ def test_workspace_authority_image_update_rejects_other_phase_and_non_target_loc
             image_update_target=target,
             active=active,
             candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    mismatched_alias = copy.deepcopy(candidate)
+    mismatched_alias["services"]["directory-operator"]["image"] = (
+        "example.invalid/workspace-authority:unlocked-alias"
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="directory-operator image must remain an exact alias",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=target,
+            active=active,
+            candidate=mismatched_alias,
             active_lock=active_lock,
             candidate_lock=candidate_lock,
         )
@@ -1958,6 +1982,8 @@ def test_workspace_authority_plan_closes_to_one_graph_runtime_target(
     candidate_lock = copy.deepcopy(active_lock)
     candidate_ref = "example.invalid/workspace-authority:office-plan"
     candidate["services"][target]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
+    candidate["services"]["directory-operator"]["image"] = candidate_ref
     authority_row = next(
         row
         for row in candidate_lock["images"]

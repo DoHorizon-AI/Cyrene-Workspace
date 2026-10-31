@@ -4400,11 +4400,36 @@ def _validate_image_update_topology(
         raise StageTransitionError("image update must keep the exact active service inventory")
     active_definition = copy.deepcopy(active)
     candidate_definition = copy.deepcopy(candidate)
+    if target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
+        for source in (active, candidate):
+            services = source.get("services")
+            authority = (
+                services.get(WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET)
+                if isinstance(services, dict)
+                else None
+            )
+            operator = services.get("directory-operator") if isinstance(services, dict) else None
+            if (
+                not isinstance(authority, dict)
+                or not isinstance(operator, dict)
+                or not isinstance(authority.get("image"), str)
+                or not isinstance(operator.get("image"), str)
+                or operator["image"] != authority["image"]
+            ):
+                raise StageTransitionError(
+                    "directory-operator image must remain an exact alias of Workspace Authority"
+                )
     for compose in (active_definition, candidate_definition):
         service = compose.get("services", {}).get(target)
         if not isinstance(service, dict) or not isinstance(service.get("image"), str):
             raise StageTransitionError(f"image update target {target} has no image reference")
         service.pop("image")
+        if target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
+            services = compose.get("services", {})
+            operator = services.get("directory-operator") if isinstance(services, dict) else None
+            if not isinstance(operator, dict):
+                raise StageTransitionError("Compose directory-operator service is unavailable")
+            operator.pop("image", None)
     if active_definition != candidate_definition:
         raise StageTransitionError("image update may change only its selected service image")
     old_shape = _runtime_service_shape(old_services, "active image update")
