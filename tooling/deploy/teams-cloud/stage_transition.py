@@ -97,7 +97,6 @@ OFFICE_GRAPH_STAGE_TARGET_ORDER = (
     "teams-provider",
     "teams-ingress",
     "navigator",
-    "workspace-authority",
 )
 OFFICE_PERSONAL_ROUTE_SECRET_NAMES = frozenset(
     {
