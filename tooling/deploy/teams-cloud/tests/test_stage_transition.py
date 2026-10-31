@@ -297,6 +297,77 @@ def test_create_plan_consumes_statuses_after_transport_and_single_validation(
     assert any("/internal/v1/executor/drain" in url for url in requested_urls)
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
+    ],
+)
+def test_graph_runtime_image_plan_requires_exact_bootstrap_budget_before_io(
+    target: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authorize only the Graph continuation and preserve its exact resource envelope."""
+
+    monkeypatch.setattr(runtime_update, "_require_update_operator", lambda: None)
+    monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
+
+    def stop_before_io(_path: Path) -> None:
+        raise RuntimeError("reached output boundary")
+
+    monkeypatch.setattr(stage_transition, "_validate_output_directory", stop_before_io)
+    arguments: dict[str, Any] = {
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "image_update_target": target,
+        "active_compose_files": [tmp_path / "compose.yaml"],
+        "active_env_files": [],
+        "active_image_lock": tmp_path / "active-lock.json",
+        "candidate_compose_files": [tmp_path / "compose.yaml"],
+        "candidate_env_files": [],
+        "candidate_image_lock": tmp_path / "candidate-lock.json",
+        "secrets_dir": tmp_path / "secrets",
+        "active_config_dir": tmp_path / "active-config",
+        "candidate_config_dir": tmp_path / "candidate-config",
+        "candidate_huggingface_seed": tmp_path / "huggingface-seed",
+        "candidate_runpod_key_file": None,
+        "connector_auth_evidence": tmp_path / "connector-auth-evidence.json",
+        "connector_auth_task_id": "image-update-test",
+        "notification_anchor_file": None,
+        "notification_provenance_file": None,
+        "active_selection_file": tmp_path / "runtime-selection.json",
+        "promote_selection_file": tmp_path / "runtime-selection.json",
+        "backup_dir": tmp_path / "backups",
+        "journal_dir": tmp_path / "journals",
+        "plan_path": tmp_path / "plan.json",
+        "docker_prefix": ["docker"],
+        "drain_timeout_seconds": 300,
+        "health_timeout_seconds": 300,
+        "max_memory_mib": 3584,
+        "max_cpus": 1.95,
+        "required_free_gib": 2.0,
+        "minimum_mem_available_mib": 1024,
+    }
+
+    for field, invalid_value in (("max_memory_mib", 3583), ("max_cpus", 1.90)):
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget",
+        ):
+            stage_transition.create_plan(**{**arguments, field: invalid_value})
+
+    with pytest.raises(RuntimeError, match="reached output boundary"):
+        stage_transition.create_plan(**arguments)
+
+    if target == stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET:
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="Persistence image updates require the selected Graph bootstrap or issued activation phase",
+        ):
+            stage_transition.create_plan(**{**arguments, "phase": "provider-bootstrap"})
+
+
 def test_apply_baseline_consumes_statuses_after_transport_and_single_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2030,6 +2101,14 @@ def test_microsoft_graph_image_update_is_limited_to_graph_bootstrap(tmp_path: Pa
             stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
             stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         ),
+        (
+            stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
+        (
+            stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
     ],
 )
 def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
@@ -2137,7 +2216,15 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
         else (
             f"Exchange Graph-bootstrap image update changes an unselected image: {unselected_service}"
             if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET
-            else f"Microsoft Graph image update changes an unselected image: {unselected_service}"
+            else (
+                f"Microsoft Graph image update changes an unselected image: {unselected_service}"
+                if target == stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
+                else (
+                    f"Navigator image update changes an unselected image: {unselected_service}"
+                    if target == stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET
+                    else f"Persistence image update changes an unselected image: {unselected_service}"
+                )
+            )
         )
     )
     with pytest.raises(
@@ -2149,6 +2236,8 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     if target in {
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     }:
         wrong_budget = copy.deepcopy(plan)
         wrong_budget["candidatePreflight"]["maxCpus"] = 1.90
@@ -2157,11 +2246,30 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
                 {key: value for key, value in wrong_budget.items() if key != "planSha256"}
             )
         )
+        expected_budget_error = (
+            "exact 15-service Graph runtime and budgets"
+            if target in stage_transition.OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS
+            else "exact 15-service topology and budget"
+        )
         with pytest.raises(
             stage_transition.StageTransitionError,
-            match="exact 15-service topology and budget",
+            match=expected_budget_error,
         ):
             stage_transition._validate_plan(wrong_budget)
+
+    if target in stage_transition.OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS:
+        wrong_compose_budget = copy.deepcopy(plan)
+        wrong_compose_budget["candidatePreflight"]["composeCgroupCpuLimit"] = 1.90
+        wrong_compose_budget["planSha256"] = stage_transition._sha256_bytes(
+            stage_transition._canonical_json(
+                {key: value for key, value in wrong_compose_budget.items() if key != "planSha256"}
+            )
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="exact 15-service Graph runtime and budgets",
+        ):
+            stage_transition._validate_plan(wrong_compose_budget)
 
 
 def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
@@ -4763,7 +4871,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
     )
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Persistence image updates require issued-connector-activation",
+        match="Persistence image updates require the selected Graph bootstrap or issued activation phase",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -5053,6 +5161,23 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         candidate_inputs=candidate_inputs,
         runtime_config_identity=identity,
     )
+    for target in (
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target=target,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            project="cyrene-teams-cloud",
+            selection_record=graph_bootstrap_selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
 
     bootstrap_selection = copy.deepcopy(selection)
     bootstrap_selection["document"]["phase"] = "provider-bootstrap"
@@ -5079,6 +5204,23 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
     ):
         stage_transition._validate_image_update_selection_contract(
             target="github-issues",
+            phase="provider-bootstrap",
+            project="cyrene-teams-cloud",
+            selection_record=bootstrap_selection,
+            selection_path="/private/runtime-selection.json",
+            active_config_dir="/private/config",
+            candidate_config_dir="/private/config",
+            active_secrets_dir="/private/secrets",
+            active_inputs=active_inputs,
+            candidate_inputs=candidate_inputs,
+            runtime_config_identity=identity,
+        )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Persistence image updates require the selected Graph bootstrap or issued activation phase",
+    ):
+        stage_transition._validate_image_update_selection_contract(
+            target=stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
             phase="provider-bootstrap",
             project="cyrene-teams-cloud",
             selection_record=bootstrap_selection,
@@ -9376,12 +9518,17 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_changing_nav_inputs(
     target: str, tmp_path: Path
 ) -> None:
-    """Verify the live Graph delta without adding Graph to frozen Navigator inputs."""
+    """Verify the read-only live Graph delta without changing frozen Navigator inputs.
+
+    中文：复用现有 Graph profile/operation-map 只读验收，不写入 Navigator 冻结输入。
+    """
 
     snapshot, compose, _database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9487,10 +9634,18 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
         "microsoft_graph",
         "runpod",
     ]
+    assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
     assert receipt["connectionRefByProvider"]["microsoft_graph"] == (
         "77777777-7777-4777-8777-777777777777"
     )
-    assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
+    graph_binding = next(
+        row for row in snapshot["bindings"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_catalog = next(
+        row for row in snapshot["catalog"]["items"] if row["providerId"] == "microsoft_graph"
+    )
+    assert all(row["mutating"] is False for row in graph_binding["tools"])
+    assert all(row["readOnly"] is True for row in graph_catalog["tools"])
     assert receipt["bindingCount"] == len(frozen_bindings["bindings"]) + 1 == 16
     assert receipt["connectionCount"] == len(snapshot["connections"]) == 16
     assert receipt["profileCount"] == len(snapshot["profiles"]) == 7
@@ -9605,6 +9760,8 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 @pytest.mark.parametrize(
@@ -9722,6 +9879,8 @@ def test_graph_bootstrap_image_update_rejects_invalid_live_graph_delta(
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_rejects_graph_in_frozen_navigator_inputs(
@@ -9789,6 +9948,8 @@ def test_workspace_authority_graph_bootstrap_delta_does_not_apply_to_other_targe
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_readiness_requires_linked_profile(
@@ -9821,6 +9982,8 @@ def test_graph_bootstrap_image_readiness_requires_linked_profile(
     [
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_exchange_graph_bootstrap_live_graph_delta_is_not_allowed_in_issued_phase(
