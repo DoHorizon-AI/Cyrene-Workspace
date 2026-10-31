@@ -54,6 +54,43 @@ def test_computer_proxy_compose_uses_the_image_lock_generated_key(tmp_path: Path
     assert image.startswith("${CYRENE_IMAGE_COMPUTER_RUNTIME_PROXY:")
 
 
+def test_authority_rust_builder_uses_index_for_build_platform_only() -> None:
+    """Cross-build Authority with the host child while keeping runtime inputs ARM64-pinned."""
+
+    arm_digest = "a" * 64
+    index_digest = "b" * 64
+    resolved = {
+        "reference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "immutableReference": "rust:1.96.1-slim-bookworm@sha256:" + arm_digest,
+        "indexReference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "indexDigest": "sha256:" + index_digest,
+        "arm64ManifestDigest": "sha256:" + arm_digest,
+        "platform": "linux/arm64",
+    }
+
+    authority_rust, authority_key, authority_lock = build._base_image_build_input(
+        "workspace-authority", "RUST_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    assert authority_rust == resolved["indexReference"]
+    assert authority_key == "workspace-authority.RUST_BASE_IMAGE"
+    assert authority_lock["buildInputReference"] == resolved["indexReference"]
+    assert authority_lock["buildInputPlatform"] == "linux/amd64"
+    assert authority_lock["immutableReference"] == resolved["immutableReference"]
+
+    authority_runtime, runtime_key, runtime_lock = build._base_image_build_input(
+        "workspace-authority", "RUNTIME_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    other_rust, other_key, other_lock = build._base_image_build_input(
+        "computer-runtime", "RUST_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    assert authority_runtime == resolved["immutableReference"]
+    assert runtime_key == "RUNTIME_BASE_IMAGE"
+    assert runtime_lock["buildInputPlatform"] == "linux/arm64"
+    assert other_rust == resolved["immutableReference"]
+    assert other_key == "RUST_BASE_IMAGE"
+    assert other_lock["buildInputPlatform"] == "linux/arm64"
+
+
 def _plan() -> dict[str, Any]:
     """Build the smallest valid plan with immutable ARM64 image indexes."""
 

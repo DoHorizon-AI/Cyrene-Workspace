@@ -51,10 +51,15 @@ IMAGE_UPDATE_TARGETS = frozenset(
         "huggingface",
         "navigator",
         "navigator-persistence",
+        "workspace-authority",
     }
 )
 ACCOUNT_CENTER_IMAGE_UPDATE_TARGET = "account-center"
 ACCOUNT_CENTER_IMAGE_UPDATE_PHASES = frozenset(
+    {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+)
+WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET = "workspace-authority"
+WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES = frozenset(
     {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
 )
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
@@ -70,6 +75,7 @@ EXCHANGE_READINESS_IMAGE_TARGETS = frozenset(
         "cloud-management-phase2",
         "exchange",
         GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
     }
 )
 IMAGE_UPDATE_READINESS_TARGETS = EXCHANGE_READINESS_IMAGE_TARGETS | frozenset(
@@ -91,6 +97,7 @@ OFFICE_GRAPH_STAGE_TARGET_ORDER = (
     "teams-provider",
     "teams-ingress",
     "navigator",
+    "workspace-authority",
 )
 OFFICE_PERSONAL_ROUTE_SECRET_NAMES = frozenset(
     {
@@ -4318,12 +4325,12 @@ def _validate_image_update_topology(
 ) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Allow one immutable service image change on an existing topology.
 
-    中文：镜像更新沿用现有 14 服务拓扑，只能替换一个已授权目标。
+    中文：镜像更新沿用现有运行拓扑，只能替换一个已授权目标。
     """
 
     if not isinstance(target, str) or target not in IMAGE_UPDATE_TARGETS:
         raise StageTransitionError(
-            "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence"
+            "image update target must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, Persistence, or Workspace Authority"
         )
     if (
         target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
@@ -4348,6 +4355,13 @@ def _validate_image_update_topology(
         raise StageTransitionError(
             "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
+    if (
+        target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and phase not in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+    ):
+        raise StageTransitionError(
+            "Workspace Authority image updates require the selected Graph bootstrap or issued activation phase"
+        )
     if sum(name == "navigator" for name in new_services) != 1:
         raise StageTransitionError("image update must retain exactly one Navigator executor")
     if (
@@ -4356,6 +4370,13 @@ def _validate_image_update_topology(
     ):
         raise StageTransitionError(
             "Account Center image update must preserve the exact 15-service Graph runtime"
+        )
+    if (
+        target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and set(new_services) != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    ):
+        raise StageTransitionError(
+            "Workspace Authority image update must preserve the exact 15-service Graph runtime"
         )
 
     try:
@@ -7990,6 +8011,13 @@ def create_plan(
         raise StageTransitionError(
             "Account Center candidate Compose must retain the 3584 MiB/1.95 CPU budget"
         )
+    if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET and (
+        candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+        or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+    ):
+        raise StageTransitionError(
+            "Workspace Authority candidate Compose must retain the 3584 MiB/1.95 CPU budget"
+        )
     if (
         image_update_target is not None
         or memory_update_target is not None
@@ -8470,6 +8498,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError(
             "Persistence image updates require issued-connector-activation and the existing connector runtime"
         )
+    if (
+        image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and plan.get("phase") not in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+    ):
+        raise StageTransitionError(
+            "Workspace Authority image updates require the selected Graph bootstrap or issued activation phase"
+        )
     if memory_update_target is not None and plan.get("phase") != "issued-connector-activation":
         raise StageTransitionError("memory updates require issued-connector-activation")
     if listener_repair and plan.get("phase") != "provider-bootstrap":
@@ -8477,13 +8512,17 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
         (
             image_update_target is not None
-            and image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+            and image_update_target
+            not in {
+                ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+                WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            }
         )
         or memory_update_target is not None
         or listener_repair
     ):
         raise StageTransitionError(
-            "Graph bootstrap permits only its closed Account Center image continuation"
+            "Graph bootstrap permits only its closed Account Center or Workspace Authority image continuation"
         )
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and "cloudRunnerState" in plan:
         raise StageTransitionError("Graph provider bootstrap must not change the cloud runner")
@@ -8499,9 +8538,12 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
         else SERVICE_ORDER
     )
-    if memory_update_target is None and plan["targets"] != [
-        name for name in expected_target_order if name in set(plan["targets"])
-    ]:
+    if (
+        memory_update_target is None
+        and image_update_target is None
+        and plan["targets"]
+        != [name for name in expected_target_order if name in set(plan["targets"])]
+    ):
         raise StageTransitionError("stage transition targets are not in canonical dependency order")
     if image_update_target is not None and plan["targets"] != [image_update_target]:
         raise StageTransitionError("image update plan must contain exactly its selected target")
@@ -8511,10 +8553,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
     candidate_runtime_services = set(plan.get("candidateServices", {}))
-    if (
-        plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
-        and image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
-    ):
+    if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and image_update_target is None:
         expected_targets = {
             "account-center",
             "exchange",
@@ -8641,6 +8680,48 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise StageTransitionError(
                 "Account Center preserved UNKNOWN state is not bound to its private evidence input"
             )
+    if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
+        candidate_preflight = plan.get("candidatePreflight")
+        if (
+            plan.get("phase") not in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+            or active_runtime_services != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+            or candidate_runtime_services != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+            or plan.get("targets") != [WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET]
+            or not isinstance(candidate_preflight, dict)
+            or candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+            or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+            or candidate_preflight.get("maxMemoryMiB") != 3584
+            or candidate_preflight.get("maxCpus") != 1.95
+        ):
+            raise StageTransitionError(
+                "Workspace Authority image update must preserve the exact 15-service Graph runtime and budgets"
+            )
+        for service_name, row in plan["candidateServices"].items():
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"active", "candidate", "added", "configChanged"}
+                or not isinstance(row.get("active"), dict)
+                or not isinstance(row.get("candidate"), dict)
+                or set(row["active"]) != {"imageRef", "imageId"}
+                or set(row["candidate"]) != {"imageRef", "imageId"}
+                or row.get("added") is not False
+                or row.get("configChanged") is not False
+                or (
+                    service_name == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+                    and (
+                        row["active"] == row["candidate"]
+                        or row["active"].get("imageRef") == row["candidate"].get("imageRef")
+                        or row["active"].get("imageId") == row["candidate"].get("imageId")
+                    )
+                )
+                or (
+                    service_name != WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+                    and row["active"] != row["candidate"]
+                )
+            ):
+                raise StageTransitionError(
+                    f"Workspace Authority image update changes an unselected image: {service_name}"
+                )
     if listener_repair:
         if (
             _runtime_service_shape(plan["activeServices"], "listener repair active plan")
@@ -10156,7 +10237,7 @@ def _verify_exchange_readiness_snapshot(
 
     if not listener_repair and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
         provider_ids = {row["providerId"] for row in live_bindings}
-        if (
+        if image_update_target != WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET and (
             "microsoft_graph" in provider_ids
             or any(row.get("providerId") == "microsoft_graph" for row in snapshot["profiles"])
             or any(row.get("providerId") == "microsoft_graph" for row in snapshot["connections"])
@@ -10164,7 +10245,10 @@ def _verify_exchange_readiness_snapshot(
             raise StageTransitionError(
                 "Graph bootstrap must not claim an issued Office profile before OAuth completes"
             )
-        if image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        if image_update_target not in {
+            ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+            WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        }:
             return {
                 "schemaVersion": 1,
                 "status": "LIVE_VERIFIED",
@@ -10699,6 +10783,12 @@ def _verify_exchange_readiness_snapshot(
             else {}
         ),
         **(
+            {"connectionRefByProvider": dict(sorted(live_connection_refs.items()))}
+            if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+            and phase in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+            else {}
+        ),
+        **(
             {"githubConnectionRefs": github_connection_refs}
             if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
             and github_connection_refs is not None
@@ -10927,6 +11017,40 @@ def _image_update_exchange_readiness_checkpoint(
         expected_binding_count = inventory["expectedBindingCount"]
         expected_profile_count = inventory["expectedProfileCount"]
         expected_connection_count = inventory["expectedConnectionCount"]
+    elif (
+        target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and plan.get("phase") in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+    ):
+        if not isinstance(candidate_compose, dict):
+            raise StageTransitionError(
+                "Workspace Authority readiness checkpoint requires its frozen candidate Compose"
+            )
+        expected_monitor_providers = sorted(set(expected_scope_digests) | {"microsoft_graph"})
+        if not {"huggingface", "azure", "gcp", "microsoft_graph"} <= set(
+            expected_monitor_providers
+        ):
+            raise StageTransitionError(
+                "Workspace Authority readiness requires the existing Graph/HF/Azure/GCP connections"
+            )
+        binding_document = _candidate_config_json(candidate_compose, "connector-bindings")
+        binding_rows = _sorted_exchange_bindings(binding_document.get("bindings"))
+        if sum(row["providerId"] == "microsoft_graph" for row in binding_rows) != 1:
+            raise StageTransitionError(
+                "Workspace Authority readiness requires the one configured Microsoft Graph binding"
+            )
+        connection_refs_from_bindings = [row["connectionRef"] for row in binding_rows]
+        if len(set(connection_refs_from_bindings)) != len(connection_refs_from_bindings):
+            raise StageTransitionError(
+                "Workspace Authority candidate bindings must have unique connection references"
+            )
+        expected_binding_count = len(binding_rows)
+        expected_connection_count = len(set(connection_refs_from_bindings))
+        expected_profile_count = len(
+            {(row["providerId"], row["profileRef"]) for row in binding_rows}
+        )
+        expected_verified_provider_ids = expected_monitor_providers
+        refs = receipt.get("connectionRefByProvider")
+        connection_refs = refs if isinstance(refs, dict) else {}
     else:
         raise StageTransitionError(
             "Exchange readiness checkpoint is outside its closed image-update route"
@@ -11094,6 +11218,11 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             and plan.get("phase") == "issued-connector-activation",
             "beforeReadiness": None,
             "monitorQuiescence": None,
+            "afterReadiness": None,
+        },
+        "workspaceAuthorityImageUpdate": {
+            "required": plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            "beforeReadiness": None,
             "afterReadiness": None,
         },
         "accountCenterImageUpdate": {
@@ -11430,6 +11559,32 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if github_issues_monitor_status == "BLOCKED"
         else "PENDING"
     )
+    authority_update = journal.get("workspaceAuthorityImageUpdate", {})
+    authority_update_required = (
+        authority_update.get("required") is True if isinstance(authority_update, dict) else False
+    )
+    authority_before = (
+        authority_update.get("beforeReadiness") if isinstance(authority_update, dict) else None
+    )
+    authority_after = (
+        authority_update.get("afterReadiness") if isinstance(authority_update, dict) else None
+    )
+    authority_update_status = (
+        "NOT_REQUIRED"
+        if not authority_update_required
+        else "RECOVERY_REQUIRED"
+        if journal.get("state") == "RECOVERY_REQUIRED"
+        else "VERIFIED"
+        if journal.get("state") == "APPLIED"
+        and isinstance(authority_before, dict)
+        and authority_before.get("verified") is True
+        and isinstance(authority_after, dict)
+        and authority_after.get("verified") is True
+        else "BLOCKED"
+        if (isinstance(authority_before, dict) and authority_before.get("verified") is False)
+        or (isinstance(authority_after, dict) and authority_after.get("verified") is False)
+        else "PENDING"
+    )
     cloud_idle = journal.get("cloudRunnerIdle", {})
     cloud_idle_required = (
         cloud_idle.get("required") is True if isinstance(cloud_idle, dict) else False
@@ -11647,6 +11802,22 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             if not github_issues_update_required
             else "LIVE_VERIFIED"
             if isinstance(github_issues_after, dict) and github_issues_after.get("verified") is True
+            else "PENDING"
+        ),
+        "workspaceAuthorityImageUpdateRequired": authority_update_required,
+        "workspaceAuthorityImageUpdateStatus": authority_update_status,
+        "workspaceAuthorityBeforeReadinessStatus": (
+            "NOT_REQUIRED"
+            if not authority_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(authority_before, dict) and authority_before.get("verified") is True
+            else "PENDING"
+        ),
+        "workspaceAuthorityAfterReadinessStatus": (
+            "NOT_REQUIRED"
+            if not authority_update_required
+            else "LIVE_VERIFIED"
+            if isinstance(authority_after, dict) and authority_after.get("verified") is True
             else "PENDING"
         ),
         "accountCenterImageUpdateRequired": account_center_update_required,
@@ -13209,6 +13380,10 @@ def apply_plan_file(
                         }
                         and plan.get("phase") == "issued-connector-activation"
                     )
+                    or (
+                        plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+                        and plan.get("phase") in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+                    )
                 ) and service_name == plan.get("imageUpdateTarget"):
                     if journal["exchangeReadiness"]["required"] is not True:
                         raise StageTransitionError(
@@ -13226,6 +13401,7 @@ def apply_plan_file(
                         HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
                         CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
+                        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET: "workspaceAuthorityImageUpdate",
                     }[plan["imageUpdateTarget"]]
                     update_state = journal[update_key]
                     update_state["beforeReadiness"] = _image_update_exchange_readiness_checkpoint(
@@ -13236,13 +13412,14 @@ def apply_plan_file(
                         journal,
                         "PROVIDER_EXCHANGE_READINESS_BEFORE_UPDATE_VERIFIED",
                     )
-                    _verify_provider_monitor_quiescence(
-                        plan=plan,
-                        candidate_compose=candidate_compose,
-                        journal=journal,
-                        journal_path=journal_path,
-                        docker_prefix=docker_prefix,
-                    )
+                    if plan.get("imageUpdateTarget") != WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
+                        _verify_provider_monitor_quiescence(
+                            plan=plan,
+                            candidate_compose=candidate_compose,
+                            journal=journal,
+                            journal_path=journal_path,
+                            docker_prefix=docker_prefix,
+                        )
                 if (
                     plan.get("imageUpdateTarget") == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
                     and service_name == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
@@ -13338,6 +13515,10 @@ def apply_plan_file(
                         }
                         and plan.get("phase") == "issued-connector-activation"
                     )
+                    or (
+                        plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+                        and plan.get("phase") in WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES
+                    )
                 ) and service_name == plan.get("imageUpdateTarget"):
                     _record_exchange_readiness(
                         plan=plan,
@@ -13351,6 +13532,7 @@ def apply_plan_file(
                         HUGGINGFACE_IMAGE_UPDATE_TARGET: "huggingfaceImageUpdate",
                         CLOUD_IMAGE_UPDATE_TARGET: "cloudImageUpdate",
                         GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "githubIssuesImageUpdate",
+                        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET: "workspaceAuthorityImageUpdate",
                     }[plan["imageUpdateTarget"]]
                     journal[update_key]["afterReadiness"] = (
                         _image_update_exchange_readiness_checkpoint(

@@ -49,7 +49,13 @@ STAGE_TRANSITION_TARGET_ORDER = (
 # Keep the one-shot stage Compose primitive aligned with both formal phase orders.
 # The legacy runtime-update CLI continues to use ALLOWED_TARGETS below.
 FORMAL_STAGE_TRANSITION_TARGETS = frozenset(
-    {*STAGE_TRANSITION_TARGET_ORDER, "microsoft-graph", "teams-provider", "teams-ingress"}
+    {
+        *STAGE_TRANSITION_TARGET_ORDER,
+        "microsoft-graph",
+        "teams-provider",
+        "teams-ingress",
+        "workspace-authority",
+    }
 )
 LEGACY_TARGETS_ONLY = ["exchange", "navigator"]
 ALLOWED_TARGETS = set(TARGET_ORDER)
@@ -61,6 +67,7 @@ LOCK_SERVICE_FOR_TARGET = {
     "account-center": "account-center",
     "exchange": "exchange",
     "cloud-management-phase2": "cloud-management",
+    "workspace-authority": "workspace-authority",
 }
 CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
 FULL_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
