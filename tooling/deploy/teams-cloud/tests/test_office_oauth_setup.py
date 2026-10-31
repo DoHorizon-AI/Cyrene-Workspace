@@ -69,6 +69,20 @@ def mail_features(
     return features
 
 
+def empty_selected_targets() -> dict[str, list[str]]:
+    """Return all seven selection categories with no selected IDs."""
+
+    return {
+        "plannerPlanIds": [],
+        "sharePointListIds": [],
+        "sharePointDriveIds": [],
+        "toDoTaskListIds": [],
+        "calendarIds": [],
+        "freebusySubjects": [],
+        "mailFolderIds": [],
+    }
+
+
 def status_document(
     *,
     state: str = "NOT_LINKED",
@@ -81,6 +95,7 @@ def status_document(
     enabled_features: dict[str, bool] | None = None,
     target_ref_count: int = 0,
     mail_authorization_state: str | None = None,
+    selected_targets: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Build the exact safe status projection emitted by the fixed Exchange CLI."""
 
@@ -104,6 +119,8 @@ def status_document(
     }
     if mail_authorization_state is not None:
         document["mailAuthorizationState"] = mail_authorization_state
+    if selected_targets is not None:
+        document["selectedTargets"] = {key: list(rows) for key, rows in selected_targets.items()}
     return document
 
 
@@ -170,7 +187,8 @@ class FakeBridge:
         self.linked = False
         self.flow_kind_override: str | None = None
         self.omit_flow_kind = False
-        self.status_value = status_document()
+        self.selected_targets = empty_selected_targets()
+        self.status_value = status_document(selected_targets=self.selected_targets)
         self.discoveries: dict[str, dict[str, Any]] = {
             "planner_plans": {
                 "resourceType": "planner_plans",
@@ -262,6 +280,8 @@ class FakeBridge:
                 scopes=scopes,
                 enabled_features=enabled_features,
                 mail_authorization_state=state,
+                target_ref_count=sum(map(len, self.selected_targets.values())),
+                selected_targets=self.selected_targets,
             )
             return dict(self.status_value)
         if operation == "discover":
@@ -279,6 +299,10 @@ class FakeBridge:
             return document
         if operation == "select-targets":
             revision = int(payload["expectedCredentialRevision"]) + 1
+            baseline = self.status_value.get("selectedTargets", self.selected_targets)
+            merged_targets = {key: list(rows) for key, rows in baseline.items()}
+            merged_targets.update({key: list(rows) for key, rows in payload["targets"].items()})
+            self.selected_targets = merged_targets
             self.status_value = status_document(
                 state="UPDATED",
                 auth_status="healthy",
@@ -287,10 +311,11 @@ class FakeBridge:
                 target_scope={"workspaceId": WORKSPACE, **payload["targets"]},
                 scopes=list(self.status_value["requiredOAuthScopes"]),
                 enabled_features=dict(self.status_value["enabledFeatures"]),
-                target_ref_count=sum(len(rows) for rows in payload["targets"].values()),
+                target_ref_count=sum(map(len, merged_targets.values())),
                 mail_authorization_state=self.status_value.get(
                     "mailAuthorizationState", "DISABLED"
                 ),
+                selected_targets=merged_targets,
             )
             return dict(self.status_value)
         raise AssertionError(f"unexpected operation: {operation}")
@@ -1048,6 +1073,33 @@ def test_status_requires_actor_owned_matching_provider_and_never_mail_scope() ->
     assert setup._safe_status(bad_owner, operator_context())["identityVerified"] is False
 
 
+def test_status_selected_targets_are_closed_bounded_and_match_target_count() -> None:
+    """Expose only the exact seven ID arrays and reject incomplete or inconsistent snapshots."""
+
+    selected = empty_selected_targets()
+    selected["plannerPlanIds"] = ["plan-1"]
+    status = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=0,
+        target_scope={"workspaceId": WORKSPACE},
+        target_ref_count=1,
+        selected_targets=selected,
+    )
+    safe = setup._safe_status(status, operator_context())
+    assert safe["selectedTargets"] == selected
+
+    incomplete = dict(status)
+    incomplete["selectedTargets"] = {"plannerPlanIds": ["plan-1"]}
+    with pytest.raises(setup.OfficeSetupError, match="office_status_selected_targets_invalid"):
+        setup._safe_status(incomplete, operator_context())
+
+    inconsistent = dict(status, targetRefCount=0)
+    with pytest.raises(setup.OfficeSetupError, match="office_status_selected_targets_invalid"):
+        setup._safe_status(inconsistent, operator_context())
+
+
 def test_discovery_and_cas_selection_accept_only_server_observed_targets(
     linked_service: tuple[setup.OfficeSetupService, FakeBridge, setup.SetupSession],
 ) -> None:
@@ -1076,10 +1128,21 @@ def test_discovery_and_cas_selection_accept_only_server_observed_targets(
 
 
 def test_mail_folder_discovery_and_selection_are_opt_in_and_server_observed() -> None:
-    """Only Mail metadata opt-in can discover and select a server-returned folder ID."""
+    """Mail-only changes preserve existing non-mail IDs in the live selectedTargets map."""
 
     features = mail_features(metadata=True)
     bridge = FakeBridge()
+    previous_targets = empty_selected_targets()
+    previous_targets.update(
+        {
+            "plannerPlanIds": ["kept-plan"],
+            "sharePointListIds": ["11111111-1111-4111-8111-111111111111"],
+            "toDoTaskListIds": ["kept-todo"],
+            "calendarIds": ["kept-calendar"],
+            "freebusySubjects": ["kept@example.invalid"],
+        }
+    )
+    bridge.selected_targets = previous_targets
     bridge.status_value = status_document(
         state="LINKED",
         auth_status="healthy",
@@ -1089,6 +1152,8 @@ def test_mail_folder_discovery_and_selection_are_opt_in_and_server_observed() ->
         scopes=SCOPES + ["Mail.ReadBasic"],
         enabled_features=features,
         mail_authorization_state="READY",
+        target_ref_count=sum(map(len, previous_targets.values())),
+        selected_targets=previous_targets,
     )
     service = setup.OfficeSetupService(bridge, operator_context=operator_context())
     _, session = service.create_session()
@@ -1097,20 +1162,29 @@ def test_mail_folder_discovery_and_selection_are_opt_in_and_server_observed() ->
     assert result["items"] == [
         {"id": "mail-folder-1", "displayName": "Inbox", "kind": "mail_folder"}
     ]
-    targets = {
-        "plannerPlanIds": [],
-        "sharePointListIds": [],
-        "sharePointDriveIds": [],
-        "toDoTaskListIds": [],
-        "calendarIds": [],
-        "freebusySubjects": [],
-        "mailFolderIds": ["mail-folder-1"],
-    }
+    targets = {"mailFolderIds": ["mail-folder-1"]}
     updated = service.select_targets(session, expected_revision=2, targets_value=targets)
     assert updated["selectedCounts"]["mailFolders"] == 1
+    assert updated["selectedTargets"]["plannerPlanIds"] == ["kept-plan"]
+    assert updated["selectedTargets"]["sharePointListIds"] == previous_targets["sharePointListIds"]
+    assert updated["selectedTargets"]["toDoTaskListIds"] == ["kept-todo"]
+    assert updated["selectedTargets"]["calendarIds"] == ["kept-calendar"]
+    assert updated["selectedTargets"]["freebusySubjects"] == ["kept@example.invalid"]
     operation, payload = bridge.calls[-1]
     assert operation == "select-targets"
     assert payload["targets"] == targets
+
+    cleared = service.select_targets(
+        session,
+        expected_revision=updated["credentialRevision"],
+        targets_value={"mailFolderIds": []},
+    )
+    assert cleared["selectedTargets"]["mailFolderIds"] == []
+    assert cleared["selectedTargets"]["plannerPlanIds"] == ["kept-plan"]
+    assert cleared["selectedTargets"]["sharePointListIds"] == previous_targets["sharePointListIds"]
+    operation, payload = bridge.calls[-1]
+    assert operation == "select-targets"
+    assert payload["targets"] == {"mailFolderIds": []}
 
 
 def test_mail_folders_require_ready_scope_and_exact_discovery_kind() -> None:
@@ -1141,6 +1215,61 @@ def test_mail_folders_require_ready_scope_and_exact_discovery_kind() -> None:
         service._invalidate_status_locked()
     with pytest.raises(setup.OfficeSetupError, match="office_discovery_item_invalid"):
         service.discover(session, "mail_folders")
+
+
+def test_legacy_status_without_selected_targets_never_sends_implicit_empty_categories() -> None:
+    """Permit a partial patch only when an old status proves there are no stored targets."""
+
+    features = mail_features(metadata=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=0,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES + ["Mail.ReadBasic"],
+        enabled_features=features,
+        mail_authorization_state="READY",
+        target_ref_count=0,
+    )
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    service.discover(session, "mail_folders")
+    result = service.select_targets(
+        session,
+        expected_revision=0,
+        targets_value={"mailFolderIds": ["mail-folder-1"]},
+    )
+    operation, payload = bridge.calls[-1]
+    assert operation == "select-targets"
+    assert payload["targets"] == {"mailFolderIds": ["mail-folder-1"]}
+    assert result["selectedTargets"]["mailFolderIds"] == ["mail-folder-1"]
+
+    blocked_bridge = FakeBridge()
+    blocked_bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=0,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES + ["Mail.ReadBasic"],
+        enabled_features=features,
+        mail_authorization_state="READY",
+        target_ref_count=2,
+    )
+    blocked_service = setup.OfficeSetupService(blocked_bridge, operator_context=operator_context())
+    _, blocked_session = blocked_service.create_session()
+    blocked_service.discover(blocked_session, "mail_folders")
+    before = len(blocked_bridge.calls)
+    with pytest.raises(setup.OfficeSetupError, match="office_target_selection_state_unavailable"):
+        blocked_service.select_targets(
+            blocked_session,
+            expected_revision=0,
+            targets_value={"mailFolderIds": ["mail-folder-1"]},
+        )
+    assert len(blocked_bridge.calls) == before
+    assert not any(operation == "select-targets" for operation, _ in blocked_bridge.calls[before:])
 
 
 def test_mail_upgrade_status_keeps_existing_non_mail_profile_usable() -> None:
@@ -1428,6 +1557,12 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         assert "refreshInFlight" in page_body
         assert "AUTHORIZATION_PREPARING" in page_body
         assert "setInterval(" not in page_body
+        assert (
+            "targetSelectionWritable=data.selectedTargets!==null||data.targetRefCount===0;"
+            in page_body
+        )
+        assert "for(const key of dirtyTargets) values[key]=[...selectedTargets[key]];" in page_body
+        assert "Clear selected: ${targetLabelByKey[key]}" in page_body
         assert 'target="cyrene-office-oauth"' in page_body
         assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body
         auth_submit = page_body.split("for(const form of [document.getElementById('authorize')", 1)[
