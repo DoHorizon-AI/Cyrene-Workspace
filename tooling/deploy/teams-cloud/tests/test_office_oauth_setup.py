@@ -96,6 +96,7 @@ def status_document(
     target_ref_count: int = 0,
     mail_authorization_state: str | None = None,
     selected_targets: dict[str, list[str]] | None = None,
+    selected_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Build the exact safe status projection emitted by the fixed Exchange CLI."""
 
@@ -121,6 +122,8 @@ def status_document(
         document["mailAuthorizationState"] = mail_authorization_state
     if selected_targets is not None:
         document["selectedTargets"] = {key: list(rows) for key, rows in selected_targets.items()}
+    if selected_counts is not None:
+        document["selectedCounts"] = dict(selected_counts)
     return document
 
 
@@ -188,7 +191,10 @@ class FakeBridge:
         self.flow_kind_override: str | None = None
         self.omit_flow_kind = False
         self.selected_targets = empty_selected_targets()
-        self.status_value = status_document(selected_targets=self.selected_targets)
+        self.status_value = status_document(
+            selected_targets=self.selected_targets,
+            selected_counts={"mailFolders": 0},
+        )
         self.discoveries: dict[str, dict[str, Any]] = {
             "planner_plans": {
                 "resourceType": "planner_plans",
@@ -282,6 +288,7 @@ class FakeBridge:
                 mail_authorization_state=state,
                 target_ref_count=sum(map(len, self.selected_targets.values())),
                 selected_targets=self.selected_targets,
+                selected_counts={"mailFolders": len(self.selected_targets["mailFolderIds"])},
             )
             return dict(self.status_value)
         if operation == "discover":
@@ -316,6 +323,7 @@ class FakeBridge:
                     "mailAuthorizationState", "DISABLED"
                 ),
                 selected_targets=merged_targets,
+                selected_counts={"mailFolders": len(merged_targets["mailFolderIds"])},
             )
             return dict(self.status_value)
         raise AssertionError(f"unexpected operation: {operation}")
@@ -882,6 +890,37 @@ def test_select_targets_invalidates_the_cached_status_snapshot(
     assert [op for op, _ in bridge.calls].count("status") == 2
 
 
+def test_select_targets_refuses_revision_changed_by_another_tab_before_bridge_write() -> None:
+    """Keep the service CAS gate effective when another tab advances the profile revision."""
+
+    bridge = FakeBridge()
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    service.status(session)
+
+    bridge.status_value = status_document(
+        state="UPDATED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=1,
+        target_scope={"workspaceId": WORKSPACE},
+        target_ref_count=0,
+        selected_targets=empty_selected_targets(),
+        selected_counts={"mailFolders": 0},
+    )
+    with service._lock:
+        service._invalidate_status_locked()
+
+    before = len(bridge.calls)
+    with pytest.raises(setup.OfficeSetupError, match="office_target_revision_conflict"):
+        service.select_targets(
+            session,
+            expected_revision=0,
+            targets_value={"mailFolderIds": []},
+        )
+    assert not any(operation == "select-targets" for operation, _ in bridge.calls[before:])
+
+
 def test_begin_reuses_status_that_finishes_while_it_waits_for_singleflight_lock() -> None:
     """A poll already in flight can satisfy begin without a duplicate cold status call."""
 
@@ -1098,6 +1137,10 @@ def test_status_selected_targets_are_closed_bounded_and_match_target_count() -> 
     inconsistent = dict(status, targetRefCount=0)
     with pytest.raises(setup.OfficeSetupError, match="office_status_selected_targets_invalid"):
         setup._safe_status(inconsistent, operator_context())
+
+    extra_count = dict(status, selectedCounts={"mailFolders": 0, "plannerPlans": 1})
+    with pytest.raises(setup.OfficeSetupError, match="office_status_selected_counts_invalid"):
+        setup._safe_status(extra_count, operator_context())
 
 
 def test_discovery_and_cas_selection_accept_only_server_observed_targets(
@@ -1563,6 +1606,15 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         )
         assert "for(const key of dirtyTargets) values[key]=[...selectedTargets[key]];" in page_body
         assert "Clear selected: ${targetLabelByKey[key]}" in page_body
+        conflict_guard = page_body.index(
+            "if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision)"
+        )
+        revision_update = page_body.index("revision=incomingRevision;", conflict_guard)
+        conflict_code = page_body[conflict_guard:revision_update]
+        assert "targetRevisionConflict=true" in conflict_code
+        assert "conflictingTargetStatus=data" in conflict_code
+        assert "return;" in conflict_code
+        assert "Reload latest targets and discard unsaved edits" in page_body
         assert 'target="cyrene-office-oauth"' in page_body
         assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body
         auth_submit = page_body.split("for(const form of [document.getElementById('authorize')", 1)[

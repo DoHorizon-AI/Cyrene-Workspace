@@ -639,13 +639,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "enabledFeatures",
         "targetRefCount",
     }
-    optional = {"mailAuthorizationState", "selectedTargets"}
-    if set(document) - required not in (
-        set(),
-        {"mailAuthorizationState"},
-        {"selectedTargets"},
-        optional,
-    ) or not required.issubset(document):
+    optional = {"mailAuthorizationState", "selectedTargets", "selectedCounts"}
+    if not required.issubset(document) or not (set(document) - required).issubset(optional):
         raise OfficeSetupError("office_status_invalid")
     if document.get("provider") != _EXCHANGE_PROVIDER_ID:
         raise OfficeSetupError("office_profile_provider_mismatch")
@@ -709,6 +704,22 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         if "selectedTargets" in document
         else None
     )
+    selected_counts: dict[str, int] | None = None
+    if "selectedCounts" in document:
+        raw_counts = document["selectedCounts"]
+        if (
+            not isinstance(raw_counts, dict)
+            or set(raw_counts) != {"mailFolders"}
+            or not isinstance(raw_counts["mailFolders"], int)
+            or isinstance(raw_counts["mailFolders"], bool)
+            or raw_counts["mailFolders"] < 0
+        ):
+            raise OfficeSetupError("office_status_selected_counts_invalid")
+        selected_counts = {"mailFolders": raw_counts["mailFolders"]}
+        if selected_targets is not None and selected_counts["mailFolders"] != len(
+            selected_targets["mailFolderIds"]
+        ):
+            raise OfficeSetupError("office_status_selected_counts_invalid")
     if selected_targets is not None:
         target_features = {
             "plannerPlanIds": "plannerEnabled",
@@ -784,6 +795,7 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "enabledFeatures": dict(enabled_features),
         "mailAuthorizationState": mail_authorization_state,
         "selectedTargets": selected_targets,
+        "selectedCounts": selected_counts,
         "targetRefCount": target_ref_count,
         "requiredOAuthScopes": list(scopes),
         "credentialRevision": revision,
@@ -1641,6 +1653,7 @@ def _page(*, nonce: str, csrf: str) -> bytes:
   <div id="resource-panels"></div>
   <button id="discover" type="button">Load available targets</button>
   <button id="save" type="button" disabled>Save selected targets</button>
+  <button id="reload-targets" type="button" hidden>Reload latest targets and discard unsaved edits</button>
   <p id="selection" role="status"></p>
 </section></main>
 <script nonce="__NONCE__">
@@ -1669,6 +1682,10 @@ let selectionHydrated=false;
 let targetSelectionWritable=false;
 let dirtyTargets=new Set();
 let unobservedDirtyTargets=new Set();
+let targetSaveInFlight=false;
+let targetEditRevision=null;
+let targetRevisionConflict=false;
+let conflictingTargetStatus=null;
 let sharePointSiteId=null;
 function emptySelectedTargets(){return {plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[],mailFolderIds:[]};}
 function rebuildSelectedGroups(){
@@ -1696,23 +1713,26 @@ function itemMatchesTarget(item,targetKey){
   return targetKey==='sharePointListIds'?isList:targetKey==='sharePointDriveIds'?!isList:true;
 }
 function updateTargetCategory(type,targetKey){
+  if(targetRevisionConflict||targetSaveInFlight)return;
   const rows=(discovered[type]||[]).filter(item=>itemMatchesTarget(item,targetKey));
   const observedIds=new Set(rows.map(item=>item.id));
   const checkedIds=new Set([...panels.querySelectorAll(`input[type=checkbox][data-resource="${type}"]:checked`)].map(input=>input.value));
   const retained=(selectedTargets[targetKey]||[]).filter(id=>!observedIds.has(id));
   const selectedRows=rows.filter(item=>checkedIds.has(item.id)).map(item=>item.id);
   selectedTargets[targetKey]=[...new Set([...retained,...selectedRows])];
+  if(targetEditRevision===null) targetEditRevision=revision;
   dirtyTargets.add(targetKey);
   if(retained.length) unobservedDirtyTargets.add(targetKey);
   else unobservedDirtyTargets.delete(targetKey);
   rebuildSelectedGroups();
 }
 function updateSaveButton(){
-  document.getElementById('save').disabled=!targetSelectionWritable||!dirtyTargets.size||[...dirtyTargets].some(key=>unobservedDirtyTargets.has(key));
+  document.getElementById('save').disabled=targetRevisionConflict||targetSaveInFlight||!targetSelectionWritable||!dirtyTargets.size||[...dirtyTargets].some(key=>unobservedDirtyTargets.has(key));
 }
 function clearTargetCategory(type,targetKey){
-  if(!targetSelectionWritable)return;
+  if(!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight)return;
   selectedTargets[targetKey]=[];
+  if(targetEditRevision===null) targetEditRevision=revision;
   dirtyTargets.add(targetKey);
   unobservedDirtyTargets.delete(targetKey);
   rebuildSelectedGroups();
@@ -1733,13 +1753,13 @@ function renderGroup(type,title,items){
   const section=document.createElement('section');
   const heading=document.createElement('h3'); heading.textContent=title; section.append(heading);
   for(const key of targetKeysForType(type)){
-    const clear=document.createElement('button');clear.type='button';clear.dataset.clearResource=type;clear.dataset.clearTarget=key;clear.disabled=!targetSelectionWritable;clear.textContent=`Clear selected: ${targetLabelByKey[key]}`;section.append(clear);
+    const clear=document.createElement('button');clear.type='button';clear.dataset.clearResource=type;clear.dataset.clearTarget=key;clear.disabled=!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight;clear.textContent=`Clear selected: ${targetLabelByKey[key]}`;section.append(clear);
   }
   if(!items.length){const empty=document.createElement('p');empty.textContent='No allowed resources were found.';section.append(empty);}
   for(const item of items){
     const label=document.createElement('label');
     const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.value=item.id;
-    checkbox.dataset.resource=type;checkbox.checked=(selected[type]||[]).includes(item.id);checkbox.disabled=!targetSelectionWritable;
+    checkbox.dataset.resource=type;checkbox.checked=(selected[type]||[]).includes(item.id);checkbox.disabled=!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight;
     const name=document.createElement('span');name.textContent=item.displayName;
     const kind=document.createElement('small');kind.textContent=' '+item.kind;
     label.append(checkbox,name,kind);
@@ -1800,7 +1820,24 @@ async function refresh(){
       }
       return;
     }
-    revision=data.credentialRevision;
+    const incomingRevision=data.credentialRevision;
+    if(targetRevisionConflict){
+      conflictingTargetStatus=data;
+      document.getElementById('selection').textContent=`Exchange changed to revision ${incomingRevision}. Reload the latest target snapshot to discard or review the unsaved edits.`;
+      updateSaveButton();
+      return;
+    }
+    if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision){
+      targetRevisionConflict=true;
+      conflictingTargetStatus=data;
+      document.getElementById('reload-targets').hidden=false;
+      document.getElementById('discover').disabled=true;
+      document.getElementById('selection').textContent=`Exchange changed from revision ${targetEditRevision} to ${incomingRevision}. Your unsaved edits are preserved; saving is blocked until you reload and review the latest targets.`;
+      updateSaveButton();
+      if(Object.keys(discovered).length) renderAll();
+      return;
+    }
+    revision=incomingRevision;
     enabledFeatures=data.enabledFeatures||{};
     mailAuthorizationState=data.mailAuthorizationState||'DISABLED';
     const previousTargetSelectionWritable=targetSelectionWritable;
@@ -1895,6 +1932,7 @@ for(const form of [document.getElementById('authorize'),document.getElementById(
   },AUTHORIZATION_WAIT_TIMEOUT_MS);
 });
 document.getElementById('discover').addEventListener('click',async()=>{
+  if(targetRevisionConflict)return;
   document.getElementById('discover').disabled=true;
   const errors=[];
   try{
@@ -1932,7 +1970,35 @@ panels.addEventListener('click',event=>{
   const clearButton=event.target.closest('button[data-clear-resource]');
   if(clearButton) clearTargetCategory(clearButton.dataset.clearResource,clearButton.dataset.clearTarget);
 });
+document.getElementById('reload-targets').addEventListener('click',()=>{
+  if(!conflictingTargetStatus)return;
+  const data=conflictingTargetStatus;
+  dirtyTargets.clear();
+  unobservedDirtyTargets.clear();
+  targetEditRevision=null;
+  targetRevisionConflict=false;
+  conflictingTargetStatus=null;
+  revision=data.credentialRevision;
+  enabledFeatures=data.enabledFeatures||{};
+  mailAuthorizationState=data.mailAuthorizationState||'DISABLED';
+  targetSelectionWritable=data.selectedTargets!==null||data.targetRefCount===0;
+  if(data.selectedTargets) applySelectedTargets(data.selectedTargets);
+  else if(data.targetRefCount===0) applySelectedTargets(emptySelectedTargets());
+  else{selectedTargets=null;selected={};selectionHydrated=false;}
+  document.getElementById('reload-targets').hidden=true;
+  document.getElementById('discover').disabled=false;
+  document.getElementById('targets').hidden=!(data.identityVerified&&!data.reauthRequired);
+  renderAll();
+  document.getElementById('selection').textContent=targetSelectionWritable
+    ? 'Latest targets loaded. Review the selections before editing and saving.'
+    : 'Latest status still lacks selected target IDs while targets exist. No changes can be saved until Exchange returns the complete selection.';
+});
 document.getElementById('save').addEventListener('click',async()=>{
+  if(targetSaveInFlight)return;
+  if(targetRevisionConflict){
+    document.getElementById('selection').textContent='Reload and review the latest target selection before saving.';
+    return;
+  }
   const values={};
   for(const key of dirtyTargets) values[key]=[...selectedTargets[key]];
   if(!Object.keys(values).length){
@@ -1951,17 +2017,35 @@ document.getElementById('save').addEventListener('click',async()=>{
     document.getElementById('selection').textContent='Keep at least one free/busy person selected for the configured calendar capability.';
     return;
   }
+  targetSaveInFlight=true;
+  updateSaveButton();
   try{
     const result=await api('/api/select-targets',{expectedCredentialRevision:revision,targets:values});
     revision=result.credentialRevision;
     if(result.selectedTargets) applySelectedTargets(result.selectedTargets);
     dirtyTargets.clear();
     unobservedDirtyTargets.clear();
+    targetEditRevision=null;
+    targetSaveInFlight=false;
     renderAll();
     const countLabels={plannerPlans:'Planner',sharePointLists:'SharePoint lists',sharePointLibraries:'SharePoint libraries',toDoLists:'To Do',calendars:'Calendars',freebusySubjects:'Free/busy people',mailFolders:'Mail folders'};
     const counts=Object.entries(result.selectedCounts||{}).map(([key,count])=>`${countLabels[key]||key} ${count}`).join('; ');
     document.getElementById('selection').textContent=`Saved ${counts} at revision ${revision}.`;
-  }catch(error){document.getElementById('selection').textContent=error.message;}
+  }catch(error){
+    targetSaveInFlight=false;
+    if(error.message==='office_target_revision_conflict'){
+      targetRevisionConflict=true;
+      conflictingTargetStatus=null;
+      document.getElementById('reload-targets').hidden=false;
+      document.getElementById('discover').disabled=true;
+      updateSaveButton();
+      if(Object.keys(discovered).length) renderAll();
+      document.getElementById('selection').textContent='Exchange rejected the stale revision. Your unsaved edits are preserved until the latest status can be reloaded.';
+    }else{
+      updateSaveButton();
+      document.getElementById('selection').textContent=error.message;
+    }
+  }
 });
 refresh();
 </script></body></html>"""
