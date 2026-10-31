@@ -14,6 +14,8 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import stat
 import sys
 import tarfile
 from copy import deepcopy
@@ -26,6 +28,161 @@ from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 build = __import__("build_arm64")
+
+
+class _FakeGitArchiveProcess:
+    """Expose one bounded tar stream as the existing Git archive subprocess."""
+
+    def __init__(self, archive_bytes: bytes) -> None:
+        self.stdout = io.BytesIO(archive_bytes)
+        self.stderr = io.BytesIO()
+
+    def wait(self) -> int:
+        return 0
+
+
+def _stub_git_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    archive_bytes: bytes,
+    *,
+    commit: str = "a" * 40,
+    tree: str = "b" * 40,
+) -> None:
+    """Use real TarFile extraction while replacing only remote Git transport."""
+
+    def fake_run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> str:
+        if argv[-1] == "FETCH_HEAD^{commit}":
+            return commit
+        if argv[-1] == "FETCH_HEAD^{tree}":
+            return tree
+        return ""
+
+    monkeypatch.setattr(build, "_run", fake_run)
+    monkeypatch.setattr(
+        build.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: _FakeGitArchiveProcess(archive_bytes),
+    )
+
+
+def _source_tar_archive(members: list[tuple[str, str, bytes | str]]) -> bytes:
+    """Create a tiny git-archive-shaped tar with directory, file, and link entries."""
+
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w:") as archive:
+        for name, member_type, payload in members:
+            info = tarfile.TarInfo(name)
+            info.mtime = 0
+            if member_type == "directory":
+                info.type = tarfile.DIRTYPE
+                info.mode = 0o755
+                archive.addfile(info)
+            elif member_type == "file":
+                if not isinstance(payload, bytes):
+                    raise AssertionError("source file payload must be bytes")
+                info.mode = 0o644
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+            elif member_type == "symlink":
+                if not isinstance(payload, str):
+                    raise AssertionError("source symlink target must be text")
+                info.type = tarfile.SYMTYPE
+                info.mode = 0o777
+                info.linkname = payload
+                archive.addfile(info)
+            else:
+                raise AssertionError(f"unsupported source tar member type: {member_type}")
+    return archive_bytes.getvalue()
+
+
+def test_archive_remote_source_normalizes_only_source_dirs_under_restrictive_umask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep extracted package dirs traversable while private staging parents stay owner-only."""
+
+    archive_bytes = _source_tar_archive(
+        [
+            ("cyrene_plugin_runtime", "directory", b""),
+            ("cyrene_plugin_runtime/_generated", "directory", b""),
+            ("microsoft_graph_provider", "directory", b""),
+            ("microsoft_graph_provider/_generated", "directory", b""),
+            ("cyrene_plugin_runtime/__init__.py", "file", b"runtime"),
+            ("cyrene_plugin_runtime/_generated/__init__.py", "file", b"generated"),
+            ("microsoft_graph_provider/__init__.py", "file", b"graph"),
+            ("microsoft_graph_provider/_generated/__init__.py", "file", b"generated"),
+            ("graph-provider-alias", "symlink", "microsoft_graph_provider"),
+        ]
+    )
+    _stub_git_archive(monkeypatch, archive_bytes)
+    staging_root = tmp_path / "private-artifacts"
+    staging_root.mkdir(mode=0o700)
+    staging_root.chmod(0o700)
+    source = {
+        "remote": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git",
+        "commit": "a" * 40,
+        "checkoutPath": "source/pkg",
+    }
+
+    previous_umask = os.umask(0o077)
+    try:
+        record = build._archive_remote_source("plugins", source, staging_root)
+    finally:
+        os.umask(previous_umask)
+
+    checkout = staging_root / "source" / "pkg"
+    for relative in (
+        Path("."),
+        Path("cyrene_plugin_runtime"),
+        Path("cyrene_plugin_runtime/_generated"),
+        Path("microsoft_graph_provider"),
+        Path("microsoft_graph_provider/_generated"),
+    ):
+        assert stat.S_IMODE((checkout / relative).lstat().st_mode) == 0o755
+    assert stat.S_IMODE(staging_root.lstat().st_mode) == 0o700
+    assert stat.S_IMODE((staging_root / "source").lstat().st_mode) == 0o700
+    assert stat.S_IMODE((checkout / "cyrene_plugin_runtime/__init__.py").lstat().st_mode) == 0o644
+    assert (
+        stat.S_IMODE((checkout / "microsoft_graph_provider/_generated/__init__.py").lstat().st_mode)
+        == 0o644
+    )
+    link = checkout / "graph-provider-alias"
+    assert link.is_symlink()
+    assert link.readlink() == Path("microsoft_graph_provider")
+    assert link.resolve() == checkout / "microsoft_graph_provider"
+    assert record == {"remote": source["remote"], "commit": source["commit"], "tree": "b" * 40}
+
+
+@pytest.mark.parametrize(
+    ("name", "member_type", "payload"),
+    [
+        ("../escaped.py", "file", b"outside"),
+        ("escape-link", "symlink", "../outside"),
+    ],
+)
+def test_archive_remote_source_keeps_data_filter_for_unsafe_members(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    member_type: str,
+    payload: bytes | str,
+) -> None:
+    """Retain tarfile data-filter rejection for traversal paths and escaping symlinks."""
+
+    archive_bytes = _source_tar_archive([(name, member_type, payload)])
+    _stub_git_archive(monkeypatch, archive_bytes)
+    staging_root = tmp_path / "private-artifacts"
+    staging_root.mkdir(mode=0o700)
+    source = {
+        "remote": "https://github.com/DoHorizon-AI/Cyrene-Plugins-Official.git",
+        "commit": "a" * 40,
+        "checkoutPath": "source/pkg",
+    }
+
+    with pytest.raises(tarfile.FilterError):
+        build._archive_remote_source("plugins", source, staging_root)
+
+    assert not (staging_root / "source" / "escaped.py").exists()
+    assert not (staging_root / "outside").exists()
 
 
 def test_computer_proxy_compose_uses_the_image_lock_generated_key(tmp_path: Path) -> None:
