@@ -10074,6 +10074,7 @@ def _create_account_center_unknown_monitor_database(
         "extra-call",
         "outbox-job",
         "outbox-claim",
+        "outbox-foreign-connection",
         "gh-container",
         "gh-host",
     ],
@@ -10127,9 +10128,10 @@ def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates
     )
     database_path = tmp_path / "exchange.sqlite3"
     outbox_rows = []
-    if case in {"outbox-job", "outbox-claim"}:
+    if case in {"valid", "outbox-job", "outbox-claim", "outbox-foreign-connection"}:
         available_at = datetime.now(UTC)
         claimed = case == "outbox-claim"
+        outbox_state = "UNKNOWN" if case == "valid" else "CLAIMED" if claimed else "READY"
         outbox_rows.append(
             (
                 "job-unknown-guard",
@@ -10138,11 +10140,13 @@ def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates
                 actor["workspaceId"],
                 actor["issuer"],
                 actor["subject"],
-                github_connection_ref,
+                "foreign-connection"
+                if case == "outbox-foreign-connection"
+                else github_connection_ref,
                 "github-binding",
                 "issues.create",
                 "idempotency-unknown-guard",
-                "CLAIMED" if claimed else "READY",
+                outbox_state,
                 1 if claimed else 0,
                 available_at.isoformat(),
                 "dispatcher" if claimed else None,
@@ -10410,6 +10414,18 @@ def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates
         with pytest.raises(
             stage_transition.StageTransitionError,
             match="blocked because Exchange has selected-actor connector jobs",
+        ):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose=compose,
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        return
+    if case == "outbox-foreign-connection":
+        with pytest.raises(
+            stage_transition.StageTransitionError, match="could not be verified read-only"
         ):
             stage_transition._verify_provider_monitor_quiescence(
                 plan=plan,
