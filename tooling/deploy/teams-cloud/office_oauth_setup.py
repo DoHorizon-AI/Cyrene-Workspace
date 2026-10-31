@@ -77,6 +77,25 @@ OFFICE_FEATURE_KEYS = frozenset(
         "sharePointDriveMetadataEnabled",
     }
 )
+OFFICE_TARGET_KEYS = (
+    "plannerPlanIds",
+    "sharePointListIds",
+    "sharePointDriveIds",
+    "toDoTaskListIds",
+    "calendarIds",
+    "freebusySubjects",
+    "mailFolderIds",
+)
+OFFICE_TARGET_KEY_SET = frozenset(OFFICE_TARGET_KEYS)
+OFFICE_TARGET_COUNT_KEYS = {
+    "plannerPlanIds": "plannerPlans",
+    "sharePointListIds": "sharePointLists",
+    "sharePointDriveIds": "sharePointLibraries",
+    "toDoTaskListIds": "toDoLists",
+    "calendarIds": "calendars",
+    "freebusySubjects": "freebusySubjects",
+    "mailFolderIds": "mailFolders",
+}
 _SAFE_CODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_ID_RE = re.compile(r"^[^\x00-\x20\x7f]{1,512}$")
 _SAFE_SCOPE_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,256}$")
@@ -561,6 +580,44 @@ def _validate_scope_policy(
         raise OfficeSetupError("office_oauth_scope_policy_invalid")
 
 
+def _validate_target_arrays(
+    value: Any, target_keys: set[str], *, error_code: str
+) -> dict[str, list[str]]:
+    """Validate only supplied target categories, preserving omissions as unknown values."""
+
+    if (
+        not isinstance(value, dict)
+        or not target_keys
+        or set(value) != target_keys
+        or not target_keys.issubset(OFFICE_TARGET_KEY_SET)
+    ):
+        raise OfficeSetupError(error_code)
+    result: dict[str, list[str]] = {}
+    for key, rows in value.items():
+        if (
+            not isinstance(rows, list)
+            or len(rows) > 100
+            or any(not isinstance(item, str) for item in rows)
+            or len(set(rows)) != len(rows)
+        ):
+            raise OfficeSetupError(error_code)
+        try:
+            result[key] = [_safe_identifier(item) for item in rows]
+        except OfficeSetupError:
+            raise OfficeSetupError(error_code) from None
+    return result
+
+
+def _validate_selected_targets(value: Any) -> dict[str, list[str]]:
+    """Validate Exchange's full, credential-free readback of selected target ID arrays."""
+
+    return _validate_target_arrays(
+        value,
+        set(OFFICE_TARGET_KEY_SET),
+        error_code="office_status_selected_targets_invalid",
+    )
+
+
 def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext) -> dict[str, Any]:
     """Validate Exchange status and return only display-safe identity and scope state."""
 
@@ -582,7 +639,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "enabledFeatures",
         "targetRefCount",
     }
-    if set(document) not in (required, required | {"mailAuthorizationState"}):
+    optional = {"mailAuthorizationState", "selectedTargets", "selectedCounts"}
+    if not required.issubset(document) or not (set(document) - required).issubset(optional):
         raise OfficeSetupError("office_status_invalid")
     if document.get("provider") != _EXCHANGE_PROVIDER_ID:
         raise OfficeSetupError("office_profile_provider_mismatch")
@@ -641,6 +699,42 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         or (not mail_features_enabled and mail_authorization_state != "DISABLED")
     ):
         raise OfficeSetupError("office_status_mail_authorization_invalid")
+    selected_targets = (
+        _validate_selected_targets(document["selectedTargets"])
+        if "selectedTargets" in document
+        else None
+    )
+    selected_counts: dict[str, int] | None = None
+    if "selectedCounts" in document:
+        raw_counts = document["selectedCounts"]
+        if (
+            not isinstance(raw_counts, dict)
+            or set(raw_counts) != {"mailFolders"}
+            or not isinstance(raw_counts["mailFolders"], int)
+            or isinstance(raw_counts["mailFolders"], bool)
+            or raw_counts["mailFolders"] < 0
+        ):
+            raise OfficeSetupError("office_status_selected_counts_invalid")
+        selected_counts = {"mailFolders": raw_counts["mailFolders"]}
+        if selected_targets is not None and selected_counts["mailFolders"] != len(
+            selected_targets["mailFolderIds"]
+        ):
+            raise OfficeSetupError("office_status_selected_counts_invalid")
+    if selected_targets is not None:
+        target_features = {
+            "plannerPlanIds": "plannerEnabled",
+            "toDoTaskListIds": "todoEnabled",
+            "calendarIds": "calendarEnabled",
+            "freebusySubjects": "calendarEnabled",
+            "sharePointListIds": "sharePointDriveMetadataEnabled",
+            "sharePointDriveIds": "sharePointDriveMetadataEnabled",
+            "mailFolderIds": "mailMetadataEnabled",
+        }
+        if any(
+            selected_targets[key] and not enabled_features[feature]
+            for key, feature in target_features.items()
+        ):
+            raise OfficeSetupError("office_status_selected_targets_invalid")
     if (
         mail_scope_names - expected_mail_scope_names
         or (mail_scope_names and not mail_features_enabled)
@@ -667,6 +761,11 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         or target_ref_count < 0
     ):
         raise OfficeSetupError("office_status_targets_invalid")
+    if (
+        selected_targets is not None
+        and sum(map(len, selected_targets.values())) != target_ref_count
+    ):
+        raise OfficeSetupError("office_status_selected_targets_invalid")
     if not isinstance(document.get("reauthRequired"), bool):
         raise OfficeSetupError("office_status_invalid")
     for field_name in ("credentialExpiresAt", "refreshExpiresAt", "reauthReasonCode"):
@@ -695,6 +794,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "scopeSchemaVersion": document["scopeSchemaVersion"],
         "enabledFeatures": dict(enabled_features),
         "mailAuthorizationState": mail_authorization_state,
+        "selectedTargets": selected_targets,
+        "selectedCounts": selected_counts,
         "targetRefCount": target_ref_count,
         "requiredOAuthScopes": list(scopes),
         "credentialRevision": revision,
@@ -825,34 +926,16 @@ def _validate_discovery(
     )
 
 
-def _validate_targets(value: Any) -> dict[str, Any]:
-    """Accept IDs only; feature flags, tenant, Workspace and OAuth scopes are never browser inputs."""
+def _validate_targets(value: Any) -> dict[str, list[str]]:
+    """Accept only explicitly submitted ID categories; omitted categories remain unchanged."""
 
-    expected_keys = {
-        "plannerPlanIds",
-        "sharePointListIds",
-        "sharePointDriveIds",
-        "toDoTaskListIds",
-        "calendarIds",
-        "freebusySubjects",
-    }
-    if not isinstance(value, dict) or set(value) not in (
-        expected_keys,
-        expected_keys | {"mailFolderIds"},
-    ):
+    if not isinstance(value, dict):
         raise OfficeSetupError("office_targets_invalid")
-    result: dict[str, Any] = {}
-    for key in expected_keys | {"mailFolderIds"}:
-        rows = value.get(key, [])
-        if (
-            not isinstance(rows, list)
-            or len(rows) > 100
-            or any(not isinstance(item, str) for item in rows)
-            or len(set(rows)) != len(rows)
-        ):
-            raise OfficeSetupError("office_targets_invalid")
-        result[key] = [_safe_identifier(item) for item in rows]
-    return result
+    return _validate_target_arrays(
+        value,
+        set(value),
+        error_code="office_targets_invalid",
+    )
 
 
 class OfficeSetupService:
@@ -1346,13 +1429,21 @@ class OfficeSetupService:
             raise OfficeSetupError("office_target_revision_conflict")
         if latest["reauthRequired"] or not latest["identityVerified"]:
             raise OfficeSetupError("office_identity_not_ready")
+        if latest["selectedTargets"] is None and latest["targetRefCount"] > 0:
+            raise OfficeSetupError("office_target_selection_state_unavailable")
         targets = _validate_targets(targets_value)
+        baseline_targets = latest["selectedTargets"] or {key: [] for key in OFFICE_TARGET_KEYS}
         self._validate_target_features(targets, latest["enabledFeatures"])
-        if targets["mailFolderIds"] and latest["mailAuthorizationState"] != "READY":
+        if targets.get("mailFolderIds") and latest["mailAuthorizationState"] != "READY":
             raise OfficeSetupError("office_mail_authorization_required")
         self._validate_discovery_selection(session, targets)
         freebusy = session.discoveries.get("freebusy_subjects")
-        if freebusy is not None and freebusy.ids and not targets["freebusySubjects"]:
+        if (
+            "freebusySubjects" in targets
+            and freebusy is not None
+            and freebusy.ids
+            and not targets["freebusySubjects"]
+        ):
             raise OfficeSetupError("office_freebusy_target_required")
         response = self.bridge.invoke(
             "select-targets",
@@ -1371,26 +1462,40 @@ class OfficeSetupService:
         if (
             updated["requiredOAuthScopes"] != latest["requiredOAuthScopes"]
             or updated["enabledFeatures"] != latest["enabledFeatures"]
+            or updated["mailAuthorizationState"] != latest["mailAuthorizationState"]
             or not updated["identityVerified"]
         ):
             raise OfficeSetupError("office_target_update_scope_invalid")
+        merged_targets = dict(baseline_targets)
+        merged_targets.update(targets)
+        if latest["targetRefCount"] > 0 and updated["selectedTargets"] is None:
+            with self._lock:
+                self._invalidate_status_locked()
+            raise OfficeSetupError("office_target_update_selection_invalid")
+        if updated["selectedTargets"] is not None:
+            if updated["selectedTargets"] != merged_targets:
+                with self._lock:
+                    self._invalidate_status_locked()
+                raise OfficeSetupError("office_target_update_selection_invalid")
+            merged_targets = updated["selectedTargets"]
+        if updated["targetRefCount"] != sum(map(len, merged_targets.values())):
+            with self._lock:
+                self._invalidate_status_locked()
+            raise OfficeSetupError("office_target_update_selection_invalid")
         with self._lock:
             session.credential_revision = revision
             self._invalidate_status_locked()
+        selected_counts = {
+            OFFICE_TARGET_COUNT_KEYS[key]: len(merged_targets[key])
+            for key, values in targets.items()
+        }
         return {
             "state": "UPDATED",
             "credentialRevision": revision,
             "scopeSchemaVersion": 2,
             "requiredOAuthScopes": list(updated["requiredOAuthScopes"]),
-            "selectedCounts": {
-                "plannerPlans": len(targets["plannerPlanIds"]),
-                "toDoLists": len(targets["toDoTaskListIds"]),
-                "calendars": len(targets["calendarIds"]),
-                "sharePointLists": len(targets["sharePointListIds"]),
-                "sharePointLibraries": len(targets["sharePointDriveIds"]),
-                "freebusySubjects": len(targets["freebusySubjects"]),
-                "mailFolders": len(targets["mailFolderIds"]),
-            },
+            "selectedTargets": merged_targets,
+            "selectedCounts": selected_counts,
         }
 
     @staticmethod
@@ -1405,13 +1510,13 @@ class OfficeSetupService:
             "mailFolderIds": "mail_folders",
         }
         for target_key, resource_type in checks.items():
-            selected = set(targets[target_key])
+            selected = set(targets.get(target_key, []))
             observed = session.discoveries.get(resource_type)
             if selected and (observed is None or not selected.issubset(observed.ids)):
                 raise OfficeSetupError("office_target_not_discovered")
         drives = session.discoveries.get("sharepoint_drives")
-        selected_drives = set(targets["sharePointDriveIds"])
-        selected_lists = set(targets["sharePointListIds"])
+        selected_drives = set(targets.get("sharePointDriveIds", []))
+        selected_lists = set(targets.get("sharePointListIds", []))
         if (selected_drives or selected_lists) and drives is None:
             raise OfficeSetupError("office_target_not_discovered")
         if drives is not None:
@@ -1444,7 +1549,7 @@ class OfficeSetupService:
             "mailFolderIds": "mailMetadataEnabled",
         }
         if any(
-            targets[key] and not enabled_features[feature]
+            targets.get(key) and not enabled_features[feature]
             for key, feature in target_feature.items()
         ):
             raise OfficeSetupError("office_feature_disabled")
@@ -1548,6 +1653,7 @@ def _page(*, nonce: str, csrf: str) -> bytes:
   <div id="resource-panels"></div>
   <button id="discover" type="button">Load available targets</button>
   <button id="save" type="button" disabled>Save selected targets</button>
+  <button id="reload-targets" type="button" hidden>Reload latest targets and discard unsaved edits</button>
   <p id="selection" role="status"></p>
 </section></main>
 <script nonce="__NONCE__">
@@ -1564,12 +1670,79 @@ const groups=[
   ['mail_folders','Mail folders','mailFolderIds']
 ];
 const discoveryFeature={planner_plans:'plannerEnabled',todo_lists:'todoEnabled',sharepoint_drives:'sharePointDriveMetadataEnabled',calendars:'calendarEnabled',freebusy_subjects:'calendarEnabled',mail_folders:'mailMetadataEnabled'};
+const targetKeyByType={planner_plans:'plannerPlanIds',todo_lists:'toDoTaskListIds',calendars:'calendarIds',freebusy_subjects:'freebusySubjects',mail_folders:'mailFolderIds'};
+const targetLabelByKey={plannerPlanIds:'Planner plans',sharePointListIds:'SharePoint lists',sharePointDriveIds:'SharePoint libraries',toDoTaskListIds:'To Do lists',calendarIds:'Calendars',freebusySubjects:'Free/busy people',mailFolderIds:'Mail folders'};
 let revision=null;
 let enabledFeatures={};
 let mailAuthorizationState='DISABLED';
 let discovered={};
 let selected={};
+let selectedTargets=null;
+let selectionHydrated=false;
+let targetSelectionWritable=false;
+let dirtyTargets=new Set();
+let unobservedDirtyTargets=new Set();
+let targetSaveInFlight=false;
+let targetEditRevision=null;
+let targetRevisionConflict=false;
+let conflictingTargetStatus=null;
 let sharePointSiteId=null;
+function emptySelectedTargets(){return {plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[],mailFolderIds:[]};}
+function rebuildSelectedGroups(){
+  selected={
+    planner_plans:[...(selectedTargets.plannerPlanIds||[])],
+    todo_lists:[...(selectedTargets.toDoTaskListIds||[])],
+    calendars:[...(selectedTargets.calendarIds||[])],
+    freebusy_subjects:[...(selectedTargets.freebusySubjects||[])],
+    mail_folders:[...(selectedTargets.mailFolderIds||[])],
+    sharepoint_drives:[...(selectedTargets.sharePointListIds||[]),...(selectedTargets.sharePointDriveIds||[])]
+  };
+}
+function applySelectedTargets(value){
+  selectedTargets=Object.fromEntries(Object.keys(emptySelectedTargets()).map(key=>[key,[...value[key]]]));
+  selectionHydrated=true;
+  unobservedDirtyTargets.clear();
+  rebuildSelectedGroups();
+}
+function targetKeysForType(type){
+  if(type==='sharepoint_drives') return ['sharePointListIds','sharePointDriveIds'];
+  return targetKeyByType[type]?[targetKeyByType[type]]:[];
+}
+function itemMatchesTarget(item,targetKey){
+  const isList=item.kind.toLowerCase()==='list';
+  return targetKey==='sharePointListIds'?isList:targetKey==='sharePointDriveIds'?!isList:true;
+}
+function updateTargetCategory(type,targetKey){
+  if(targetRevisionConflict||targetSaveInFlight)return;
+  const rows=(discovered[type]||[]).filter(item=>itemMatchesTarget(item,targetKey));
+  const observedIds=new Set(rows.map(item=>item.id));
+  const checkedIds=new Set([...panels.querySelectorAll(`input[type=checkbox][data-resource="${type}"]:checked`)].map(input=>input.value));
+  const retained=(selectedTargets[targetKey]||[]).filter(id=>!observedIds.has(id));
+  const selectedRows=rows.filter(item=>checkedIds.has(item.id)).map(item=>item.id);
+  selectedTargets[targetKey]=[...new Set([...retained,...selectedRows])];
+  if(targetEditRevision===null) targetEditRevision=revision;
+  dirtyTargets.add(targetKey);
+  if(retained.length) unobservedDirtyTargets.add(targetKey);
+  else unobservedDirtyTargets.delete(targetKey);
+  rebuildSelectedGroups();
+}
+function updateSaveButton(){
+  document.getElementById('save').disabled=targetRevisionConflict||targetSaveInFlight||!targetSelectionWritable||!dirtyTargets.size||[...dirtyTargets].some(key=>unobservedDirtyTargets.has(key));
+}
+function clearTargetCategory(type,targetKey){
+  if(!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight)return;
+  selectedTargets[targetKey]=[];
+  if(targetEditRevision===null) targetEditRevision=revision;
+  dirtyTargets.add(targetKey);
+  unobservedDirtyTargets.delete(targetKey);
+  rebuildSelectedGroups();
+  for(const checkbox of panels.querySelectorAll(`input[type=checkbox][data-resource="${type}"]`)){
+    const item=(discovered[type]||[]).find(row=>row.id===checkbox.value);
+    if(item&&itemMatchesTarget(item,targetKey)) checkbox.checked=false;
+  }
+  updateSaveButton();
+  document.getElementById('selection').textContent=`${targetLabelByKey[targetKey]} will be explicitly cleared when you save.`;
+}
 async function api(path,payload){
   const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Cyrene-CSRF':csrf},body:JSON.stringify({...payload,csrf})});
   const data=await response.json();
@@ -1579,11 +1752,14 @@ async function api(path,payload){
 function renderGroup(type,title,items){
   const section=document.createElement('section');
   const heading=document.createElement('h3'); heading.textContent=title; section.append(heading);
+  for(const key of targetKeysForType(type)){
+    const clear=document.createElement('button');clear.type='button';clear.dataset.clearResource=type;clear.dataset.clearTarget=key;clear.disabled=!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight;clear.textContent=`Clear selected: ${targetLabelByKey[key]}`;section.append(clear);
+  }
   if(!items.length){const empty=document.createElement('p');empty.textContent='No allowed resources were found.';section.append(empty);}
   for(const item of items){
     const label=document.createElement('label');
     const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.value=item.id;
-    checkbox.dataset.resource=type;checkbox.checked=(selected[type]||[]).includes(item.id);
+    checkbox.dataset.resource=type;checkbox.checked=(selected[type]||[]).includes(item.id);checkbox.disabled=!targetSelectionWritable||targetRevisionConflict||targetSaveInFlight;
     const name=document.createElement('span');name.textContent=item.displayName;
     const kind=document.createElement('small');kind.textContent=' '+item.kind;
     label.append(checkbox,name,kind);
@@ -1596,7 +1772,7 @@ function renderAll(){
   panels.replaceChildren();
   if(sharePointSiteId){const site=document.createElement('p');site.textContent='Allowed SharePoint site: '+sharePointSiteId;panels.append(site);}
   for(const [type,title] of groups) if(enabledFeatures[discoveryFeature[type]]&&discovered[type]) renderGroup(type,title,discovered[type]);
-  document.getElementById('save').disabled=!Object.keys(discovered).length;
+  updateSaveButton();
 }
 const STATUS_REQUEST_TIMEOUT_MS=8000;
 const STATUS_POLL_INTERVAL_MS=5000;
@@ -1644,9 +1820,41 @@ async function refresh(){
       }
       return;
     }
-    revision=data.credentialRevision;
+    const incomingRevision=data.credentialRevision;
+    if(targetRevisionConflict){
+      conflictingTargetStatus=data;
+      document.getElementById('selection').textContent=`Exchange changed to revision ${incomingRevision}. Reload the latest target snapshot to discard or review the unsaved edits.`;
+      updateSaveButton();
+      return;
+    }
+    if(dirtyTargets.size&&targetEditRevision!==null&&incomingRevision!==targetEditRevision&&!targetSaveInFlight){
+      targetRevisionConflict=true;
+      conflictingTargetStatus=data;
+      document.getElementById('reload-targets').hidden=false;
+      document.getElementById('discover').disabled=true;
+      document.getElementById('selection').textContent=`Exchange changed from revision ${targetEditRevision} to ${incomingRevision}. Your unsaved edits are preserved; saving is blocked until you reload and review the latest targets.`;
+      updateSaveButton();
+      if(Object.keys(discovered).length) renderAll();
+      return;
+    }
+    revision=incomingRevision;
     enabledFeatures=data.enabledFeatures||{};
     mailAuthorizationState=data.mailAuthorizationState||'DISABLED';
+    const previousTargetSelectionWritable=targetSelectionWritable;
+    targetSelectionWritable=data.selectedTargets!==null||data.targetRefCount===0;
+    let selectedTargetsChanged=false;
+    if(!dirtyTargets.size){
+      if(data.selectedTargets){
+        const nextSelection=JSON.stringify(data.selectedTargets);
+        selectedTargetsChanged=!selectionHydrated||JSON.stringify(selectedTargets)!==nextSelection;
+        if(selectedTargetsChanged) applySelectedTargets(data.selectedTargets);
+      }else if(data.targetRefCount===0){
+        const empty=emptySelectedTargets();
+        selectedTargetsChanged=!selectionHydrated||JSON.stringify(selectedTargets)!==JSON.stringify(empty);
+        if(selectedTargetsChanged) applySelectedTargets(empty);
+      }
+    }
+    if((previousTargetSelectionWritable!==targetSelectionWritable||selectedTargetsChanged)&&Object.keys(discovered).length) renderAll();
     const ready=data.identityVerified&&!data.reauthRequired;
     document.getElementById('targets').hidden=!ready;
     const mailUpgradeRequired=ready&&data.mailAuthorizationState==='REAUTHORIZATION_REQUIRED';
@@ -1687,6 +1895,9 @@ async function refresh(){
     }else if(!authSubmitPending){
       statusNode.textContent=`Microsoft connection status: ${data.authStatus}`;
     }
+    if(!targetSelectionWritable){
+      document.getElementById('selection').textContent='Existing target IDs are not available from this Exchange status. No target changes can be saved until a complete selectedTargets readback is available.';
+    }
   }catch(_error){
     if(!authSubmitPending) statusNode.textContent='The Office status check timed out. It will retry automatically.';
   }finally{
@@ -1721,6 +1932,7 @@ for(const form of [document.getElementById('authorize'),document.getElementById(
   },AUTHORIZATION_WAIT_TIMEOUT_MS);
 });
 document.getElementById('discover').addEventListener('click',async()=>{
+  if(targetRevisionConflict)return;
   document.getElementById('discover').disabled=true;
   const errors=[];
   try{
@@ -1740,31 +1952,104 @@ document.getElementById('discover').addEventListener('click',async()=>{
   }catch(error){document.getElementById('selection').textContent=error.message;}
   finally{document.getElementById('discover').disabled=false;}
 });
+panels.addEventListener('change',event=>{
+  const checkbox=event.target;
+  if(!checkbox||checkbox.type!=='checkbox'||!targetSelectionWritable)return;
+  const type=checkbox.dataset.resource;
+  if(type==='sharepoint_drives'){
+    const item=(discovered[type]||[]).find(row=>row.id===checkbox.value);
+    if(item) updateTargetCategory(type,item.kind.toLowerCase()==='list'?'sharePointListIds':'sharePointDriveIds');
+  }else{
+    const key=targetKeyByType[type];
+    if(key) updateTargetCategory(type,key);
+  }
+  updateSaveButton();
+  document.getElementById('selection').textContent='Review changed categories, then save the selection.';
+});
+panels.addEventListener('click',event=>{
+  const clearButton=event.target.closest('button[data-clear-resource]');
+  if(clearButton) clearTargetCategory(clearButton.dataset.clearResource,clearButton.dataset.clearTarget);
+});
+document.getElementById('reload-targets').addEventListener('click',()=>{
+  if(!conflictingTargetStatus)return;
+  const data=conflictingTargetStatus;
+  dirtyTargets.clear();
+  unobservedDirtyTargets.clear();
+  targetEditRevision=null;
+  targetRevisionConflict=false;
+  conflictingTargetStatus=null;
+  revision=data.credentialRevision;
+  enabledFeatures=data.enabledFeatures||{};
+  mailAuthorizationState=data.mailAuthorizationState||'DISABLED';
+  targetSelectionWritable=data.selectedTargets!==null||data.targetRefCount===0;
+  if(data.selectedTargets) applySelectedTargets(data.selectedTargets);
+  else if(data.targetRefCount===0) applySelectedTargets(emptySelectedTargets());
+  else{selectedTargets=null;selected={};selectionHydrated=false;}
+  document.getElementById('reload-targets').hidden=true;
+  document.getElementById('discover').disabled=false;
+  document.getElementById('targets').hidden=!(data.identityVerified&&!data.reauthRequired);
+  renderAll();
+  document.getElementById('selection').textContent=targetSelectionWritable
+    ? 'Latest targets loaded. Review the selections before editing and saving.'
+    : 'Latest status still lacks selected target IDs while targets exist. No changes can be saved until Exchange returns the complete selection.';
+});
 document.getElementById('save').addEventListener('click',async()=>{
-  const values={plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[],mailFolderIds:[]};
-  const byType={planner_plans:'plannerPlanIds',todo_lists:'toDoTaskListIds',calendars:'calendarIds',freebusy_subjects:'freebusySubjects',mail_folders:'mailFolderIds'};
-  for(const checkbox of panels.querySelectorAll('input[type=checkbox]:checked')){
-    const type=checkbox.dataset.resource;
-    if(type==='sharepoint_drives'){
-      const item=(discovered[type]||[]).find(row=>row.id===checkbox.value);
-      if(!item) continue;
-      if(item.kind.toLowerCase()==='list') values.sharePointListIds.push(item.id);
-      else values.sharePointDriveIds.push(item.id);
-    }else if(byType[type]) values[byType[type]].push(checkbox.value);
+  if(targetSaveInFlight)return;
+  if(targetRevisionConflict){
+    document.getElementById('selection').textContent='Reload and review the latest target selection before saving.';
+    return;
+  }
+  const values={};
+  for(const key of dirtyTargets) values[key]=[...selectedTargets[key]];
+  if(!Object.keys(values).length){
+    document.getElementById('selection').textContent='Change or explicitly clear a category before saving.';
+    return;
+  }
+  if([...dirtyTargets].some(key=>unobservedDirtyTargets.has(key))){
+    document.getElementById('selection').textContent='Some existing IDs were not returned by discovery. Reload them or explicitly clear that category before saving.';
+    return;
   }
   if(Object.values(values).some(ids=>ids.length>100)){
     document.getElementById('selection').textContent='Select no more than 100 targets in each category.';
     return;
   }
-  if((discovered.freebusy_subjects||[]).length&&!values.freebusySubjects.length){
+  if(values.freebusySubjects&&(discovered.freebusy_subjects||[]).length&&!values.freebusySubjects.length){
     document.getElementById('selection').textContent='Keep at least one free/busy person selected for the configured calendar capability.';
     return;
   }
+  targetSaveInFlight=true;
+  updateSaveButton();
   try{
     const result=await api('/api/select-targets',{expectedCredentialRevision:revision,targets:values});
     revision=result.credentialRevision;
-    document.getElementById('selection').textContent=`Saved selection at revision ${revision}. Planner ${result.selectedCounts.plannerPlans}; To Do ${result.selectedCounts.toDoLists}; calendars ${result.selectedCounts.calendars}; SharePoint libraries ${result.selectedCounts.sharePointLibraries}; Mail folders ${result.selectedCounts.mailFolders}.`;
-  }catch(error){document.getElementById('selection').textContent=error.message;}
+    if(result.selectedTargets) applySelectedTargets(result.selectedTargets);
+    dirtyTargets.clear();
+    unobservedDirtyTargets.clear();
+    targetEditRevision=null;
+    targetRevisionConflict=false;
+    conflictingTargetStatus=null;
+    document.getElementById('reload-targets').hidden=true;
+    document.getElementById('discover').disabled=false;
+    targetSaveInFlight=false;
+    renderAll();
+    const countLabels={plannerPlans:'Planner',sharePointLists:'SharePoint lists',sharePointLibraries:'SharePoint libraries',toDoLists:'To Do',calendars:'Calendars',freebusySubjects:'Free/busy people',mailFolders:'Mail folders'};
+    const counts=Object.entries(result.selectedCounts||{}).map(([key,count])=>`${countLabels[key]||key} ${count}`).join('; ');
+    document.getElementById('selection').textContent=`Saved ${counts} at revision ${revision}.`;
+  }catch(error){
+    targetSaveInFlight=false;
+    if(error.message==='office_target_revision_conflict'){
+      targetRevisionConflict=true;
+      conflictingTargetStatus=null;
+      document.getElementById('reload-targets').hidden=false;
+      document.getElementById('discover').disabled=true;
+      updateSaveButton();
+      if(Object.keys(discovered).length) renderAll();
+      document.getElementById('selection').textContent='Exchange rejected the stale revision. Your unsaved edits are preserved until the latest status can be reloaded.';
+    }else{
+      updateSaveButton();
+      document.getElementById('selection').textContent=error.message;
+    }
+  }
 });
 refresh();
 </script></body></html>"""
