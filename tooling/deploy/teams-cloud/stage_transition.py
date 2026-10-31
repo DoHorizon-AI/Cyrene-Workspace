@@ -9437,7 +9437,7 @@ def _assert_exchange_readiness_safe_shape(snapshot: dict[str, Any]) -> None:
             or isinstance(row.get("scopeSchemaVersion"), bool)
             or not isinstance(row.get("credentialRevision"), int)
             or isinstance(row.get("credentialRevision"), bool)
-            or row["credentialRevision"] < 1
+            or row["credentialRevision"] < 0
             or not isinstance(row.get("enabledFeatures"), list)
             or any(not isinstance(value, str) or not value for value in row["enabledFeatures"])
             or len(row["enabledFeatures"]) != len(set(row["enabledFeatures"]))
