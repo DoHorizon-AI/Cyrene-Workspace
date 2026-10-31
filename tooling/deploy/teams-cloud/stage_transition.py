@@ -39,6 +39,7 @@ DEFAULT_JOURNAL_DIR = Path("/var/lib/cyrene/stage-transition")
 OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE = "microsoft-graph-provider-bootstrap"
 EXCHANGE_IMAGE_UPDATE_TARGET = "exchange"
 MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET = "microsoft-graph"
+NAVIGATOR_IMAGE_UPDATE_TARGET = "navigator"
 PHASES = {
     "provider-bootstrap",
     OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
@@ -69,6 +70,22 @@ CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
 GITHUB_ISSUES_IMAGE_UPDATE_TARGET = "github-issues"
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
 PERSISTENCE_IMAGE_UPDATE_TARGET = "navigator-persistence"
+PERSISTENCE_IMAGE_UPDATE_PHASES = frozenset(
+    {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+)
+OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS = frozenset(
+    {
+        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        EXCHANGE_IMAGE_UPDATE_TARGET,
+        MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+        NAVIGATOR_IMAGE_UPDATE_TARGET,
+        PERSISTENCE_IMAGE_UPDATE_TARGET,
+        WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+    }
+)
+OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS = frozenset(
+    {NAVIGATOR_IMAGE_UPDATE_TARGET, PERSISTENCE_IMAGE_UPDATE_TARGET}
+)
 CLOUD_MONITOR_PROVIDER_IDS = frozenset({"azure", "gcp", "runpod"})
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
 EXCHANGE_CLOUD_RUNNER_ENV = "CYRENE_EXCHANGE_AUTHORIZATION_CLOUD_RUNNER_ENABLED"
@@ -4354,9 +4371,9 @@ def _validate_image_update_topology(
         raise StageTransitionError(
             "Cloud Management image updates require provider-bootstrap or issued-connector-activation"
         )
-    if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+    if target == PERSISTENCE_IMAGE_UPDATE_TARGET and phase not in PERSISTENCE_IMAGE_UPDATE_PHASES:
         raise StageTransitionError(
-            "Persistence image updates require issued-connector-activation and the existing connector runtime"
+            "Persistence image updates require the selected Graph bootstrap or issued activation phase"
         )
     if (
         target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
@@ -5659,10 +5676,10 @@ def _validate_image_update_selection_contract(
     if (
         not is_memory_update
         and target == PERSISTENCE_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in PERSISTENCE_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "Persistence image updates require issued-connector-activation and the existing connector runtime"
+            "Persistence image updates require the selected Graph bootstrap or issued activation phase"
         )
     if (
         not isinstance(selection_record, dict)
@@ -7846,10 +7863,18 @@ def create_plan(
         )
     if (
         image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in PERSISTENCE_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "Persistence image updates require issued-connector-activation and the existing connector runtime"
+            "Persistence image updates require the selected Graph bootstrap or issued activation phase"
+        )
+    if (
+        image_update_target in OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS
+        and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        and (max_memory_mib != 3584 or max_cpus != 1.95)
+    ):
+        raise StageTransitionError(
+            "Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget"
         )
     if listener_repair and (
         phase != "provider-bootstrap"
@@ -8093,6 +8118,17 @@ def create_plan(
     ):
         raise StageTransitionError(
             "Microsoft Graph candidate Compose must retain the 3584 MiB/1.95 CPU budget"
+        )
+    if (
+        image_update_target in OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS
+        and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        and (
+            candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+            or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+        )
+    ):
+        raise StageTransitionError(
+            "Navigator and Persistence candidate Compose must retain the 3584 MiB/1.95 CPU budget"
         )
     if (
         image_update_target is not None
@@ -8569,10 +8605,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         )
     if (
         image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
-        and plan.get("phase") != "issued-connector-activation"
+        and plan.get("phase") not in PERSISTENCE_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "Persistence image updates require issued-connector-activation and the existing connector runtime"
+            "Persistence image updates require the selected Graph bootstrap or issued activation phase"
         )
     if (
         image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
@@ -8595,19 +8631,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and (
         (
             image_update_target is not None
-            and image_update_target
-            not in {
-                ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
-                EXCHANGE_IMAGE_UPDATE_TARGET,
-                MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
-                WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
-            }
+            and image_update_target not in OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS
         )
         or memory_update_target is not None
         or listener_repair
     ):
         raise StageTransitionError(
-            "Graph bootstrap permits only its closed Account Center, Exchange, Microsoft Graph, or Workspace Authority image continuation"
+            "Graph bootstrap permits only its closed Account Center, Exchange, Microsoft Graph, Navigator, Persistence, or Workspace Authority image continuation"
         )
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and "cloudRunnerState" in plan:
         raise StageTransitionError("Graph provider bootstrap must not change the cloud runner")
@@ -8638,6 +8668,52 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise StageTransitionError("listener repair plan must contain exactly its two providers")
     active_runtime_services = set(plan.get("activeServices", {}))
     candidate_runtime_services = set(plan.get("candidateServices", {}))
+    if (
+        image_update_target in OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS
+        and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    ):
+        candidate_preflight = plan.get("candidatePreflight")
+        target_label = (
+            "Navigator" if image_update_target == NAVIGATOR_IMAGE_UPDATE_TARGET else "Persistence"
+        )
+        if (
+            active_runtime_services != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+            or candidate_runtime_services != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+            or plan.get("targets") != [image_update_target]
+            or not isinstance(candidate_preflight, dict)
+            or candidate_preflight.get("composeCgroupMemoryLimitMiB") != 3584
+            or candidate_preflight.get("composeCgroupCpuLimit") != 1.95
+            or candidate_preflight.get("maxMemoryMiB") != 3584
+            or candidate_preflight.get("maxCpus") != 1.95
+        ):
+            raise StageTransitionError(
+                f"{target_label} image update must preserve the exact 15-service Graph runtime and budgets"
+            )
+        for service_name, row in plan["candidateServices"].items():
+            active_image = row.get("active") if isinstance(row, dict) else None
+            candidate_image = row.get("candidate") if isinstance(row, dict) else None
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"active", "candidate", "added", "configChanged"}
+                or not isinstance(active_image, dict)
+                or not isinstance(candidate_image, dict)
+                or set(active_image) != {"imageRef", "imageId"}
+                or set(candidate_image) != {"imageRef", "imageId"}
+                or row.get("added") is not False
+                or row.get("configChanged") is not False
+                or (
+                    service_name == image_update_target
+                    and (
+                        active_image == candidate_image
+                        or active_image.get("imageRef") == candidate_image.get("imageRef")
+                        or active_image.get("imageId") == candidate_image.get("imageId")
+                    )
+                )
+                or (service_name != image_update_target and active_image != candidate_image)
+            ):
+                raise StageTransitionError(
+                    f"{target_label} image update changes an unselected image: {service_name}"
+                )
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and image_update_target is None:
         expected_targets = {
             "account-center",
