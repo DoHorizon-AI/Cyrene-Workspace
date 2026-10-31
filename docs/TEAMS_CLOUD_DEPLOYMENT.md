@@ -468,6 +468,34 @@ Before enabling background work, back up the current service configuration, imag
 
 原生 CodeBuddy ACP 是独立可选项，按顺序叠加 `compose.yaml`、`compose.computer-runtime.yaml` 和 `compose.codebuddy-acp.yaml`，并在私有 runtime env 后加载 `config/codebuddy-acp.env.template`。不要与 `compose.proactive-assistant-v1.yaml` 叠加。它选择 `CYRENE_HARNESS_EXECUTION_BACKEND=codebuddy-acp`、精确的 `codebuddy` 可执行文件，以及 `glm-5.3-flash` 或 `deepseek-v4.1-flash`；旧 Harness model source 会清空，fallback 关闭。CodeBuddy CLI 状态继续保存在服务专属 owner-only `secrets/codebuddy` 中；预检验证目录 owner/权限，但不读取文件，也不能证明供应商账号身份。`CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` 是 owner 的部署声明。CodeBuddy 已发布的 CLI 接口没有经过验证的设置可阻止账号 credits 被使用，因此不能把该变量当作扣费保证。
 
+The standalone Antigravity ACP profile is a separate explicit opt-in: compose the base file, `compose.computer-runtime.yaml`, then `compose.antigravity-acp.yaml`, and load `config/antigravity-acp.env.template` after the private runtime env. Use Compose v2.24 or later because the overlay uses `!override` to remove the base CodeBuddy login bind while retaining Navigator session and Teams authorization mounts. The authenticated owner inventory advertised `gemini-3.8-flash`, so the template recommends that exact ID; Navigator rereads session options and fails closed if it is absent. An empty model selector uses the ACP server's native default. The Google binary recipe fetches proprietary Antigravity ACP 1.4.5 from Google's release host and checks its x86_64 or ARM64 archive SHA-256 before installing both `agy_acp_server.par` and its executable `localharness_external` sibling into `/usr/local/bin`; see `tooling/deploy/teams-cloud/config/antigravity-acp-third-party-notice.md`. Neither binary is stored in this repository.
+
+Prepare a private copy of the build plan under the umbrella `.artifacts` directory, set a unique `taskId`, and replace both null source commits with the exact reviewed Workspace and Navigator SHAs. Then run the local-only ARM64 builder:
+
+```sh
+python3 tooling/deploy/teams-cloud/build_arm64.py build \
+  --plan "$ARTIFACTS/antigravity-acp-build-plan.json" \
+  --output "$ARTIFACTS/antigravity-acp-build"
+```
+
+The builder writes a local `image-lock.json` and `images.env`; its lock remains `LOCAL_ONLY` and contains only `dsh-executor`. It cannot pass the full Teams stack preflight, which requires every service image. This does not publish an image or prove ARM64 runtime acceptance; a complete multi-image Antigravity release remains a separate delivery.
+
+Provision `secrets/antigravity-acp` as a persistent owner profile directory with UID/GID 10001 and mode 0700. Keep it separate from personal Antigravity state and from `secrets/codebuddy`; the Navigator child process uses it for Google OAuth and ACP session state. Compose fixes the executable at `/usr/local/bin/agy_acp_server.par` and the profile mount at `/home/navigator/.config/antigravity-acp`; no shell command or provider token is supplied through Compose. The current authenticated owner inventory advertised `gemini-3.8-flash`, so the env template recommends that exact ID. Navigator verifies it against the active ACP session options before selection; leave the value blank to use the server's native default. The runtime selects no configured provider fallback and the Workflows engine stays off. Full-stack preflight checks the locked image's profile/version/archive-hash labels, fixed selector, mount path, and directory owner/mode without reading auth files or exporting keys. It does not establish Google account ownership, current model entitlement, or billing behavior. Do not use a preflight pass or local image as deployment/cutover acceptance; no live host action is part of this source profile.
+
+独立的 Antigravity ACP profile 需要显式启用：按顺序组合基础文件、`compose.computer-runtime.yaml` 与 `compose.antigravity-acp.yaml`，并在私有 runtime env 后加载 `config/antigravity-acp.env.template`。该 overlay 使用 `!override` 移除基础文件的 CodeBuddy 登录挂载，同时保留 Navigator 会话和 Teams 授权挂载，因此需要 Compose v2.24 或更新版本。当前已认证 owner 模型目录公布了 `gemini-3.8-flash`，模板据此推荐这个确切 ID；Navigator 会重新读取 session 公布的选项，若不存在则失败关闭。模型项为空时使用 ACP server 原生默认值。Google 二进制 recipe 从 Google 官方 release host 下载专有 Antigravity ACP 1.4.5，并在安装前校验 x86_64 或 ARM64 archive 的 SHA-256，再把 `agy_acp_server.par` 与可执行的 `localharness_external` sidecar 一同安装到 `/usr/local/bin`；详见 `tooling/deploy/teams-cloud/config/antigravity-acp-third-party-notice.md`。两个二进制都不保存在本仓库。
+
+将 build plan 复制到 umbrella `.artifacts` 下的私有目录，为计划设置唯一 `taskId`，并把两个空的 source commit 替换为精确且已审查的 Workspace 与 Navigator SHA。然后可用下面的命令仅在本地构建 ARM64 镜像：
+
+```sh
+python3 tooling/deploy/teams-cloud/build_arm64.py build \
+  --plan "$ARTIFACTS/antigravity-acp-build-plan.json" \
+  --output "$ARTIFACTS/antigravity-acp-build"
+```
+
+构建器会写入本地 `image-lock.json` 和 `images.env`；lock 保持 `LOCAL_ONLY` 且仅含 `dsh-executor`，因此无法通过要求所有服务镜像齐全的 Teams 整栈 preflight。该步骤不会发布镜像，也不能证明 ARM64 运行时验收；完整多镜像 Antigravity release 属于单独的交付。
+
+将 `secrets/antigravity-acp` 准备为持久 owner profile 目录，UID/GID 为 10001，权限为 0700。它应与个人 Antigravity 状态及 `secrets/codebuddy` 分开；Navigator 子进程用它保存 Google OAuth 与 ACP session 状态。Compose 固定 `/usr/local/bin/agy_acp_server.par` 可执行文件和 `/home/navigator/.config/antigravity-acp` profile 挂载路径，不通过 Compose 传入 shell 命令或 Provider token。当前已认证 owner 的模型目录公布了 `gemini-3.8-flash`，env template 据此推荐该精确 ID；Navigator 会在选择前通过当前 ACP session 选项重新核验。将值留空可使用 server 原生默认模型。运行时不选择 Provider fallback，Workflows 引擎保持关闭。整套 preflight 会检查锁定镜像的 profile/version/archive-hash 标签、固定选择项、挂载路径和目录 owner/权限，不读取授权文件或导出密钥；它无法证明 Google 账号归属、当前模型 entitlement 或计费行为。不要把预检通过或本地镜像当成部署/切换验收；本源码 profile 不包含主机操作。
+
 Navigator 在容器内为每次 ACP 调用创建 host-owned MCP bridge，将含 token 的配置写入权限为 0600 的临时文件，只把文件路径交给 `codebuddy`，并在调用结束后清理。Compose 不提供 MCP JSON、token、secret 或文件挂载。CLI 调用仍由 Navigator 固定，使用 stdio ACP、空的内置 tools 列表和 strict MCP 配置。该 overlay 保持基础 Navigator 的内存/CPU 上限，并采用现有主动助手的只读根目录、删除 capabilities、no-new-privileges 和有界 128 MiB `/tmp`。
 
 Antigravity CLI 使用私有 task artifact 下 UID 10001 所有、权限为 0700 的 `CYRENE_MODEL_HOME`；CodeBuddy profile 保存在独立的私有 `secrets/codebuddy`；Navigator 会话和业务状态在持久化卷中。不要把任一供应商登录目录或 token 打进镜像。备份时分开保存并加密模型授权目录、Navigator 业务状态和服务配置，恢复后继续保持 owner-only 权限。

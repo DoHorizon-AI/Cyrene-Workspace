@@ -311,6 +311,26 @@ CODEBUDDY_AUTHORIZATION_FILE_MOUNTS = {
     "/run/teams-authorization/automation-source-bindings.json": "automation-source-bindings.json",
 }
 CODEBUDDY_AUTHORIZATION_FILE_MAX_BYTES = 64_000
+ANTIGRAVITY_ACP_COMMAND = "/usr/local/bin/agy_acp_server.par"
+ANTIGRAVITY_ACP_PROFILE = "/home/navigator/.config/antigravity-acp"
+ANTIGRAVITY_ACP_PROFILE_TARGET = ANTIGRAVITY_ACP_PROFILE
+ANTIGRAVITY_ACP_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+ANTIGRAVITY_ACP_IMAGE_LABELS = {
+    "com.cyrene.navigator.runtime-profile": "antigravity-acp",
+    "com.cyrene.navigator.antigravity-acp.version": "1.4.5",
+    "com.cyrene.navigator.antigravity-acp.archive.sha256.amd64": "923923a0d7dc8073f66cc6f78647a3107e3a7ee2b7e1a24df8b3927b5188013b",
+    "com.cyrene.navigator.antigravity-acp.archive.sha256.arm64": "7d64246633ae094f67e3bbcd2d679e89048f91346d5339313336e7483f40f056",
+}
+ANTIGRAVITY_ACP_PROVIDER_AUTH_ENVIRONMENT = frozenset(
+    {
+        "ANTIGRAVITY_API_KEY",
+        "ANTIGRAVITY_ACCESS_TOKEN",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_ACCESS_TOKEN",
+        "GOOGLE_REFRESH_TOKEN",
+    }
+)
 
 
 class PreflightError(ValueError):
@@ -6202,7 +6222,7 @@ def _validate_identity_scope(config: dict[str, Any], actor_projection_path: Path
 
 
 def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
-    """Validate the selected DSH or native CodeBuddy ACP model path."""
+    """Validate the selected DSH, CodeBuddy ACP, or Antigravity ACP model path."""
 
     backend = navigator.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     source = navigator.get("CYRENE_HARNESS_MODEL_SOURCE")
@@ -6231,8 +6251,49 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
                 "CodeBuddy ACP requires two bounded foreground/background task slots"
             )
         return
+    if backend == "antigravity-acp":
+        if source not in {None, ""} or model not in {None, ""}:
+            raise PreflightError(
+                "Antigravity ACP must not select the legacy Harness model source or model"
+            )
+        if navigator.get("CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND") != ANTIGRAVITY_ACP_COMMAND:
+            raise PreflightError(
+                "Antigravity ACP command must be exactly the pinned agy_acp_server.par executable"
+            )
+        if navigator.get("CYRENE_HARNESS_ANTIGRAVITY_ACP_PROFILE") != ANTIGRAVITY_ACP_PROFILE:
+            raise PreflightError("Antigravity ACP profile must use the fixed private mount path")
+        native_model = navigator.get("CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL")
+        if native_model not in {None, ""} and (
+            not isinstance(native_model, str)
+            or ANTIGRAVITY_ACP_MODEL_RE.fullmatch(native_model) is None
+        ):
+            raise PreflightError(
+                "Antigravity ACP model must be a native model ID or blank for the advertised default"
+            )
+        if concurrency != "2":
+            raise PreflightError(
+                "Antigravity ACP requires two bounded foreground/background task slots"
+            )
+        if navigator.get("CYRENE_WORKFLOWS_ENABLED") != "false":
+            raise PreflightError("Antigravity ACP Workflows must remain disabled by default")
+        if any(
+            key in navigator
+            for key in (
+                "CYRENE_HARNESS_CODEBUDDY_ACP_COMMAND",
+                "CYRENE_HARNESS_CODEBUDDY_ACP_MODEL",
+                "CYRENE_HARNESS_CODEBUDDY_FALLBACK_ENABLED",
+                "CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP",
+                "CYRENE_HARNESS_CODEBUDDY_FALLBACK_MODEL",
+            )
+        ):
+            raise PreflightError(
+                "Antigravity ACP must not inherit CodeBuddy ACP or fallback configuration"
+            )
+        return
     if backend != "dsh":
-        raise PreflightError("Navigator execution backend must be dsh or codebuddy-acp")
+        raise PreflightError(
+            "Navigator execution backend must be dsh, codebuddy-acp, or antigravity-acp"
+        )
     if source == "antigravity":
         if model != "gemini-3.8-flash-medium":
             raise PreflightError("proactive Navigator must use Antigravity gemini-3.8-flash-medium")
@@ -6256,6 +6317,213 @@ def _validate_model_runtime_config(navigator: dict[str, Any]) -> None:
         )
     if concurrency not in {"1", "2"}:
         raise PreflightError("Navigator task concurrency must fit the two-CPU deployment profile")
+
+
+def _validate_antigravity_acp_boundary(
+    config: dict[str, Any],
+    *,
+    secrets_dir: Path,
+    config_dir: Path,
+) -> None:
+    """Keep the standalone Google ACP process and owner profile inside fixed mounts.
+
+    中文：仅允许固定 ACP 可执行文件与私有 owner profile；预检只读目录元数据，不读取授权文件。
+    """
+
+    navigator = config.get("services", {}).get("navigator", {})
+    environment = navigator.get("environment", {})
+    volumes = navigator.get("volumes", [])
+    secrets = navigator.get("secrets", [])
+    configs = navigator.get("configs", [])
+    _validate_model_runtime_config(environment)
+    if (
+        navigator.get("read_only") is not True
+        or "ALL" not in navigator.get("cap_drop", [])
+        or "no-new-privileges:true" not in navigator.get("security_opt", [])
+        or "/tmp:rw,nosuid,nodev,size=128m" not in navigator.get("tmpfs", [])
+    ):
+        raise PreflightError(
+            "Antigravity ACP requires a read-only root, dropped capabilities, and bounded 128 MiB temporary storage"
+        )
+    if navigator.get("command") or navigator.get("entrypoint"):
+        raise PreflightError("Antigravity ACP must retain Navigator's fixed stdio ACP invocation")
+    if (
+        navigator.get("privileged") is True
+        or navigator.get("cap_add")
+        or navigator.get("ports")
+        or navigator.get("network_mode") == "host"
+    ):
+        raise PreflightError(
+            "Antigravity ACP must keep the existing low-privilege private service boundary"
+        )
+    if any("MCP" in str(name).upper() for name in environment):
+        raise PreflightError("Antigravity ACP MCP configuration must stay outside Compose env")
+    if any(
+        "MCP" in str(value).upper()
+        for row in [*volumes, *secrets, *configs]
+        if isinstance(row, dict)
+        for value in row.values()
+    ):
+        raise PreflightError("Antigravity ACP MCP configuration must stay outside Compose mounts")
+    allowed_acp_environment = {
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_COMMAND",
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_PROFILE",
+        "CYRENE_HARNESS_ANTIGRAVITY_ACP_MODEL",
+    }
+    if any(
+        name.startswith("CYRENE_HARNESS_ANTIGRAVITY_ACP_") and name not in allowed_acp_environment
+        for name in environment
+    ):
+        raise PreflightError("Antigravity ACP cannot receive additional provider runtime selectors")
+    if set(environment) & ANTIGRAVITY_ACP_PROVIDER_AUTH_ENVIRONMENT:
+        raise PreflightError(
+            "Antigravity ACP credentials must remain in the private profile directory"
+        )
+    if environment.get("CODEBUDDY_CONFIG_DIR") != "/var/empty/cyrene-codebuddy-disabled":
+        raise PreflightError("Antigravity ACP must not inherit a CodeBuddy credential directory")
+
+    by_target = {
+        row.get("target"): row for row in volumes if isinstance(row, dict) and row.get("target")
+    }
+    allowed_targets = {
+        ANTIGRAVITY_ACP_PROFILE_TARGET,
+        "/var/lib/cyrene-navigator",
+        "/run/teams-authorization",
+    }
+    profile_mount = by_target.get(ANTIGRAVITY_ACP_PROFILE_TARGET, {})
+    session_volume = by_target.get("/var/lib/cyrene-navigator", {})
+    actor_projection = by_target.get("/run/teams-authorization", {})
+    project_name = config.get("name")
+    volume_definitions = config.get("volumes", {})
+    session_definition = (
+        volume_definitions.get("navigator-sessions", {})
+        if isinstance(volume_definitions, dict)
+        else {}
+    )
+    expected_volume_name = (
+        f"{project_name}_navigator-sessions" if isinstance(project_name, str) else None
+    )
+    expected_secret_pairs = {
+        ("navigator-exchange-hmac-key", "navigator-exchange-hmac-key"),
+        ("navigator-session-token", "navigator-session-token"),
+        ("teams-navigator-hmac-key", "teams-navigator-hmac-key"),
+        ("internal-service-root-ca", "internal-service-root-ca"),
+    }
+    secret_pairs = {
+        (row.get("source"), row.get("target")) for row in secrets if isinstance(row, dict)
+    }
+    expected_config_pairs = {
+        ("connector-bindings", "/run/config/connector-bindings.json"),
+        ("connector-tool-catalog", "/run/config/connector-tool-catalog.json"),
+        ("responsibility-targets", "/run/config/responsibility-targets.v1.json"),
+    }
+    config_pairs = {
+        (row.get("source"), row.get("target")) for row in configs if isinstance(row, dict)
+    }
+    profile_path = Path(str(profile_mount.get("source", "")))
+    if (
+        len(volumes) != 3
+        or set(by_target) != allowed_targets
+        or profile_mount.get("type") != "bind"
+        or profile_mount.get("read_only", False) is not False
+        or not _private_bind_options_are_safe(profile_mount)
+        or profile_path != secrets_dir / "antigravity-acp"
+        or session_volume.get("type") != "volume"
+        or session_volume.get("source") != "navigator-sessions"
+        or not isinstance(project_name, str)
+        or not isinstance(session_definition, dict)
+        or session_definition.get("name") != expected_volume_name
+        or actor_projection.get("type") != "bind"
+        or actor_projection.get("read_only") is not True
+        or Path(str(actor_projection.get("source", ""))).resolve() != config_dir.resolve()
+        or secret_pairs != expected_secret_pairs
+        or len(secrets) != len(expected_secret_pairs)
+        or config_pairs != expected_config_pairs
+        or len(configs) != len(expected_config_pairs)
+    ):
+        raise PreflightError(
+            "Antigravity ACP Navigator must keep only its private profile, session, and Teams authorization mounts"
+        )
+
+
+def _validate_antigravity_acp_profile_mount(
+    navigator: dict[str, Any], *, secrets_dir: Path
+) -> None:
+    """Check private profile directory metadata without reading any account data."""
+
+    matches = [
+        row
+        for row in navigator.get("volumes", [])
+        if isinstance(row, dict) and row.get("target") == ANTIGRAVITY_ACP_PROFILE_TARGET
+    ]
+    if len(matches) != 1:
+        raise PreflightError("Navigator must mount exactly one Antigravity ACP profile directory")
+    path = Path(str(matches[0].get("source", "")))
+    expected_path = secrets_dir / "antigravity-acp"
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise PreflightError("Antigravity ACP owner profile directory is unavailable") from error
+    if (
+        matches[0].get("type") != "bind"
+        or matches[0].get("read_only", False) is not False
+        or not _private_bind_options_are_safe(matches[0])
+        or path != expected_path
+        or resolved != expected_path
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 10001
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise PreflightError(
+            "Antigravity ACP profile must be writable, owner-only, and owned by UID 10001"
+        )
+
+
+def _validate_antigravity_acp_image_profile(
+    config: dict[str, Any],
+    image_lock: dict[str, Any],
+    docker_prefix: list[str],
+) -> None:
+    """Require the selected Navigator image to carry the pinned ACP runtime labels."""
+
+    navigator = config.get("services", {}).get("navigator", {})
+    image = navigator.get("image") if isinstance(navigator, dict) else None
+    if (
+        not isinstance(image, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", image) is None
+    ):
+        raise PreflightError("Antigravity ACP requires a fixed locked Navigator image reference")
+    image_rows = image_lock.get("images", [])
+    if not isinstance(image_rows, list):
+        raise PreflightError("Antigravity ACP image lock is malformed")
+    matching_rows = [
+        row
+        for row in image_rows
+        if isinstance(row, dict)
+        and row.get("service") == "dsh-executor"
+        and row.get("image") == image
+    ]
+    if len(matching_rows) != 1:
+        raise PreflightError("Antigravity ACP image is not the locked Navigator executor image")
+    try:
+        inspected_rows = json.loads(_run([*docker_prefix, "image", "inspect", image]))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PreflightError("Antigravity ACP Navigator image metadata is invalid") from error
+    if not isinstance(inspected_rows, list) or len(inspected_rows) != 1:
+        raise PreflightError("Antigravity ACP Navigator image metadata is unavailable")
+    inspected = inspected_rows[0]
+    if not isinstance(inspected, dict) or inspected.get("Id") != matching_rows[0].get("imageId"):
+        raise PreflightError("Antigravity ACP Navigator image differs from its locked image ID")
+    image_config = inspected.get("Config")
+    labels = image_config.get("Labels", {}) if isinstance(image_config, dict) else None
+    if not isinstance(labels, dict) or any(
+        labels.get(name) != value for name, value in ANTIGRAVITY_ACP_IMAGE_LABELS.items()
+    ):
+        raise PreflightError(
+            "Antigravity ACP requires the locked Navigator image's verified 1.4.5 profile labels"
+        )
 
 
 def _validate_codebuddy_acp_boundary(
@@ -8270,6 +8538,11 @@ def run_preflight(
         row["localImage"] for row in image_lock_data.get("externalImages", {}).values()
     )
     config = _compose_config(docker_prefix, compose_files, env_files)
+    navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
+    execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
+    if execution_backend == "antigravity-acp":
+        _validate_model_runtime_config(navigator_environment)
+        _validate_antigravity_acp_image_profile(config, image_lock_data, docker_prefix)
     _validate_office_oauth_setup_mount(config, connector_auth_phase)
     if connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and _automation_provider_ids(
         config
@@ -8318,7 +8591,6 @@ def run_preflight(
         notification_provenance_file=notification_provenance_file,
         candidate_runpod_key_file=candidate_runpod_key_file,
     )
-    navigator_environment = config.get("services", {}).get("navigator", {}).get("environment", {})
     graph_personal_route = connector_auth_phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE or (
         connector_auth_phase == "issued-connector-activation"
         and "microsoft-graph" in config.get("services", {})
@@ -8332,7 +8604,6 @@ def run_preflight(
         require_personal_delivery=graph_personal_route,
     )
     automation_providers_present = bool(_automation_provider_ids(config))
-    execution_backend = navigator_environment.get("CYRENE_HARNESS_EXECUTION_BACKEND", "dsh")
     if execution_backend == "codebuddy-acp":
         _validate_codebuddy_acp_boundary(
             config,
@@ -8340,16 +8611,21 @@ def run_preflight(
             config_dir=config_dir.resolve(),
             connector_auth_phase=connector_auth_phase,
         )
+    elif execution_backend == "antigravity-acp":
+        _validate_antigravity_acp_boundary(
+            config,
+            secrets_dir=secrets_dir.resolve(),
+            config_dir=config_dir.resolve(),
+        )
     if navigator_environment.get("CYRENE_RESPONSIBILITY_TARGETS_FILE"):
         if mode == "bootstrap":
             _validate_optional_workflow_definition_disabled(config_dir.resolve())
         else:
             _validate_github_workflow_allowlist(config, config_dir.resolve())
     _validate_identity_scope(config, config_dir.resolve() / "teams-actor-subjects.json")
-    if (
-        navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity"
-        or execution_backend == "codebuddy-acp"
-    ):
+    if navigator_environment.get(
+        "CYRENE_HARNESS_MODEL_SOURCE"
+    ) == "antigravity" or execution_backend in {"codebuddy-acp", "antigravity-acp"}:
         if navigator_environment.get("CYRENE_HARNESS_MODEL_SOURCE") == "antigravity":
             _validate_model_home_mount(config)
         _validate_proactive_navigator_container(config)
@@ -8381,7 +8657,13 @@ def run_preflight(
             expected_scope_digests=connector_auth_expectations["expectedProviderScopeDigests"],
         )
     if mode != "bootstrap":
-        _validate_codebuddy_mount(config, secrets_dir.resolve())
+        if execution_backend == "antigravity-acp":
+            _validate_antigravity_acp_profile_mount(
+                config.get("services", {}).get("navigator", {}),
+                secrets_dir=secrets_dir.resolve(),
+            )
+        else:
+            _validate_codebuddy_mount(config, secrets_dir.resolve())
     owned_staging_image_id = _validate_host_ports(
         config,
         mode=mode,
