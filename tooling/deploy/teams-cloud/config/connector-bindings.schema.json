@@ -30,7 +30,7 @@
                 "toolId": {"type": "string", "minLength": 1},
                 "operationId": {"type": "string", "minLength": 1},
                 "resourceProjection": {
-                  "enum": ["empty", "profile", "github_repository", "github_pull_request", "github_ci", "github_commit", "github_issue", "github_actions_run", "github_actions_job", "github_branch", "github_file", "github_pull_request_draft", "huggingface_models_list", "huggingface_datasets_list", "huggingface_spaces_list", "huggingface_repository", "computer_workspace", "computer_file", "computer_directory", "cloud_target", "cloud_operation", "microsoft_graph_plan", "microsoft_graph_task", "microsoft_graph_site", "microsoft_graph_list", "azure_devops_source"]
+                  "enum": ["empty", "profile", "github_repository", "github_pull_request", "github_ci", "github_commit", "github_issue", "github_actions_run", "github_actions_job", "github_branch", "github_file", "github_pull_request_draft", "huggingface_models_list", "huggingface_datasets_list", "huggingface_spaces_list", "huggingface_repository", "computer_workspace", "computer_file", "computer_directory", "cloud_target", "cloud_operation", "microsoft_graph_plan", "microsoft_graph_task", "microsoft_graph_site", "microsoft_graph_list", "microsoft_graph_mail_folder", "microsoft_graph_mail_message", "microsoft_graph_mail_draft", "azure_devops_source"]
                 },
                 "mutating": {"type": "boolean"}
               }

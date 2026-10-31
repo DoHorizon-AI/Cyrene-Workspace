@@ -57,6 +57,22 @@ RSS, cgroup-limit, or disk-reserve checks.
 | [`docs/TEAMS_CLOUD_DEPLOYMENT.md`](../../../docs/TEAMS_CLOUD_DEPLOYMENT.md) | Bilingual staging, identity, provider order, rollback, and evidence runbook / 双语 staging、身份、Provider 顺序、回滚和证据手册 |
 | [`AUTOMATION_PILOT_PREPARATION.md`](AUTOMATION_PILOT_PREPARATION.md) | Prepare-only source bindings, actor-scoped Work credentials, provider gates, VM capacity guard, and five-day measurement definitions / 仅准备的 source binding、actor-scoped Work credential、Provider 门禁、VM 容量保护和五日测量定义 |
 
+### Microsoft Graph mail / Microsoft Graph 邮件
+
+The three mail feature switches in `config/microsoft-graph-office-v2-host-profile.template.json` and the provider-settings template default to `false`. Enabling a switch is an explicit host configuration change. An already-linked profile that lacks the selected Mail scopes remains usable for its existing non-mail capabilities; the setup page reports `REAUTHORIZATION_REQUIRED` and waits for a separate user-initiated scope upgrade. Status polling and target discovery never start OAuth automatically.
+
+Mailbox discovery and message reads expose bounded metadata only. Reading message bodies or attachments is not implemented. Draft creation/update/delete and sending are separate opt-in capabilities with their own delegated scopes; sending is limited to an existing draft, never an arbitrary recipient/body payload. Uncertain sends are outcomes of unknown status and must not be replayed automatically.
+
+`config/microsoft-graph-office-v2-host-profile.schema.json` keeps `mailFolderIds` empty unless metadata access is explicitly enabled. `mailMetadataEnabled` controls folder discovery and folder-bound metadata reads; `mailDraftsEnabled` and `mailSendEnabled` use the fixed Drafts folder and do not add arbitrary folder targets.
+
+### Microsoft Graph 邮件
+
+`config/microsoft-graph-office-v2-host-profile.template.json` 和 provider-settings 模板中的三个邮件功能开关默认均为 `false`；启用开关必须是宿主机的显式配置变更。已有链接若缺少所选 Mail scope，仍可继续使用已授权的非邮件能力；设置页会报告 `REAUTHORIZATION_REQUIRED`，并等待用户单独发起 scope upgrade。状态轮询和 target discovery 不会自动启动 OAuth。
+
+邮箱发现和邮件读取仅暴露有界元数据，不支持读取邮件正文或附件。草稿创建/更新/删除和发送是各自独立 opt-in 的能力，并使用对应委托 scope；发送只允许发送已有草稿，不接受任意收件人或正文。发送结果不确定时记录为未知结果，禁止自动重放。
+
+`config/microsoft-graph-office-v2-host-profile.schema.json` 仅在显式启用 metadata 访问后才允许设置 `mailFolderIds`。`mailMetadataEnabled` 控制文件夹发现和绑定文件夹的元数据读取；`mailDraftsEnabled` 与 `mailSendEnabled` 使用固定 Drafts 文件夹，不增加任意文件夹 target。
+
 Run the source build only from a clean, committed Workspace checkout and provide
 the exact source SHA for every repository. The builder snapshots remote Git
 commits into a temporary directory; it never copies files from sibling working

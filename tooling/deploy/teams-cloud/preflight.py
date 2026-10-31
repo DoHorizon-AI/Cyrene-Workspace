@@ -1689,6 +1689,46 @@ CONNECTOR_OPERATION_POLICIES = {
         "microsoft_graph_drive_item",
         False,
     ),
+    "microsoft_graph.mail.folders.list": (
+        "microsoft_graph.mail.folders.list",
+        "microsoft_graph_mail_folder",
+        False,
+    ),
+    "microsoft_graph.mail.messages.list": (
+        "microsoft_graph.mail.messages.list",
+        "microsoft_graph_mail_message",
+        False,
+    ),
+    "microsoft_graph.mail.message.get": (
+        "microsoft_graph.mail.message.get",
+        "microsoft_graph_mail_message",
+        False,
+    ),
+    "microsoft_graph.mail.drafts.list": (
+        "microsoft_graph.mail.drafts.list",
+        "microsoft_graph_mail_draft",
+        False,
+    ),
+    "microsoft_graph.mail.draft.create": (
+        "microsoft_graph.mail.draft.create",
+        "microsoft_graph_mail_draft",
+        True,
+    ),
+    "microsoft_graph.mail.draft.update": (
+        "microsoft_graph.mail.draft.update",
+        "microsoft_graph_mail_draft",
+        True,
+    ),
+    "microsoft_graph.mail.draft.delete": (
+        "microsoft_graph.mail.draft.delete",
+        "microsoft_graph_mail_draft",
+        True,
+    ),
+    "microsoft_graph.mail.message.send": (
+        "microsoft_graph.mail.message.send",
+        "microsoft_graph_mail_draft",
+        True,
+    ),
     "computer.command.execute": ("computer.command.execute", "computer_workspace", True),
     "computer.file.read": ("computer.file.read", "computer_file", False),
     "computer.file.write": ("computer.file.write", "computer_file", True),
@@ -1752,6 +1792,12 @@ CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS = {
     ),
     "microsoft_graph.sharepoint.drives.list": ("site_id",),
     "microsoft_graph.sharepoint.drive.items.list": ("site_id", "drive_id"),
+    "microsoft_graph.mail.messages.list": ("folder_id",),
+    "microsoft_graph.mail.message.get": ("folder_id", "message_id"),
+    "microsoft_graph.mail.draft.create": ("subject", "body_text"),
+    "microsoft_graph.mail.draft.update": ("message_id", "if_match", "changes"),
+    "microsoft_graph.mail.draft.delete": ("message_id", "if_match"),
+    "microsoft_graph.mail.message.send": ("message_id",),
     "github.issues.search": ("repository_id", "repository"),
     "github.actions.jobs.list": ("repository_id", "repository", "run_id"),
     "github.actions.job.logs.read": (
@@ -3051,13 +3097,8 @@ def _validate_office_v2_host_scope(scope: dict[str, Any], compose: dict[str, Any
             "sharePointDriveIds",
         },
     }
-    mail_enabled = any(
-        features[name] for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
-    )
-    if not mail_enabled and targets["mailFolderIds"]:
-        raise PreflightError(
-            "disabled Microsoft Graph mail features must not retain target folders"
-        )
+    if not features["mailMetadataEnabled"] and targets["mailFolderIds"]:
+        raise PreflightError("Microsoft Graph mail folders require the metadata feature")
     for feature, target_names in disabled_targets.items():
         if not features[feature] and any(targets[name] for name in target_names):
             raise PreflightError(
@@ -3083,11 +3124,6 @@ def _validate_graph_provider_office_flags(provider_flags: Any, host_scope: dict[
         raise PreflightError(
             "Microsoft Graph provider Office flags must explicitly map the Exchange scope"
         )
-    if any(
-        provider_flags[name]
-        for name in ("mail_metadata_enabled", "mail_drafts_enabled", "mail_send_enabled")
-    ):
-        raise PreflightError("Microsoft Graph Mail features are deferred in this provider release")
 
 
 def _exchange_graph_office_scope(compose: dict[str, Any]) -> dict[str, Any] | None:
@@ -3181,6 +3217,26 @@ def _graph_operations_for_office_scope(scope: dict[str, Any]) -> set[str]:
             operations.add("microsoft_graph.sharepoint.drive.items.list")
         if targets["sharePointSiteIds"]:
             operations.add("microsoft_graph.sharepoint.site.get")
+    if features["mailMetadataEnabled"]:
+        operations.add("microsoft_graph.mail.folders.list")
+        if targets["mailFolderIds"]:
+            operations.update(
+                {
+                    "microsoft_graph.mail.messages.list",
+                    "microsoft_graph.mail.message.get",
+                }
+            )
+    if features["mailDraftsEnabled"]:
+        operations.update(
+            {
+                "microsoft_graph.mail.drafts.list",
+                "microsoft_graph.mail.draft.create",
+                "microsoft_graph.mail.draft.update",
+                "microsoft_graph.mail.draft.delete",
+            }
+        )
+    if features["mailSendEnabled"]:
+        operations.add("microsoft_graph.mail.message.send")
     return operations
 
 
@@ -3193,6 +3249,10 @@ def _graph_public_target_scope(scope: dict[str, Any]) -> dict[str, Any]:
     todo_enabled = features["todoEnabled"]
     calendar_enabled = features["calendarEnabled"]
     sharepoint_enabled = features["sharePointDriveMetadataEnabled"]
+    mail_metadata_enabled = features["mailMetadataEnabled"]
+    mail_drafts_enabled = features["mailDraftsEnabled"]
+    mail_send_enabled = features["mailSendEnabled"]
+    mail_enabled = mail_metadata_enabled or mail_drafts_enabled or mail_send_enabled
     return {
         "schemaVersion": 2,
         "tenantId": scope["tenantId"],
@@ -3226,12 +3286,12 @@ def _graph_public_target_scope(scope: dict[str, Any]) -> dict[str, Any]:
             "attendeesWrite": False,
         },
         "mail": {
-            "enabled": False,
-            "folderIds": [],
-            "metadataRead": False,
+            "enabled": mail_enabled,
+            "folderIds": (list(targets["mailFolderIds"]) if mail_metadata_enabled else []),
+            "metadataRead": mail_metadata_enabled,
             "bodyRead": False,
-            "draftsWrite": False,
-            "sendEnabled": False,
+            "draftsWrite": mail_drafts_enabled,
+            "sendEnabled": mail_send_enabled,
         },
     }
 
@@ -3244,6 +3304,7 @@ def _graph_expected_oauth_scopes(scope: dict[str, Any]) -> set[str]:
     todo = public_scope["todo"]
     sharepoint = public_scope["sharepoint"]
     calendar = public_scope["calendar"]
+    mail = public_scope["mail"]
     required = {"User.Read", "offline_access"}
     if planner["tasksWrite"] or todo["tasksWrite"]:
         required.add("Tasks.ReadWrite")
@@ -3255,6 +3316,13 @@ def _graph_expected_oauth_scopes(scope: dict[str, Any]) -> set[str]:
         required.add("Calendars.ReadWrite")
     elif calendar["eventsRead"] or calendar["freebusyRead"]:
         required.add("Calendars.ReadBasic")
+    mail_readwrite = mail["draftsWrite"]
+    if mail_readwrite:
+        required.add("Mail.ReadWrite")
+    elif mail["metadataRead"] or mail["sendEnabled"]:
+        required.add("Mail.ReadBasic")
+    if mail["sendEnabled"]:
+        required.add("Mail.Send")
     return required
 
 
@@ -3273,11 +3341,17 @@ def _graph_enabled_feature_names(scope: dict[str, Any]) -> set[str]:
         features.add("calendar")
     if public_scope["sharepoint"]["enabled"]:
         features.add("sharepoint_drive_metadata")
+    if public_scope["mail"]["metadataRead"]:
+        features.add("mail_metadata")
+    if public_scope["mail"]["draftsWrite"]:
+        features.add("mail_drafts")
+    if public_scope["mail"]["sendEnabled"]:
+        features.add("mail_send")
     return features
 
 
 def _graph_target_ref_count(scope: dict[str, Any]) -> int:
-    """Mirror Exchange's target count, excluding fixed site and mail metadata."""
+    """Mirror Exchange's selected target count, excluding fixed site and draft aliases."""
 
     public_scope = _graph_public_target_scope(scope)
     targets = (
@@ -3289,6 +3363,7 @@ def _graph_target_ref_count(scope: dict[str, Any]) -> int:
     if public_scope["sharepoint"]["enabled"]:
         targets += len(public_scope["sharepoint"]["listIds"])
         targets += len(public_scope["sharepoint"]["driveIds"])
+    targets += len(public_scope["mail"]["folderIds"])
     return targets
 
 
