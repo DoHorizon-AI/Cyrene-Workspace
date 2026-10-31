@@ -118,6 +118,56 @@ def test_formal_stage_compose_targets_build_closed_no_image_io_argv_without_cli_
     assert len(captured) == calls_before_rejection
 
 
+def test_workspace_authority_compose_pair_syncs_only_the_dormant_operator_image_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow the real Compose operator profile to follow Authority's sole image update."""
+
+    active = _render_actual_runtime_compose(monkeypatch)
+    assert "directory-operator" in active["services"]
+    assert "directory-operator" not in runtime_update.preflight._expected_stage1_services(active)
+    assert "directory-operator" not in runtime_update.FORMAL_STAGE_TRANSITION_TARGETS
+    assert "directory-operator" not in runtime_update.ALLOWED_TARGETS
+    assert (
+        active["services"]["directory-operator"]["image"]
+        == active["services"]["workspace-authority"]["image"]
+    )
+
+    candidate = copy.deepcopy(active)
+    candidate_image = "example.test/workspace-authority:locked-candidate"
+    candidate["services"]["workspace-authority"]["image"] = candidate_image
+    candidate["services"]["directory-operator"]["image"] = candidate_image
+    runtime_update._validate_compose_pair(active, candidate, ["workspace-authority"])
+
+    mismatched_alias = copy.deepcopy(candidate)
+    mismatched_alias["services"]["directory-operator"]["image"] = (
+        "example.test/workspace-authority:unlocked-alias"
+    )
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError,
+        match="directory-operator image must remain an exact alias",
+    ):
+        runtime_update._validate_compose_pair(active, mismatched_alias, ["workspace-authority"])
+
+    changed_operator_config = copy.deepcopy(candidate)
+    changed_operator_config["services"]["directory-operator"]["environment"][
+        "CYRENE_ORGANIZATION_ID"
+    ] = "other-organization"
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError,
+        match="changes configuration outside the selected immutable images",
+    ):
+        runtime_update._validate_compose_pair(
+            active, changed_operator_config, ["workspace-authority"]
+        )
+
+    with pytest.raises(
+        runtime_update.RuntimeUpdateError,
+        match="changes configuration outside the selected immutable images",
+    ):
+        runtime_update._validate_compose_pair(active, candidate, ["exchange"])
+
+
 def _edge_status(*, paused: bool, revision: int, active: int = 0) -> dict[str, Any]:
     """Return the exact safe status envelope used by the Teams delivery admin API."""
 
