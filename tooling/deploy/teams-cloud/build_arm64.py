@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -345,6 +346,46 @@ def _base_image_build_input(
     return input_reference, provenance_key, provenance
 
 
+def _normalize_source_directory_modes(checkout: Path) -> None:
+    """Make only materialized Git source directories traversable by container users."""
+
+    def fail_walk(error: OSError) -> None:
+        raise BuildError("could not inspect materialized source directory tree") from error
+
+    try:
+        root_mode = checkout.lstat().st_mode
+    except OSError as error:
+        raise BuildError("materialized source root is unavailable") from error
+    if not stat.S_ISDIR(root_mode):
+        raise BuildError("materialized source root must be a regular directory")
+
+    for current, directories, _files in os.walk(
+        checkout, topdown=True, onerror=fail_walk, followlinks=False
+    ):
+        current_path = Path(current)
+        for directory in tuple(directories):
+            child = current_path / directory
+            try:
+                child_mode = child.lstat().st_mode
+            except OSError as error:
+                raise BuildError("materialized source directory is unavailable") from error
+            if stat.S_ISLNK(child_mode):
+                directories.remove(directory)
+                continue
+            if not stat.S_ISDIR(child_mode):
+                raise BuildError("materialized source tree contains a malformed directory entry")
+            try:
+                os.chmod(child, 0o755, follow_symlinks=False)
+            except OSError as error:
+                raise BuildError(
+                    "could not normalize materialized source directory mode"
+                ) from error
+        try:
+            os.chmod(current_path, 0o755, follow_symlinks=False)
+        except OSError as error:
+            raise BuildError("could not normalize materialized source root mode") from error
+
+
 def _archive_remote_source(
     alias: str, source: dict[str, Any], staging_root: Path
 ) -> dict[str, str]:
@@ -392,6 +433,7 @@ def _archive_remote_source(
         stderr = archive.stderr.read().decode("utf-8", errors="replace") if archive.stderr else ""
         if archive.wait() != 0:
             raise BuildError(f"could not archive exact source {alias}: {stderr[:300]}")
+    _normalize_source_directory_modes(checkout)
     return {"remote": source["remote"], "commit": commit, "tree": tree}
 
 
