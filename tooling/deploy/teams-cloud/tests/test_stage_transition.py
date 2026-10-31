@@ -1979,31 +1979,43 @@ def test_workspace_authority_is_not_a_generic_issued_activation_target(tmp_path:
 
 
 @pytest.mark.parametrize(
-    "phase",
-    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+    ("target", "phase"),
+    [
+        (
+            stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            "issued-connector-activation",
+        ),
+        (
+            stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
+        (
+            stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
+    ],
 )
-def test_workspace_authority_plan_closes_to_one_graph_runtime_target(
-    phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
+    target: str, phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Validate both selected phases, the exact 15-service set, and a single image delta."""
+    """Validate Authority and Exchange continuations as one exact 15-service image delta."""
 
     active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
         tmp_path
     )
-    target = stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
     candidate = copy.deepcopy(active)
     candidate_lock = copy.deepcopy(active_lock)
-    candidate_ref = "example.invalid/workspace-authority:office-plan"
+    candidate_ref = f"example.invalid/{target}:office-plan"
     candidate["services"][target]["image"] = candidate_ref
-    candidate["services"]["directory-operator"]["image"] = candidate_ref
-    candidate["services"]["directory-operator"]["image"] = candidate_ref
-    authority_row = next(
+    if target == stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
+        candidate["services"]["directory-operator"]["image"] = candidate_ref
+    target_row = next(
         row
         for row in candidate_lock["images"]
         if row["service"] == runtime_update.LOCK_SERVICE_FOR_TARGET[target]
     )
-    authority_row["image"] = candidate_ref
-    authority_row["imageId"] = _image_id(159)
+    target_row["image"] = candidate_ref
+    target_row["imageId"] = _image_id(159)
     targets, candidate_services = stage_transition._validate_phase_topology(
         phase=phase,
         image_update_target=target,
@@ -2071,17 +2083,41 @@ def test_workspace_authority_plan_closes_to_one_graph_runtime_target(
     stage_transition._validate_plan(plan)
 
     changed = copy.deepcopy(plan)
-    changed["candidateServices"]["exchange"]["candidate"]["imageId"] = _image_id(160)
+    unselected_service = (
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET
+        if target == stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        else stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+    )
+    changed["candidateServices"][unselected_service]["candidate"]["imageId"] = _image_id(160)
     changed["planSha256"] = stage_transition._sha256_bytes(
         stage_transition._canonical_json(
             {key: value for key, value in changed.items() if key != "planSha256"}
         )
     )
+    expected_error = (
+        f"Workspace Authority image update changes an unselected image: {unselected_service}"
+        if target == stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        else f"Exchange Graph-bootstrap image update changes an unselected image: {unselected_service}"
+    )
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="Workspace Authority image update changes an unselected image: exchange",
+        match=expected_error,
     ):
         stage_transition._validate_plan(changed)
+
+    if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET:
+        wrong_budget = copy.deepcopy(plan)
+        wrong_budget["candidatePreflight"]["maxCpus"] = 1.90
+        wrong_budget["planSha256"] = stage_transition._sha256_bytes(
+            stage_transition._canonical_json(
+                {key: value for key, value in wrong_budget.items() if key != "planSha256"}
+            )
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="exact 15-service topology and budget",
+        ):
+            stage_transition._validate_plan(wrong_budget)
 
 
 def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
@@ -5547,6 +5583,11 @@ def test_resume_old_executor_resumes_only_the_journaled_drain_generation(
     ("phase", "target", "required"),
     [
         ("provider-bootstrap", "exchange", True),
+        (
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+            True,
+        ),
         ("provider-bootstrap", "cloud-management-phase2", True),
         ("provider-bootstrap", "navigator", False),
         ("issued-connector-activation", "exchange", True),
@@ -9284,10 +9325,17 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
         )
 
 
-def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_without_changing_nav_inputs(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+    ],
+)
+def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_changing_nav_inputs(
+    target: str, tmp_path: Path
 ) -> None:
-    """Verify the OAuth-issued Graph delta while the frozen Navigator catalog stays pre-OAuth."""
+    """Verify one live Graph delta for the two approved targets without changing Navigator inputs."""
 
     snapshot, compose, _database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9313,7 +9361,7 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
         snapshot=snapshot,
         compose=compose,
         phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-        image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        image_update_target=target,
     )
     receipt.update(
         {
@@ -9323,11 +9371,29 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
         }
     )
     plan = {
-        "imageUpdateTarget": stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        "imageUpdateTarget": target,
         "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
         "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
     }
+    if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET:
+        candidate_exchange_image_id = _image_id(45)
+        plan["candidateServices"] = {
+            "exchange": {
+                "active": {"imageRef": "exchange:old", "imageId": exchange_image_id},
+                "candidate": {"imageRef": "exchange:new", "imageId": candidate_exchange_image_id},
+                "added": False,
+                "configChanged": False,
+            }
+        }
+        plan["candidatePreflight"].update(
+            {
+                "composeCgroupMemoryLimitMiB": 3584,
+                "composeCgroupCpuLimit": 1.95,
+                "maxMemoryMiB": 3584,
+                "maxCpus": 1.95,
+            }
+        )
     journal = {"exchangeReadiness": {"receipt": receipt}}
     checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
         plan, journal, candidate_compose=compose
@@ -9355,6 +9421,48 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
     assert bindings_path.read_bytes() == frozen_bindings_bytes
     assert catalog_path.read_bytes() == frozen_catalog_bytes
 
+    if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET:
+        candidate_container_id = "c" * 64
+        after_receipt = copy.deepcopy(receipt)
+        after_receipt["exchangeContainerId"] = candidate_container_id
+        after_receipt["exchangeImageId"] = candidate_exchange_image_id
+        after_journal = {
+            "exchangeReadiness": {"receipt": after_receipt},
+            "targetProgress": {
+                "exchange": {
+                    "phase": "APPLIED",
+                    "candidateContainerId": candidate_container_id,
+                    "candidateImageId": candidate_exchange_image_id,
+                }
+            },
+        }
+        after_checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, after_journal, candidate_compose=compose
+        )
+        assert after_checkpoint["verified"] is True
+        assert after_checkpoint["exchangeContainerId"] == candidate_container_id
+        assert after_checkpoint["exchangeImageId"] == candidate_exchange_image_id
+
+        wrong_candidate = copy.deepcopy(after_journal)
+        wrong_candidate["targetProgress"]["exchange"]["candidateContainerId"] = "d" * 64
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="requires live readiness for the exact frozen Exchange inventory",
+        ):
+            stage_transition._image_update_exchange_readiness_checkpoint(
+                plan, wrong_candidate, candidate_compose=compose
+            )
+
+        unapplied_candidate = copy.deepcopy(after_journal)
+        unapplied_candidate["targetProgress"]["exchange"]["phase"] = "PREPARED"
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="exact applied candidate identity",
+        ):
+            stage_transition._image_update_exchange_readiness_checkpoint(
+                plan, unapplied_candidate, candidate_compose=compose
+            )
+
     duplicate_connection_ref = copy.deepcopy(journal)
     duplicate_connection_ref["exchangeReadiness"]["receipt"]["connectionRefByProvider"][
         "microsoft_graph"
@@ -9374,6 +9482,13 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
         )
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+    ],
+)
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -9396,8 +9511,8 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
         "misjoined_graph_catalog",
     ],
 )
-def test_workspace_authority_graph_bootstrap_rejects_invalid_live_graph_delta(
-    mutation: str, tmp_path: Path
+def test_graph_bootstrap_image_update_rejects_invalid_live_graph_delta(
+    target: str, mutation: str, tmp_path: Path
 ) -> None:
     """Reject incomplete, repeated, misjoined, unsafe, or drifting live Graph readiness."""
 
@@ -9479,12 +9594,19 @@ def test_workspace_authority_graph_bootstrap_rejects_invalid_live_graph_delta(
             snapshot=snapshot,
             compose=compose,
             phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            image_update_target=target,
         )
 
 
-def test_workspace_authority_graph_bootstrap_rejects_graph_in_frozen_navigator_inputs(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+    ],
+)
+def test_graph_bootstrap_image_update_rejects_graph_in_frozen_navigator_inputs(
+    target: str, tmp_path: Path
 ) -> None:
     """Never add or accept Graph in the frozen Navigator bootstrap projection."""
 
@@ -9503,7 +9625,7 @@ def test_workspace_authority_graph_bootstrap_rejects_graph_in_frozen_navigator_i
             snapshot=snapshot,
             compose=compose,
             phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            image_update_target=target,
         )
 
 
@@ -9542,10 +9664,17 @@ def test_workspace_authority_graph_bootstrap_delta_does_not_apply_to_other_targe
         )
 
 
-def test_workspace_authority_graph_bootstrap_readiness_requires_linked_profile(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+    ],
+)
+def test_graph_bootstrap_image_readiness_requires_linked_profile(
+    target: str, tmp_path: Path
 ) -> None:
-    """Do not let an Authority update reuse the pre-OAuth empty Graph readiness path."""
+    """Do not let either approved image target use the pre-OAuth empty Graph path."""
 
     snapshot, compose, _database_state, _provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9563,7 +9692,31 @@ def test_workspace_authority_graph_bootstrap_readiness_requires_linked_profile(
             snapshot=snapshot,
             compose=compose,
             phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
-            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+            image_update_target=target,
+        )
+
+
+def test_exchange_graph_bootstrap_live_graph_delta_is_not_allowed_in_issued_phase(
+    tmp_path: Path,
+) -> None:
+    """Keep the live-only Graph row exception restricted to the exact bootstrap phase."""
+
+    snapshot, compose, _database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    _issue_graph_readiness_row(snapshot, compose, persist_candidate=False)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="live Exchange issued bindings differ from the frozen Navigator binding config",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase="issued-connector-activation",
+            image_update_target=stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         )
 
 
@@ -9590,6 +9743,7 @@ def test_account_center_readiness_rejects_changed_computer_inventory(
             tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
         )
     )
+
     changed_snapshot = copy.deepcopy(snapshot)
     changed_compose = copy.deepcopy(compose)
     computer_profile = next(
@@ -10115,6 +10269,58 @@ def test_cloud_image_update_journal_keeps_bootstrap_and_issued_gates_separate(
     assert bootstrap_journal["cloudImageUpdate"]["required"] is False
     assert bootstrap_journal["cloudRunnerIdle"]["required"] is True
     assert bootstrap_journal["cloudRunnerIdle"]["planState"] == bootstrap_plan["cloudRunnerState"]
+
+
+def test_exchange_graph_bootstrap_image_update_journal_tracks_readiness_checkpoints(
+    tmp_path: Path,
+) -> None:
+    """Persist before/after Exchange readiness for the one Exchange bootstrap continuation."""
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    target = stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET
+    plan = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "imageUpdateTarget": target,
+        "targets": [target],
+        "activeServices": {target: {"containerId": "b" * 64}},
+        "candidateServices": {
+            target: {
+                "active": {"imageId": _image_id(10)},
+                "candidate": {"imageId": _image_id(11)},
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "edgeDelivery": {"containerId": "c" * 64, "revision": 0, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "d" * 64,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+        "database": {"backupPath": "/private/persistence.snapshot"},
+        "exchangeReadiness": {"required": True},
+        "candidateSelectionFile": "/private/runtime-selection.json",
+        "selectionBackupPath": "/private/previous-selection.json",
+        "activeSelection": {"sha256": None},
+    }
+
+    journal = stage_transition._make_journal(plan, plan_path)
+    assert journal["exchangeImageUpdate"]["required"] is True
+    journal["state"] = "APPLIED"
+    journal["exchangeImageUpdate"].update(
+        {
+            "beforeReadiness": {"verified": True},
+            "afterReadiness": {"verified": True},
+        }
+    )
+
+    summary = stage_transition._journal_summary(journal)
+    assert summary["exchangeImageUpdateRequired"] is True
+    assert summary["exchangeImageUpdateStatus"] == "VERIFIED"
 
 
 def test_account_center_image_update_journal_reports_readonly_database_and_readiness_gates(
