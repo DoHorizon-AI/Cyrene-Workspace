@@ -9390,6 +9390,9 @@ def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_witho
         "wrong_graph_owner",
         "wrong_graph_scope",
         "wrong_graph_operations",
+        "wrong_graph_tool_id",
+        "wrong_graph_tool_projection",
+        "wrong_graph_catalog_schema",
         "misjoined_graph_catalog",
     ],
 )
@@ -9462,6 +9465,12 @@ def test_workspace_authority_graph_bootstrap_rejects_invalid_live_graph_delta(
         )
         graph_catalog["tools"][0]["id"] = policy[0]
         graph_catalog["tools"][0]["readOnly"] = not policy[2]
+    elif mutation == "wrong_graph_tool_id":
+        graph_binding["tools"][0]["toolId"] = "microsoft_graph.unrecognized.operation"
+    elif mutation == "wrong_graph_tool_projection":
+        graph_binding["tools"][0]["resourceProjection"] = "profile"
+    elif mutation == "wrong_graph_catalog_schema":
+        graph_catalog["tools"][0]["inputSchema"] = {"type": "string"}
     elif mutation == "misjoined_graph_catalog":
         graph_catalog["connectionRef"] = "88888888-8888-4888-8888-888888888888"
 

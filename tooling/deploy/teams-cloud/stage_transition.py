@@ -10575,6 +10575,16 @@ def _verify_exchange_readiness_snapshot(
                     "candidate Exchange Graph Office v2 scope is unavailable"
                 )
             try:
+                graph_binding_document = {"schemaVersion": 1, "bindings": [binding]}
+                preflight._validate_connector_bindings_document(
+                    graph_binding_document, {"microsoft_graph"}
+                )
+                if include_live_catalog:
+                    preflight._validate_connector_tool_catalog_documents(
+                        {"schemaVersion": 1, "items": [catalog_item]},
+                        graph_binding_document,
+                        {"microsoft_graph"},
+                    )
                 preflight._validate_office_v2_host_scope(graph_office_scope, compose)
                 graph_operations = preflight._graph_operations_for_office_scope(graph_office_scope)
                 preflight._validate_new_provider_bindings_readonly(
