@@ -7131,14 +7131,20 @@ def test_office_v2_scope_maps_targets_features_and_oauth_scopes_exactly() -> Non
     assert "microsoft_graph.sharepoint.drive.items.list" in operations
     assert not any(operation.startswith("microsoft_graph.mail.") for operation in operations)
     assert preflight._graph_expected_oauth_scopes(scope) == {
-        "openid",
-        "profile",
         "offline_access",
         "User.Read",
         "Tasks.ReadWrite",
         "Calendars.ReadWrite",
         "Sites.Selected",
     }
+    assert preflight._graph_enabled_feature_names(scope) == {
+        "planner_read",
+        "planner_write",
+        "todo",
+        "calendar",
+        "sharepoint_drive_metadata",
+    }
+    assert preflight._graph_target_ref_count(scope) == 6
     public_scope = preflight._graph_public_target_scope(scope)
     assert public_scope["sharepoint"]["siteId"] == scope["targets"]["sharePointSiteIds"][0]
     assert public_scope["mail"] == {
@@ -7149,6 +7155,33 @@ def test_office_v2_scope_maps_targets_features_and_oauth_scopes_exactly() -> Non
         "draftsWrite": False,
         "sendEnabled": False,
     }
+
+    native_metadata_scope = copy.deepcopy(scope)
+    native_metadata_scope["targets"].update(
+        {
+            "plannerPlanIds": [],
+            "sharePointListIds": [],
+            "sharePointDriveIds": [],
+            "toDoTaskListIds": [],
+            "calendarIds": [],
+            "freebusySubjects": ["owner@example.invalid"],
+        }
+    )
+    assert preflight._graph_expected_oauth_scopes(native_metadata_scope) == {
+        "User.Read",
+        "offline_access",
+        "Tasks.ReadWrite",
+        "Sites.Selected",
+        "Calendars.ReadWrite",
+    }
+    assert preflight._graph_enabled_feature_names(native_metadata_scope) == {
+        "planner_read",
+        "planner_write",
+        "todo",
+        "calendar",
+        "sharepoint_drive_metadata",
+    }
+    assert preflight._graph_target_ref_count(native_metadata_scope) == 1
 
     provider_flags["planner_enabled"] = False
     with pytest.raises(preflight.PreflightError, match="map the Exchange scope"):
