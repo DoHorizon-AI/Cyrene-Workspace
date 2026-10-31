@@ -323,6 +323,28 @@ def resolve_image(reference: str) -> dict[str, str]:
     }
 
 
+def _base_image_build_input(
+    service: str,
+    build_arg: str,
+    resolved: dict[str, str],
+    build_platform: str,
+) -> tuple[str, str, dict[str, str]]:
+    """Select the pinned child or index actually consumed by one build stage."""
+
+    native_authority_rust = service == "workspace-authority" and build_arg == "RUST_BASE_IMAGE"
+    input_reference = (
+        resolved["indexReference"] if native_authority_rust else resolved["immutableReference"]
+    )
+    input_platform = build_platform if native_authority_rust else resolved["platform"]
+    provenance = {
+        **resolved,
+        "buildInputReference": input_reference,
+        "buildInputPlatform": input_platform,
+    }
+    provenance_key = f"{service}.{build_arg}" if native_authority_rust else build_arg
+    return input_reference, provenance_key, provenance
+
+
 def _archive_remote_source(
     alias: str, source: dict[str, Any], staging_root: Path
 ) -> dict[str, str]:
@@ -412,6 +434,9 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
         "amd64",
     }:
         raise BuildError("build host must be Linux x86_64 or ARM64 with Docker Buildx")
+    build_platform = (
+        "linux/arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "linux/amd64"
+    )
     _run(["docker", "buildx", "version"], capture=True)
     builder_info = _run(["docker", "buildx", "inspect"], capture=True)
     if "linux/arm64" not in builder_info and not allow_emulated:
@@ -474,9 +499,13 @@ def build(plan_path: Path, output: Path, *, allow_emulated: bool) -> dict[str, A
             base_rows: dict[str, Any] = {}
             for key, value in build_row.get("buildArgs", {}).items():
                 resolved = resolve_image(value) if key.endswith(("_IMAGE", "_BASE_IMAGE")) else None
-                resolved_args[key] = resolved["immutableReference"] if resolved else value
                 if resolved:
-                    base_rows[key] = resolved
+                    resolved_args[key], provenance_key, provenance = _base_image_build_input(
+                        service, key, resolved, build_platform
+                    )
+                    base_rows[provenance_key] = provenance
+                else:
+                    resolved_args[key] = value
             image_asset_ids = build_row.get("binaryArtifacts", [])
             image_asset_digests: dict[str, str] = {}
             for asset_id in image_asset_ids:

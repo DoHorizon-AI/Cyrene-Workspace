@@ -115,11 +115,17 @@
     "resolvedImage": {
       "type": "object",
       "additionalProperties": false,
+      "dependentRequired": {
+        "buildInputReference": ["buildInputPlatform"],
+        "buildInputPlatform": ["buildInputReference"]
+      },
       "required": ["reference", "immutableReference", "indexReference", "indexDigest", "arm64ManifestDigest", "platform"],
       "properties": {
         "reference": {"type": "string", "minLength": 1},
         "immutableReference": {"type": "string", "minLength": 1},
         "indexReference": {"type": "string", "minLength": 1},
+        "buildInputReference": {"type": "string", "pattern": "^.+@sha256:[0-9a-f]{64}$"},
+        "buildInputPlatform": {"enum": ["linux/amd64", "linux/arm64"]},
         "indexDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "arm64ManifestDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "platform": {"const": "linux/arm64"},

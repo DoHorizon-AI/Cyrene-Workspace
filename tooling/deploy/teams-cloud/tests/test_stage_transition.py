@@ -1826,6 +1826,225 @@ def test_account_center_image_update_is_one_selected_graph_phase_target_only(
         )
 
 
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_workspace_authority_image_update_changes_only_its_image_in_exact_graph_runtime(
+    phase: str, tmp_path: Path
+) -> None:
+    """Permit one Authority replacement while preserving all fifteen Graph services."""
+
+    active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
+        tmp_path
+    )
+    target = stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_ref = "example.invalid/workspace-authority:office-update"
+    candidate["services"][target]["image"] = candidate_ref
+    authority_row = next(
+        row
+        for row in candidate_lock["images"]
+        if row["service"] == runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    )
+    authority_row["image"] = candidate_ref
+    authority_row["imageId"] = _image_id(155)
+
+    targets, images = stage_transition._validate_phase_topology(
+        phase=phase,
+        image_update_target=target,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+
+    assert runtime_update.LOCK_SERVICE_FOR_TARGET[target] == "workspace-authority"
+    assert target not in runtime_update.ALLOWED_TARGETS
+    assert targets == [target]
+    assert set(images) == stage_transition.OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    assert images[target]["active"]["imageId"] != images[target]["candidate"]["imageId"]
+    assert all(row["added"] is False and row["configChanged"] is False for row in images.values())
+    assert all(row["active"] == row["candidate"] for name, row in images.items() if name != target)
+
+
+def test_workspace_authority_image_update_rejects_other_phase_and_non_target_lock_change(
+    tmp_path: Path,
+) -> None:
+    """Keep Authority updates inside the selected phases and one lock row."""
+
+    active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
+        tmp_path
+    )
+    target = stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_ref = "example.invalid/workspace-authority:office-update"
+    candidate["services"][target]["image"] = candidate_ref
+    candidate_row = next(
+        row for row in candidate_lock["images"] if row["service"] == "workspace-authority"
+    )
+    candidate_row["image"] = candidate_ref
+    candidate_row["imageId"] = _image_id(156)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Workspace Authority image updates require the selected Graph bootstrap or issued activation phase",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="provider-bootstrap",
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    next(row for row in candidate_lock["images"] if row["service"] == "exchange")["imageId"] = (
+        _image_id(157)
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update lock may change only the selected built service",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=target,
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_workspace_authority_is_not_a_generic_issued_activation_target(tmp_path: Path) -> None:
+    """Keep the new target limited to the two explicit one-image continuation phases."""
+
+    active, candidate, active_lock, candidate_lock = _active_image_update(
+        "workspace-authority", tmp_path
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate changes non-target built image workspace-authority",
+    ):
+        stage_transition._validate_phase_topology(
+            phase="issued-connector-activation",
+            active=active,
+            candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    assert (
+        stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET not in stage_transition.SERVICE_SET
+    )
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_workspace_authority_plan_closes_to_one_graph_runtime_target(
+    phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Validate both selected phases, the exact 15-service set, and a single image delta."""
+
+    active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
+        tmp_path
+    )
+    target = stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    candidate_ref = "example.invalid/workspace-authority:office-plan"
+    candidate["services"][target]["image"] = candidate_ref
+    authority_row = next(
+        row
+        for row in candidate_lock["images"]
+        if row["service"] == runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    )
+    authority_row["image"] = candidate_ref
+    authority_row["imageId"] = _image_id(159)
+    targets, candidate_services = stage_transition._validate_phase_topology(
+        phase=phase,
+        image_update_target=target,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+    service_names = stage_transition.OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    active_services = {
+        name: {"containerId": f"{index:064x}", "imageId": _image_id(index)}
+        for index, name in enumerate(sorted(service_names), start=1)
+    }
+    plan: dict[str, Any] = {
+        "schemaVersion": stage_transition.PLAN_SCHEMA,
+        "operationId": "00000000-0000-4000-8000-000000000015",
+        "phase": phase,
+        "imageUpdateTarget": target,
+        "createdAtUtc": "2026-10-30T12:00:00Z",
+        "project": "cyrene-teams-cloud",
+        "activeInputs": {},
+        "candidateInputs": {},
+        "candidateInputPaths": {},
+        "activeConfigDir": "/private/active-config",
+        "candidateConfigDir": "/private/candidate-config",
+        "activeSecretsDir": "/private/secrets",
+        "journalDir": "/private/journal",
+        "candidateSelectionFile": "/private/selection.json",
+        "selectionBackupPath": "/private/selection.previous.json",
+        "activeSelection": {},
+        "runtimeConfigIdentity": {"active": {}, "candidate": {}},
+        "candidateServices": candidate_services,
+        "targets": targets,
+        "activeServices": active_services,
+        "edgeDelivery": {},
+        "navigatorDrain": {},
+        "database": {},
+        "candidatePreflight": {
+            "mode": "connector-auth-readonly",
+            "ingressExposure": "public-cutover",
+            "hostCaddyBinary": "/usr/local/bin/caddy",
+            "opensslBinary": "openssl",
+            "credentialReadOnlyRuntimeReady": True,
+            "fullCloudWriteDeploymentReady": False,
+            "lifecycleAcceptance": "NOT_RUN",
+            "composeCgroupMemoryLimitMiB": 3584,
+            "composeCgroupCpuLimit": 1.95,
+            "maxMemoryMiB": 3584,
+            "maxCpus": 1.95,
+        },
+        "exchangeReadiness": {"required": True, "status": "PENDING_LIVE_READBACK"},
+        "policy": {},
+    }
+    plan["planSha256"] = stage_transition._sha256_bytes(stage_transition._canonical_json(plan))
+    monkeypatch.setattr(
+        stage_transition, "_validate_config_directory_policy", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(
+        stage_transition, "_validate_runtime_config_identity", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        stage_transition, "_validate_image_update_selection_contract", lambda **_kwargs: None
+    )
+
+    stage_transition._validate_plan(plan)
+
+    changed = copy.deepcopy(plan)
+    changed["candidateServices"]["exchange"]["candidate"]["imageId"] = _image_id(160)
+    changed["planSha256"] = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(
+            {key: value for key, value in changed.items() if key != "planSha256"}
+        )
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Workspace Authority image update changes an unselected image: exchange",
+    ):
+        stage_transition._validate_plan(changed)
+
+
 def test_account_center_database_baseline_is_readonly_schema9_and_actor_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4393,7 +4612,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, or Persistence",
+        match="must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, Persistence, or Workspace Authority",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -4452,9 +4671,9 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
 
 
 def test_stage_transition_cli_closes_image_update_target_choices() -> None:
-    """Expose only the six services with explicit V2 image-update gates.
+    """Expose only services with explicit V2 image-update gates.
 
-    中文：CLI 只开放具备独立严格门禁的 Exchange、GitHub、HF、Navigator、Persistence 与 Cloud 目标。
+    中文：CLI 只开放具备独立严格门禁的镜像更新目标。
     """
 
     parser = stage_transition._build_parser()
@@ -4474,6 +4693,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         "huggingface",
         "navigator",
         "navigator-persistence",
+        "workspace-authority",
     ]
     memory_target_action = next(
         action
@@ -7878,6 +8098,126 @@ def _account_center_unissued_graph_readiness_fixture(
     return snapshot, compose, database_state, provider_scope_digests
 
 
+def _issue_graph_readiness_row(snapshot: dict[str, Any], compose: dict[str, Any]) -> None:
+    """Add the exact owner Graph profile, connection, binding and catalog to a fixture.
+
+    中文：按冻结 Office scope 生成已签发 Graph 行，仅供 Exchange readiness 合同测试。
+    """
+
+    exchange = compose["services"]["exchange"]
+    integration = json.loads(
+        exchange["environment"]["CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON"]
+    )
+    configured_profiles = integration["authorizationCloud"]["profiles"]
+    graph_profiles = [
+        (alias, row)
+        for alias, row in configured_profiles.items()
+        if isinstance(row, dict) and row.get("provider") == "microsoft_graph"
+    ]
+    assert len(graph_profiles) == 1
+    graph_alias, host_profile = graph_profiles[0]
+    graph_scope = host_profile["officeV2"]
+    connection_ref = "77777777-7777-4777-8777-777777777777"
+    profile_ref = "microsoft-graph-profile-ref"
+    operation_ids = sorted(preflight._graph_operations_for_office_scope(graph_scope))
+    tools: list[dict[str, Any]] = []
+    catalog_tools: list[dict[str, Any]] = []
+    for operation_id in operation_ids:
+        tool_id, resource_projection, mutating = preflight.CONNECTOR_OPERATION_POLICIES[
+            operation_id
+        ]
+        tools.append(
+            {
+                "toolId": tool_id,
+                "operationId": operation_id,
+                "resourceProjection": resource_projection,
+                "mutating": mutating,
+            }
+        )
+        required = list(preflight.CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS.get(operation_id, ()))
+        input_schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {field: {"type": "string"} for field in required},
+            "additionalProperties": False,
+        }
+        if required:
+            input_schema["required"] = required
+        catalog_tools.append(
+            {
+                "id": tool_id,
+                "name": operation_id,
+                "description": "Read the selected owner-scoped Microsoft Graph data.",
+                "readOnly": not mutating,
+                "inputSchema": input_schema,
+            }
+        )
+    binding_id = f"exchange-microsoft_graph-{connection_ref}"
+    binding = {
+        "bindingId": binding_id,
+        "connectionRef": connection_ref,
+        "providerId": "microsoft_graph",
+        "profileRef": profile_ref,
+        "tools": tools,
+    }
+    profile = {
+        "profileRef": profile_ref,
+        "profileAlias": graph_alias,
+        "providerId": "microsoft_graph",
+        "authStatus": "healthy",
+        "accessMode": "actor_owned",
+        "targetScope": preflight._graph_public_target_scope(graph_scope),
+        "authMode": "delegated_oauth",
+        "credentialRevision": 1,
+        "externalSubject": f"{graph_scope['tenantId']}:{snapshot['actor']['subject']}",
+        "scopeSchemaVersion": 2,
+        "enabledFeatures": sorted(preflight._graph_enabled_feature_names(graph_scope)),
+        "requiredOAuthScopes": sorted(preflight._graph_expected_oauth_scopes(graph_scope)),
+        "targetRefCount": preflight._graph_target_ref_count(graph_scope),
+        "credentialExpiresAt": int(datetime.now(UTC).timestamp()) + 3600,
+        "refreshExpiresAt": None,
+        "reauthRequired": False,
+        "reauthReasonCode": None,
+    }
+    connection = {
+        "connectionRef": connection_ref,
+        "providerId": "microsoft_graph",
+        "profileRef": profile_ref,
+        "profileAlias": graph_alias,
+        "accessMode": "actor_owned",
+        "readOnly": not any(
+            preflight.CONNECTOR_OPERATION_POLICIES[operation_id][2]
+            for operation_id in operation_ids
+        ),
+        "targetAlias": None,
+    }
+    catalog_item = {
+        "bindingId": binding_id,
+        "capabilityId": "tool.provider.v1",
+        "providerId": "microsoft_graph",
+        "connectionRef": connection_ref,
+        "profileRef": profile_ref,
+        "tools": catalog_tools,
+    }
+    snapshot["profiles"] = [
+        row for row in snapshot["profiles"] if row.get("providerId") != "microsoft_graph"
+    ] + [profile]
+    snapshot["connections"] = [
+        row for row in snapshot["connections"] if row.get("providerId") != "microsoft_graph"
+    ] + [connection]
+    snapshot["bindings"] = [
+        row for row in snapshot["bindings"] if row.get("providerId") != "microsoft_graph"
+    ] + [binding]
+    snapshot["catalog"]["items"] = [
+        row for row in snapshot["catalog"]["items"] if row.get("providerId") != "microsoft_graph"
+    ] + [catalog_item]
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    bindings_path.write_text(
+        json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
+    )
+    catalog_path.write_text(json.dumps(snapshot["catalog"]), encoding="utf-8")
+
+
 def test_github_image_readiness_returns_only_exact_issued_binding_refs(
     tmp_path: Path,
 ) -> None:
@@ -8797,6 +9137,126 @@ def test_account_center_image_update_readiness_pins_supported_provider_connectio
     with pytest.raises(stage_transition.StageTransitionError, match="exact existing non-Graph"):
         stage_transition._image_update_exchange_readiness_checkpoint(
             plan, journal, candidate_compose=compose
+        )
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_identity(
+    phase: str, tmp_path: Path
+) -> None:
+    """Verify linked Graph readiness against owner scope before and after Authority update."""
+
+    snapshot, compose, _database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
+    )
+    _issue_graph_readiness_row(snapshot, compose)
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(158)
+    plan = {
+        "imageUpdateTarget": stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        "phase": phase,
+        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
+    }
+
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase=phase,
+        image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+    )
+    receipt.update(
+        {
+            "exchangeContainerId": exchange_id,
+            "exchangeImageId": exchange_image_id,
+            "snapshotSha256": "8" * 64,
+        }
+    )
+    journal = {"exchangeReadiness": {"receipt": receipt}}
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
+
+    assert checkpoint["verified"] is True
+    assert checkpoint["profileCount"] == len(snapshot["profiles"]) == 7
+    assert checkpoint["bindingCount"] == len(snapshot["bindings"]) == 16
+    assert checkpoint["connectionCount"] == len(snapshot["connections"]) == 16
+    assert "microsoft_graph" in receipt["verifiedProviderIds"]
+    assert (
+        receipt["connectionRefByProvider"]["microsoft_graph"]
+        == "77777777-7777-4777-8777-777777777777"
+    )
+
+    wrong_owner = copy.deepcopy(snapshot)
+    graph_profile = next(
+        row for row in wrong_owner["profiles"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_profile["externalSubject"] = (
+        f"{graph_profile['externalSubject'].split(':', 1)[0]}:eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Graph identity, credential health, or v2 target scope differs",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=wrong_owner,
+            compose=compose,
+            phase=phase,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        )
+
+    wrong_scope = copy.deepcopy(snapshot)
+    graph_profile = next(
+        row for row in wrong_scope["profiles"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_profile["targetScope"]["tenantId"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Graph identity, credential health, or v2 target scope differs",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=wrong_scope,
+            compose=compose,
+            phase=phase,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        )
+
+    wrong_workspace = copy.deepcopy(snapshot)
+    wrong_workspace["actor"]["workspaceId"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="readiness actor differs from candidate owner scope",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=wrong_workspace,
+            compose=compose,
+            phase=phase,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        )
+
+
+def test_workspace_authority_graph_bootstrap_readiness_requires_linked_profile(
+    tmp_path: Path,
+) -> None:
+    """Do not let an Authority update reuse the pre-OAuth empty Graph readiness path."""
+
+    snapshot, compose, _database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="candidate issued binding set differs|exactly one profile and connection for microsoft_graph",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         )
 
 

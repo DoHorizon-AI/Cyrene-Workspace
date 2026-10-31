@@ -16,11 +16,13 @@ import io
 import json
 import sys
 import tarfile
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 build = __import__("build_arm64")
@@ -52,6 +54,127 @@ def test_computer_proxy_compose_uses_the_image_lock_generated_key(tmp_path: Path
     )
     image = compose["services"]["computer-runtime-proxy"]["image"]
     assert image.startswith("${CYRENE_IMAGE_COMPUTER_RUNTIME_PROXY:")
+
+
+def test_authority_rust_builder_uses_index_for_build_platform_only() -> None:
+    """Cross-build Authority with the host child while keeping runtime inputs ARM64-pinned."""
+
+    arm_digest = "a" * 64
+    index_digest = "b" * 64
+    resolved = {
+        "reference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "immutableReference": "rust:1.96.1-slim-bookworm@sha256:" + arm_digest,
+        "indexReference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "indexDigest": "sha256:" + index_digest,
+        "arm64ManifestDigest": "sha256:" + arm_digest,
+        "platform": "linux/arm64",
+    }
+
+    authority_rust, authority_key, authority_lock = build._base_image_build_input(
+        "workspace-authority", "RUST_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    assert authority_rust == resolved["indexReference"]
+    assert authority_key == "workspace-authority.RUST_BASE_IMAGE"
+    assert authority_lock["buildInputReference"] == resolved["indexReference"]
+    assert authority_lock["buildInputPlatform"] == "linux/amd64"
+    assert authority_lock["immutableReference"] == resolved["immutableReference"]
+
+    authority_runtime, runtime_key, runtime_lock = build._base_image_build_input(
+        "workspace-authority", "RUNTIME_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    other_rust, other_key, other_lock = build._base_image_build_input(
+        "computer-runtime", "RUST_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    assert authority_runtime == resolved["immutableReference"]
+    assert runtime_key == "RUNTIME_BASE_IMAGE"
+    assert runtime_lock["buildInputPlatform"] == "linux/arm64"
+    assert other_rust == resolved["immutableReference"]
+    assert other_key == "RUST_BASE_IMAGE"
+    assert other_lock["buildInputPlatform"] == "linux/arm64"
+
+
+def test_generated_authority_base_lock_matches_image_lock_schema() -> None:
+    """Validate the actual builder-produced authority base rows against the closed lock schema."""
+
+    deployment_root = Path(__file__).resolve().parents[1]
+    schema = json.loads((deployment_root / "config/image-lock.schema.json").read_text())
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    arm_digest = "a" * 64
+    index_digest = "b" * 64
+    resolved = {
+        "reference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "immutableReference": "rust:1.96.1-slim-bookworm@sha256:" + arm_digest,
+        "indexReference": "rust:1.96.1-slim-bookworm@sha256:" + index_digest,
+        "indexDigest": "sha256:" + index_digest,
+        "arm64ManifestDigest": "sha256:" + arm_digest,
+        "platform": "linux/arm64",
+    }
+    authority_ref, authority_key, authority_row = build._base_image_build_input(
+        "workspace-authority", "RUST_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    runtime_ref, runtime_key, runtime_row = build._base_image_build_input(
+        "workspace-authority", "RUNTIME_BASE_IMAGE", resolved, "linux/amd64"
+    )
+    assert authority_ref == authority_row["indexReference"]
+    assert authority_row["buildInputPlatform"] == "linux/amd64"
+    assert runtime_ref == runtime_row["immutableReference"]
+    assert runtime_row["buildInputPlatform"] == "linux/arm64"
+
+    lock = {
+        "schemaVersion": "cyrene-teams-cloud-image-lock-v1",
+        "taskId": "authority-image-lock-test",
+        "targetPlatform": "linux/arm64",
+        "state": "LOCAL_ONLY",
+        "createdAt": "2026-10-31T00:00:00Z",
+        "planSha256": "c" * 64,
+        "sources": {
+            "platform": {
+                "remote": "https://github.com/DoHorizon-AI/Cyrene-Platform.git",
+                "commit": "d" * 40,
+                "tree": "e" * 40,
+            }
+        },
+        "baseImages": {authority_key: authority_row, runtime_key: runtime_row},
+        "externalImages": {},
+        "images": [
+            {
+                "service": "workspace-authority",
+                "image": "cyrene/workspace-authority:authority-image-lock-test",
+                "imageId": "sha256:" + "f" * 64,
+                "platform": "linux/arm64",
+                "sizeBytes": 1,
+                "sourceCommits": {"platform": "d" * 40},
+                "registryDigest": None,
+            }
+        ],
+    }
+    validator.validate(lock)
+
+    legacy_lock = deepcopy(lock)
+    for row in legacy_lock["baseImages"].values():
+        row.pop("buildInputReference")
+        row.pop("buildInputPlatform")
+    validator.validate(legacy_lock)
+
+    unpaired_lock = deepcopy(lock)
+    del unpaired_lock["baseImages"][authority_key]["buildInputPlatform"]
+    with pytest.raises(ValidationError):
+        validator.validate(unpaired_lock)
+
+    unpaired_reference_lock = deepcopy(lock)
+    del unpaired_reference_lock["baseImages"][authority_key]["buildInputReference"]
+    with pytest.raises(ValidationError):
+        validator.validate(unpaired_reference_lock)
+
+    invalid_platform_lock = deepcopy(lock)
+    invalid_platform_lock["baseImages"][authority_key]["buildInputPlatform"] = "linux/arm/v7"
+    with pytest.raises(ValidationError):
+        validator.validate(invalid_platform_lock)
+
+    invalid_target_lock = deepcopy(lock)
+    invalid_target_lock["baseImages"][authority_key]["platform"] = "linux/amd64"
+    with pytest.raises(ValidationError):
+        validator.validate(invalid_target_lock)
 
 
 def _plan() -> dict[str, Any]:
