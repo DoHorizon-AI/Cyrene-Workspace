@@ -63,6 +63,7 @@ ALLOWED_DISCOVERY_TYPES = frozenset(
         "sharepoint_drives",
         "calendars",
         "freebusy_subjects",
+        "mail_folders",
     }
 )
 OFFICE_FEATURE_KEYS = frozenset(
@@ -293,7 +294,15 @@ class ExchangeCliBridge:
     def invoke(self, operation: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         """Pass the operation payload over stdin; keep codes out of argv and logs."""
 
-        if operation not in {"begin", "status", "discover", "select-targets", "complete"}:
+        if operation not in {
+            "begin",
+            "begin-mail-scope-upgrade",
+            "status",
+            "discover",
+            "select-targets",
+            "complete",
+            "complete-scope-upgrade",
+        }:
             raise OfficeSetupError("office_operation_invalid")
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > MAX_BODY_BYTES:
@@ -368,6 +377,7 @@ class ActiveFlow:
     expires_at: datetime
     authorization_url: str = field(repr=False)
     session: SetupSession = field(repr=False, compare=False)
+    flow_kind: Literal["link", "scope_upgrade"] = "link"
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +401,21 @@ def _provider_expiration(value: Any) -> datetime:
         return parsed.astimezone(UTC)
     except (OverflowError, ValueError):
         raise OfficeSetupError("office_begin_response_invalid") from None
+
+
+def _authorization_state(value: str) -> str | None:
+    """Return the single state already sealed into one validated server-side authorize URL."""
+
+    try:
+        states = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(value).query,
+            strict_parsing=True,
+            keep_blank_values=True,
+            max_num_fields=64,
+        ).get("state", [])
+    except ValueError:
+        return None
+    return states[0] if len(states) == 1 else None
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -473,7 +498,10 @@ def _validate_authorization_url(
     if len(requested_scopes) != 1:
         raise OfficeSetupError("office_authorization_scopes_invalid")
     scopes = requested_scopes[0].split()
-    if any(_is_mail_scope(name) for name in scopes):
+    if any(_is_mail_scope(name) for name in scopes) and not any(
+        enabled_features[name]
+        for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
+    ):
         raise OfficeSetupError("office_mail_scope_forbidden")
     _validate_scope_policy(scopes, enabled_features)
     if any(
@@ -496,7 +524,25 @@ def _scope_name(scope: str) -> str:
     return scope.casefold().rsplit("/", 1)[-1]
 
 
-def _validate_scope_policy(scopes: Sequence[str], enabled_features: Mapping[str, bool]) -> None:
+def _expected_mail_scope_names(enabled_features: Mapping[str, bool]) -> set[str]:
+    """Derive the smallest delegated Mail grants for the explicitly enabled features."""
+
+    expected: set[str] = set()
+    if enabled_features["mailDraftsEnabled"]:
+        expected.add("mail.readwrite")
+    elif enabled_features["mailMetadataEnabled"] or enabled_features["mailSendEnabled"]:
+        expected.add("mail.readbasic")
+    if enabled_features["mailSendEnabled"]:
+        expected.add("mail.send")
+    return expected
+
+
+def _validate_scope_policy(
+    scopes: Sequence[str],
+    enabled_features: Mapping[str, bool],
+    *,
+    allow_missing_mail_scopes: bool = False,
+) -> None:
     """Require only the OAuth permissions derived from the fixed host feature flags."""
 
     names = {_scope_name(scope) for scope in scopes}
@@ -507,7 +553,10 @@ def _validate_scope_policy(scopes: Sequence[str], enabled_features: Mapping[str,
         expected.add("calendars.readwrite")
     if enabled_features["sharePointDriveMetadataEnabled"]:
         expected.add("sites.selected")
-    allowed = expected | {"openid", "profile", "email"}
+    mail_expected = _expected_mail_scope_names(enabled_features)
+    if not allow_missing_mail_scopes:
+        expected |= mail_expected
+    allowed = expected | mail_expected | {"openid", "profile", "email"}
     if not expected.issubset(names) or names - allowed:
         raise OfficeSetupError("office_oauth_scope_policy_invalid")
 
@@ -533,7 +582,7 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "enabledFeatures",
         "targetRefCount",
     }
-    if set(document) != required:
+    if set(document) not in (required, required | {"mailAuthorizationState"}):
         raise OfficeSetupError("office_status_invalid")
     if document.get("provider") != _EXCHANGE_PROVIDER_ID:
         raise OfficeSetupError("office_profile_provider_mismatch")
@@ -561,11 +610,11 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         or any(not isinstance(value, bool) for value in enabled_features.values())
     ):
         raise OfficeSetupError("office_status_features_invalid")
-    if any(
+    mail_features_enabled = any(
         enabled_features[name]
         for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
-    ):
-        raise OfficeSetupError("office_mail_scope_forbidden")
+    )
+    mail_authorization_state = document.get("mailAuthorizationState")
     scopes = document.get("requiredOAuthScopes")
     if (
         not isinstance(scopes, list)
@@ -575,9 +624,37 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         )
     ):
         raise OfficeSetupError("office_status_scopes_invalid")
-    if any(_is_mail_scope(scope) for scope in scopes):
+    mail_scope_names = {_scope_name(scope) for scope in scopes if _is_mail_scope(scope)}
+    expected_mail_scope_names = _expected_mail_scope_names(enabled_features)
+    if "mailAuthorizationState" not in document:
+        mail_authorization_state = (
+            "DISABLED"
+            if not mail_features_enabled
+            else "READY"
+            if expected_mail_scope_names.issubset(mail_scope_names)
+            else "REAUTHORIZATION_REQUIRED"
+        )
+    if (
+        not isinstance(mail_authorization_state, str)
+        or mail_authorization_state not in {"DISABLED", "READY", "REAUTHORIZATION_REQUIRED"}
+        or (mail_features_enabled and mail_authorization_state == "DISABLED")
+        or (not mail_features_enabled and mail_authorization_state != "DISABLED")
+    ):
+        raise OfficeSetupError("office_status_mail_authorization_invalid")
+    if (
+        mail_scope_names - expected_mail_scope_names
+        or (mail_scope_names and not mail_features_enabled)
+        or (
+            mail_authorization_state == "REAUTHORIZATION_REQUIRED"
+            and expected_mail_scope_names.issubset(mail_scope_names)
+        )
+    ):
         raise OfficeSetupError("office_mail_scope_forbidden")
-    _validate_scope_policy(scopes, enabled_features)
+    _validate_scope_policy(
+        scopes,
+        enabled_features,
+        allow_missing_mail_scopes=(mail_authorization_state == "REAUTHORIZATION_REQUIRED"),
+    )
     revision = document.get("credentialRevision")
     if revision is not None and (
         not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
@@ -616,9 +693,8 @@ def _safe_status(document: Mapping[str, Any], operator_context: OperatorContext)
         "accessMode": document["accessMode"],
         "identityVerified": identity_verified and document["reauthRequired"] is False,
         "scopeSchemaVersion": document["scopeSchemaVersion"],
-        "enabledFeatures": {
-            key: value for key, value in enabled_features.items() if not key.startswith("mail")
-        },
+        "enabledFeatures": dict(enabled_features),
+        "mailAuthorizationState": mail_authorization_state,
         "targetRefCount": target_ref_count,
         "requiredOAuthScopes": list(scopes),
         "credentialRevision": revision,
@@ -713,6 +789,10 @@ def _validate_discovery(
                 raise OfficeSetupError("office_discovery_item_invalid")
             item_site_id = None
             kind = item["kind"]
+            if resource_type == "mail_folders" and (
+                set(item) != {"id", "displayName", "kind"} or kind != "mail_folder"
+            ):
+                raise OfficeSetupError("office_discovery_item_invalid")
         item_id = _safe_identifier(item["id"])
         display_name = item["displayName"]
         if (
@@ -756,11 +836,14 @@ def _validate_targets(value: Any) -> dict[str, Any]:
         "calendarIds",
         "freebusySubjects",
     }
-    if not isinstance(value, dict) or set(value) != expected_keys:
+    if not isinstance(value, dict) or set(value) not in (
+        expected_keys,
+        expected_keys | {"mailFolderIds"},
+    ):
         raise OfficeSetupError("office_targets_invalid")
     result: dict[str, Any] = {}
-    for key in expected_keys:
-        rows = value[key]
+    for key in expected_keys | {"mailFolderIds"}:
+        rows = value.get(key, [])
         if (
             not isinstance(rows, list)
             or len(rows) > 100
@@ -875,8 +958,8 @@ class OfficeSetupService:
         result["message"] = self._last_callback_message or "READY"
         return result
 
-    def begin(self, session: SetupSession) -> str:
-        """Begin or reopen this browser session's provider flow until its URL expires."""
+    def begin(self, session: SetupSession, *, mail_scope_upgrade: bool = False) -> str:
+        """Begin one owner link or explicit Mail scope upgrade; reuse only its matching flow."""
 
         if not self._flow_operation_lock.acquire(blocking=False):
             raise OfficeSetupError("office_authorization_pending")
@@ -888,6 +971,9 @@ class OfficeSetupService:
                 active_flow = self._active_flow
                 if active_flow is not None and active_flow.expires_at > datetime.now(UTC):
                     if active_flow.session is not session:
+                        raise OfficeSetupError("office_authorization_pending")
+                    expected_flow_kind = "scope_upgrade" if mail_scope_upgrade else "link"
+                    if active_flow.flow_kind != expected_flow_kind:
                         raise OfficeSetupError("office_authorization_pending")
                     return active_flow.authorization_url
                 if active_flow is not None:
@@ -921,14 +1007,33 @@ class OfficeSetupService:
                 with self._lock:
                     self._session_status_locked(session, current, profile_ref)
 
-            if current["identityVerified"] and not current["reauthRequired"]:
-                raise OfficeSetupError("office_already_linked")
+            mail_enabled = any(
+                current["enabledFeatures"][name]
+                for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
+            )
+            if mail_scope_upgrade:
+                if (
+                    not current["identityVerified"]
+                    or current["reauthRequired"]
+                    or not mail_enabled
+                    or current["mailAuthorizationState"] != "REAUTHORIZATION_REQUIRED"
+                ):
+                    raise OfficeSetupError("office_mail_upgrade_not_required")
+                operation = "begin-mail-scope-upgrade"
+                flow_kind = "scope_upgrade"
+                payload = {"requestId": uuid.uuid4().hex}
+            else:
+                if current["identityVerified"] and not current["reauthRequired"]:
+                    raise OfficeSetupError("office_already_linked")
+                operation = "begin"
+                flow_kind = "link"
+                payload = {}
 
             # Do not let a later poll treat the pre-begin snapshot as post-begin state.
             with self._lock:
                 self._invalidate_status_locked()
             begin_invoked = True
-            response = self.bridge.invoke("begin", {})
+            response = self.bridge.invoke(operation, payload)
             required = {
                 "state",
                 "provider",
@@ -937,8 +1042,14 @@ class OfficeSetupService:
                 "authorizationUrl",
                 "expiresAt",
             }
-            if set(response) != required or response.get("provider") != _EXCHANGE_PROVIDER_ID:
+            if (
+                set(response) not in (required, required | {"flowKind"})
+                or response.get("provider") != _EXCHANGE_PROVIDER_ID
+            ):
                 raise OfficeSetupError("office_begin_response_invalid")
+            response_flow_kind = response.get("flowKind", "link")
+            if response_flow_kind != flow_kind:
+                raise OfficeSetupError("office_begin_flow_kind_invalid")
             if response.get("state") != "AUTHORIZATION_REQUIRED":
                 raise OfficeSetupError("office_begin_state_invalid")
             profile_ref = _safe_identifier(response.get("profileRef"))
@@ -953,7 +1064,9 @@ class OfficeSetupService:
             if expires_at <= datetime.now(UTC):
                 raise OfficeSetupError("office_begin_response_invalid")
             with self._lock:
-                self._active_flow = ActiveFlow(profile_ref, link_ref, expires_at, auth_url, session)
+                self._active_flow = ActiveFlow(
+                    profile_ref, link_ref, expires_at, auth_url, session, flow_kind
+                )
                 self._last_callback_message = "AUTHORIZATION_PENDING"
             return auth_url
         except OfficeSetupError as error:
@@ -1013,8 +1126,6 @@ class OfficeSetupService:
         if issuer_values and issuer_values != [self.operator_context.issuer]:
             raise OfficeSetupError("office_callback_issuer_invalid")
         callback_scopes = [name for scope in values.get("scope", []) for name in scope.split()]
-        if any(_is_mail_scope(name) for name in callback_scopes):
-            raise OfficeSetupError("office_mail_scope_forbidden")
         if "error" in values:
             if (
                 "code" in values
@@ -1024,6 +1135,12 @@ class OfficeSetupService:
                 or any(ord(character) < 33 or ord(character) > 126 for character in state)
             ):
                 raise OfficeSetupError("office_callback_invalid")
+            with self._lock:
+                active_flow = self._active_flow
+            if active_flow is not None:
+                expected_state = _authorization_state(active_flow.authorization_url)
+                if expected_state is None or not hmac.compare_digest(state, expected_state):
+                    raise OfficeSetupError("office_callback_flow_mismatch")
             provider_error_fields = values.get("error", []) + values.get("error_description", [])
             safe_failure = (
                 "AADSTS50011"
@@ -1046,17 +1163,45 @@ class OfficeSetupService:
             raise OfficeSetupError("office_callback_invalid")
         # Code and state are never stored, placed in argv, or returned to the browser.
         with self._flow_operation_lock:
-            response = self.bridge.invoke("complete", {"state": state, "code": code})
+            with self._lock:
+                active_flow = self._active_flow
+            if active_flow is None or active_flow.expires_at <= datetime.now(UTC):
+                raise OfficeSetupError("office_callback_flow_missing")
+            if active_flow.flow_kind not in {"link", "scope_upgrade"}:
+                raise OfficeSetupError("office_callback_flow_invalid")
+            expected_state = _authorization_state(active_flow.authorization_url)
+            if expected_state is None or not hmac.compare_digest(state, expected_state):
+                raise OfficeSetupError("office_callback_flow_mismatch")
+            enabled_features = active_flow.session.enabled_features
+            if enabled_features is None:
+                raise OfficeSetupError("office_callback_flow_invalid")
+            if callback_scopes:
+                mail_scope_names = {
+                    _scope_name(scope) for scope in callback_scopes if _is_mail_scope(scope)
+                }
+                if mail_scope_names - _expected_mail_scope_names(enabled_features):
+                    raise OfficeSetupError("office_mail_scope_forbidden")
+                _validate_scope_policy(callback_scopes, enabled_features)
+            operation = (
+                "complete-scope-upgrade" if active_flow.flow_kind == "scope_upgrade" else "complete"
+            )
+            response = self.bridge.invoke(operation, {"state": state, "code": code})
             safe = _safe_status(response, self.operator_context)
             if not safe["identityVerified"]:
                 raise OfficeSetupError("office_owner_identity_mismatch")
+            if safe["enabledFeatures"] != enabled_features:
+                raise OfficeSetupError("office_callback_feature_mismatch")
+            if (
+                active_flow.flow_kind == "scope_upgrade"
+                and safe["mailAuthorizationState"] != "READY"
+            ):
+                raise OfficeSetupError("office_mail_upgrade_incomplete")
             with self._lock:
-                if self._active_flow and safe.get("provider") != _EXCHANGE_PROVIDER_ID:
+                if self._active_flow is not active_flow:
+                    raise OfficeSetupError("office_callback_flow_mismatch")
+                if safe.get("provider") != _EXCHANGE_PROVIDER_ID:
                     raise OfficeSetupError("office_callback_profile_mismatch")
-                if (
-                    self._active_flow
-                    and response.get("profileRef") != self._active_flow.profile_ref
-                ):
+                if response.get("profileRef") != active_flow.profile_ref:
                     raise OfficeSetupError("office_callback_profile_mismatch")
                 self._active_flow = None
                 self._last_callback_message = "AUTHORIZATION_COMPLETE"
@@ -1129,9 +1274,12 @@ class OfficeSetupService:
             "sharepoint_drives": "sharePointDriveMetadataEnabled",
             "calendars": "calendarEnabled",
             "freebusy_subjects": "calendarEnabled",
+            "mail_folders": "mailMetadataEnabled",
         }[resource_type]
         if not status["enabledFeatures"][feature]:
             raise OfficeSetupError("office_feature_disabled")
+        if resource_type == "mail_folders" and status["mailAuthorizationState"] != "READY":
+            raise OfficeSetupError("office_mail_authorization_required")
         if status["credentialRevision"] is None:
             raise OfficeSetupError("office_identity_not_ready")
         next_cursor: str | None = None
@@ -1200,6 +1348,8 @@ class OfficeSetupService:
             raise OfficeSetupError("office_identity_not_ready")
         targets = _validate_targets(targets_value)
         self._validate_target_features(targets, latest["enabledFeatures"])
+        if targets["mailFolderIds"] and latest["mailAuthorizationState"] != "READY":
+            raise OfficeSetupError("office_mail_authorization_required")
         self._validate_discovery_selection(session, targets)
         freebusy = session.discoveries.get("freebusy_subjects")
         if freebusy is not None and freebusy.ids and not targets["freebusySubjects"]:
@@ -1239,6 +1389,7 @@ class OfficeSetupService:
                 "sharePointLists": len(targets["sharePointListIds"]),
                 "sharePointLibraries": len(targets["sharePointDriveIds"]),
                 "freebusySubjects": len(targets["freebusySubjects"]),
+                "mailFolders": len(targets["mailFolderIds"]),
             },
         }
 
@@ -1251,6 +1402,7 @@ class OfficeSetupService:
             "toDoTaskListIds": "todo_lists",
             "calendarIds": "calendars",
             "freebusySubjects": "freebusy_subjects",
+            "mailFolderIds": "mail_folders",
         }
         for target_key, resource_type in checks.items():
             selected = set(targets[target_key])
@@ -1289,6 +1441,7 @@ class OfficeSetupService:
             "freebusySubjects": "calendarEnabled",
             "sharePointListIds": "sharePointDriveMetadataEnabled",
             "sharePointDriveIds": "sharePointDriveMetadataEnabled",
+            "mailFolderIds": "mailMetadataEnabled",
         }
         if any(
             targets[key] and not enabled_features[feature]
@@ -1385,6 +1538,10 @@ def _page(*, nonce: str, csrf: str) -> bytes:
   <input type="hidden" name="csrf" value="__CSRF__">
   <button id="connect" type="submit">Sign in with Microsoft</button>
 </form>
+<form id="mail-authorize" method="post" action="/authorize-mail-scope-upgrade" target="cyrene-office-oauth" hidden>
+  <input type="hidden" name="csrf" value="__CSRF__">
+  <button id="mail-authorize-button" type="submit">Authorize Mail access</button>
+</form>
 <section id="targets" hidden>
   <h2>Choose allowed Office targets</h2>
   <p>The server limits this list to resources available to the configured account and Workspace.</p>
@@ -1403,9 +1560,13 @@ const groups=[
   ['todo_lists','To Do lists','toDoTaskListIds'],
   ['calendars','Calendars','calendarIds'],
   ['sharepoint_drives','SharePoint document libraries','sharePointResources'],
-  ['freebusy_subjects','Free/busy people','freebusySubjects']
+  ['freebusy_subjects','Free/busy people','freebusySubjects'],
+  ['mail_folders','Mail folders','mailFolderIds']
 ];
+const discoveryFeature={planner_plans:'plannerEnabled',todo_lists:'todoEnabled',sharepoint_drives:'sharePointDriveMetadataEnabled',calendars:'calendarEnabled',freebusy_subjects:'calendarEnabled',mail_folders:'mailMetadataEnabled'};
 let revision=null;
+let enabledFeatures={};
+let mailAuthorizationState='DISABLED';
 let discovered={};
 let selected={};
 let sharePointSiteId=null;
@@ -1434,7 +1595,7 @@ function renderGroup(type,title,items){
 function renderAll(){
   panels.replaceChildren();
   if(sharePointSiteId){const site=document.createElement('p');site.textContent='Allowed SharePoint site: '+sharePointSiteId;panels.append(site);}
-  for(const [type,title] of groups) if(discovered[type]) renderGroup(type,title,discovered[type]);
+  for(const [type,title] of groups) if(enabledFeatures[discoveryFeature[type]]&&discovered[type]) renderGroup(type,title,discovered[type]);
   document.getElementById('save').disabled=!Object.keys(discovered).length;
 }
 const STATUS_REQUEST_TIMEOUT_MS=8000;
@@ -1484,8 +1645,13 @@ async function refresh(){
       return;
     }
     revision=data.credentialRevision;
+    enabledFeatures=data.enabledFeatures||{};
+    mailAuthorizationState=data.mailAuthorizationState||'DISABLED';
     const ready=data.identityVerified&&!data.reauthRequired;
     document.getElementById('targets').hidden=!ready;
+    const mailUpgradeRequired=ready&&data.mailAuthorizationState==='REAUTHORIZATION_REQUIRED';
+    document.getElementById('mail-authorize').hidden=!mailUpgradeRequired;
+    document.getElementById('mail-authorize-button').disabled=authSubmitPending;
     if(authSubmitPending&&['AUTHORIZATION_PENDING','AUTHORIZATION_COMPLETE','AUTHORIZATION_DID_NOT_COMPLETE','AADSTS50011'].includes(data.message)){
       clearAuthorizationWait();
       setPopupMessage(data.message==='AUTHORIZATION_PENDING'
@@ -1497,7 +1663,15 @@ async function refresh(){
     }
     document.getElementById('connect').disabled=ready||authSubmitPending||data.message==='AUTHORIZATION_PREPARING';
     if(ready){
-      statusNode.textContent=`Microsoft account verified · ${data.authStatus} · credential revision ${revision}`;
+      if(mailUpgradeRequired){
+        statusNode.textContent=`Microsoft account verified · Mail access needs separate authorization · credential revision ${revision}`;
+      }else if(mailAuthorizationState==='DISABLED'){
+        statusNode.textContent=`Microsoft account verified · Mail capabilities are disabled · credential revision ${revision}`;
+      }else if(mailAuthorizationState==='READY'){
+        statusNode.textContent=`Microsoft account verified · Mail access authorized · credential revision ${revision}`;
+      }else{
+        statusNode.textContent=`Microsoft account verified · ${data.authStatus} · credential revision ${revision}`;
+      }
     }else if(data.message==='AADSTS50011'){
       statusNode.textContent='Microsoft rejected the registered loopback redirect (AADSTS50011). The localhost callback must match the tenant app registration.';
     }else if(data.message==='AUTHORIZATION_DID_NOT_COMPLETE'){
@@ -1513,9 +1687,6 @@ async function refresh(){
     }else if(!authSubmitPending){
       statusNode.textContent=`Microsoft connection status: ${data.authStatus}`;
     }
-    if(ready && data.requiredOAuthScopes.some(scope=>scope.toLowerCase().split('/').pop().startsWith('mail.'))){
-      throw new Error('office_mail_scope_forbidden');
-    }
   }catch(_error){
     if(!authSubmitPending) statusNode.textContent='The Office status check timed out. It will retry automatically.';
   }finally{
@@ -1524,7 +1695,7 @@ async function refresh(){
     scheduleStatusRefresh();
   }
 }
-document.getElementById('authorize').addEventListener('submit',event=>{
+for(const form of [document.getElementById('authorize'),document.getElementById('mail-authorize')]) form.addEventListener('submit',event=>{
   if(authSubmitPending){event.preventDefault();return;}
   const popup=window.open('about:blank','cyrene-office-oauth','popup,width=720,height=820');
   if(!popup){event.preventDefault();document.getElementById('connect').disabled=false;statusNode.textContent='Allow the Microsoft sign-in window, then try again.';return;}
@@ -1554,6 +1725,8 @@ document.getElementById('discover').addEventListener('click',async()=>{
   const errors=[];
   try{
     for(const [type] of groups){
+      if(!enabledFeatures[discoveryFeature[type]]){discovered[type]=[];continue;}
+      if(type==='mail_folders'&&mailAuthorizationState!=='READY'){discovered[type]=[];errors.push(type);continue;}
       try{
         const result=await api('/api/discover',{resourceType:type});
         discovered[type]=result.items;
@@ -1568,8 +1741,8 @@ document.getElementById('discover').addEventListener('click',async()=>{
   finally{document.getElementById('discover').disabled=false;}
 });
 document.getElementById('save').addEventListener('click',async()=>{
-  const values={plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[]};
-  const byType={planner_plans:'plannerPlanIds',todo_lists:'toDoTaskListIds',calendars:'calendarIds',freebusy_subjects:'freebusySubjects'};
+  const values={plannerPlanIds:[],sharePointListIds:[],sharePointDriveIds:[],toDoTaskListIds:[],calendarIds:[],freebusySubjects:[],mailFolderIds:[]};
+  const byType={planner_plans:'plannerPlanIds',todo_lists:'toDoTaskListIds',calendars:'calendarIds',freebusy_subjects:'freebusySubjects',mail_folders:'mailFolderIds'};
   for(const checkbox of panels.querySelectorAll('input[type=checkbox]:checked')){
     const type=checkbox.dataset.resource;
     if(type==='sharepoint_drives'){
@@ -1590,7 +1763,7 @@ document.getElementById('save').addEventListener('click',async()=>{
   try{
     const result=await api('/api/select-targets',{expectedCredentialRevision:revision,targets:values});
     revision=result.credentialRevision;
-    document.getElementById('selection').textContent=`Saved selection at revision ${revision}. Planner ${result.selectedCounts.plannerPlans}; To Do ${result.selectedCounts.toDoLists}; calendars ${result.selectedCounts.calendars}; SharePoint libraries ${result.selectedCounts.sharePointLibraries}.`;
+    document.getElementById('selection').textContent=`Saved selection at revision ${revision}. Planner ${result.selectedCounts.plannerPlans}; To Do ${result.selectedCounts.toDoLists}; calendars ${result.selectedCounts.calendars}; SharePoint libraries ${result.selectedCounts.sharePointLibraries}; Mail folders ${result.selectedCounts.mailFolders}.`;
   }catch(error){document.getElementById('selection').textContent=error.message;}
 });
 refresh();
@@ -1847,7 +2020,11 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
             try:
                 result = self.server.service.complete_callback(parsed.query)
             except OfficeSetupError as error:
-                result = self.server.service.callback_failed(str(error))
+                result = (
+                    CallbackResult("failed", "office_callback_invalid")
+                    if str(error) == "office_callback_flow_mismatch"
+                    else self.server.service.callback_failed(str(error))
+                )
             self._send(
                 HTTPStatus.OK,
                 _callback_result_page(self.server.server_nonce, result),
@@ -1919,10 +2096,13 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
-        if path == "/authorize":
+        if path in {"/authorize", "/authorize-mail-scope-upgrade"}:
             try:
                 _, session = self._authorize_form()
-                authorization_url = self.server.service.begin(session)
+                authorization_url = self.server.service.begin(
+                    session,
+                    mail_scope_upgrade=path == "/authorize-mail-scope-upgrade",
+                )
                 self._redirect(authorization_url)
             except OfficeSetupError as error:
                 code = str(error)
@@ -1936,6 +2116,9 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                     "office_authorization_pending": (
                         "A sign-in request is already being prepared. Keep the setup page open and wait for its status."
                     ),
+                    "office_mail_upgrade_not_required": (
+                        "Mail authorization is not currently required for this Office profile. Check status before continuing."
+                    ),
                     "office_bridge_timeout": (
                         "The sign-in request could not be confirmed. Check the setup page before trying again."
                     ),
@@ -1945,7 +2128,8 @@ class OfficeSetupHandler(BaseHTTPRequestHandler):
                         HTTPStatus.GATEWAY_TIMEOUT
                         if code == "office_bridge_timeout"
                         else HTTPStatus.CONFLICT
-                        if code == "office_authorization_pending"
+                        if code
+                        in {"office_authorization_pending", "office_mail_upgrade_not_required"}
                         else HTTPStatus.SERVICE_UNAVAILABLE
                     )
                     self._send(

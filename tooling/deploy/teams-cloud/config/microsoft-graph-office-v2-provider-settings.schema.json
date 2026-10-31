@@ -17,9 +17,9 @@
     "planner_enabled": {"type": "boolean"},
     "todo_enabled": {"type": "boolean"},
     "calendar_enabled": {"type": "boolean"},
-    "mail_metadata_enabled": {"const": false},
-    "mail_drafts_enabled": {"const": false},
-    "mail_send_enabled": {"const": false},
+    "mail_metadata_enabled": {"type": "boolean"},
+    "mail_drafts_enabled": {"type": "boolean"},
+    "mail_send_enabled": {"type": "boolean"},
     "sharepoint_drive_metadata_enabled": {"type": "boolean"}
   }
 }

@@ -7186,3 +7186,201 @@ def test_office_v2_scope_maps_targets_features_and_oauth_scopes_exactly() -> Non
     provider_flags["planner_enabled"] = False
     with pytest.raises(preflight.PreflightError, match="map the Exchange scope"):
         preflight._validate_graph_provider_office_flags(provider_flags, scope)
+
+
+def test_office_v2_mail_opt_in_derives_exact_tools_scopes_and_disabled_defaults() -> None:
+    """Keep all three mail capabilities default-off and derive their narrow tool/scope sets."""
+
+    tenant_id = "44444444-4444-4444-8444-444444444444"
+    workspace_id = "33333333-3333-4333-8333-333333333333"
+    base_scope = {
+        "schemaVersion": 2,
+        "tenantId": tenant_id,
+        "workspaceId": workspace_id,
+        "enabledFeatures": {
+            "plannerEnabled": False,
+            "todoEnabled": False,
+            "calendarEnabled": False,
+            "mailMetadataEnabled": False,
+            "mailDraftsEnabled": False,
+            "mailSendEnabled": False,
+            "sharePointDriveMetadataEnabled": False,
+        },
+        "targets": {
+            "plannerPlanIds": [],
+            "sharePointSiteIds": [],
+            "sharePointListIds": [],
+            "sharePointDriveIds": [],
+            "toDoTaskListIds": [],
+            "calendarIds": [],
+            "mailFolderIds": [],
+            "freebusySubjects": [],
+        },
+    }
+    compose = {
+        "services": {
+            "navigator": {"environment": {"TEAMS_TENANT_ID": tenant_id}},
+            "directory-operator": {
+                "environment": {
+                    "CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID": "11111111-1111-4111-8111-111111111111"
+                }
+            },
+            "workspace-authority": {
+                "environment": {
+                    "CYRENE_ORGANIZATION_ID": "22222222-2222-4222-8222-222222222222",
+                    "CYRENE_WORKSPACE_ID": workspace_id,
+                }
+            },
+        }
+    }
+    preflight._validate_office_v2_host_scope(base_scope, compose)
+    assert preflight._graph_operations_for_office_scope(base_scope) == set()
+    assert preflight._graph_expected_oauth_scopes(base_scope) == {"User.Read", "offline_access"}
+    assert preflight._graph_public_target_scope(base_scope)["mail"] == {
+        "enabled": False,
+        "folderIds": [],
+        "metadataRead": False,
+        "bodyRead": False,
+        "draftsWrite": False,
+        "sendEnabled": False,
+    }
+
+    cases = (
+        (
+            {"mailMetadataEnabled": True},
+            ["folder-1"],
+            {
+                "microsoft_graph.mail.folders.list",
+                "microsoft_graph.mail.messages.list",
+                "microsoft_graph.mail.message.get",
+            },
+            {"User.Read", "offline_access", "Mail.ReadBasic"},
+            {"mail_metadata"},
+        ),
+        (
+            {"mailDraftsEnabled": True},
+            [],
+            {
+                "microsoft_graph.mail.drafts.list",
+                "microsoft_graph.mail.draft.create",
+                "microsoft_graph.mail.draft.update",
+                "microsoft_graph.mail.draft.delete",
+            },
+            {"User.Read", "offline_access", "Mail.ReadWrite"},
+            {"mail_drafts"},
+        ),
+        (
+            {"mailSendEnabled": True},
+            [],
+            {"microsoft_graph.mail.message.send"},
+            {"User.Read", "offline_access", "Mail.ReadBasic", "Mail.Send"},
+            {"mail_send"},
+        ),
+        (
+            {"mailDraftsEnabled": True, "mailSendEnabled": True},
+            [],
+            {
+                "microsoft_graph.mail.drafts.list",
+                "microsoft_graph.mail.draft.create",
+                "microsoft_graph.mail.draft.update",
+                "microsoft_graph.mail.draft.delete",
+                "microsoft_graph.mail.message.send",
+            },
+            {"User.Read", "offline_access", "Mail.ReadWrite", "Mail.Send"},
+            {"mail_drafts", "mail_send"},
+        ),
+    )
+    for (
+        feature_overrides,
+        folder_ids,
+        expected_operations,
+        expected_scopes,
+        expected_features,
+    ) in cases:
+        scope = copy.deepcopy(base_scope)
+        scope["enabledFeatures"].update(feature_overrides)
+        scope["targets"]["mailFolderIds"] = folder_ids
+        preflight._validate_office_v2_host_scope(scope, compose)
+        provider_flags = {
+            provider_key: scope["enabledFeatures"][host_key]
+            for host_key, provider_key in preflight.GRAPH_OFFICE_HOST_TO_PROVIDER_FLAGS.items()
+        }
+        preflight._validate_graph_provider_office_flags(provider_flags, scope)
+        assert preflight._graph_operations_for_office_scope(scope) == expected_operations
+        assert preflight._graph_expected_oauth_scopes(scope) == expected_scopes
+        assert preflight._graph_enabled_feature_names(scope) == expected_features
+        assert preflight._graph_target_ref_count(scope) == len(folder_ids)
+
+    invalid_scope = copy.deepcopy(base_scope)
+    invalid_scope["targets"]["mailFolderIds"] = ["folder-1"]
+    with pytest.raises(preflight.PreflightError, match="mail folders require the metadata feature"):
+        preflight._validate_office_v2_host_scope(invalid_scope, compose)
+
+
+def test_mail_connector_policies_and_schemas_match_fixed_operation_contract() -> None:
+    """Keep binding projections, required args, write flags, and public schema aligned."""
+
+    expected = {
+        "microsoft_graph.mail.folders.list": ("microsoft_graph_mail_folder", False, ()),
+        "microsoft_graph.mail.messages.list": (
+            "microsoft_graph_mail_message",
+            False,
+            ("folder_id",),
+        ),
+        "microsoft_graph.mail.message.get": (
+            "microsoft_graph_mail_message",
+            False,
+            ("folder_id", "message_id"),
+        ),
+        "microsoft_graph.mail.drafts.list": ("microsoft_graph_mail_draft", False, ()),
+        "microsoft_graph.mail.draft.create": (
+            "microsoft_graph_mail_draft",
+            True,
+            ("subject", "body_text"),
+        ),
+        "microsoft_graph.mail.draft.update": (
+            "microsoft_graph_mail_draft",
+            True,
+            ("message_id", "if_match", "changes"),
+        ),
+        "microsoft_graph.mail.draft.delete": (
+            "microsoft_graph_mail_draft",
+            True,
+            ("message_id", "if_match"),
+        ),
+        "microsoft_graph.mail.message.send": (
+            "microsoft_graph_mail_draft",
+            True,
+            ("message_id",),
+        ),
+    }
+    for operation, (projection, mutating, required_args) in expected.items():
+        assert preflight.CONNECTOR_OPERATION_POLICIES[operation] == (
+            operation,
+            projection,
+            mutating,
+        )
+        assert preflight.CONNECTOR_PROVIDER_REQUIRED_ARGUMENTS.get(operation, ()) == required_args
+
+    deployment = Path(__file__).resolve().parents[1]
+    bindings_schema = json.loads(
+        (deployment / "config/connector-bindings.schema.json").read_text(encoding="utf-8")
+    )
+    projections = bindings_schema["properties"]["bindings"]["items"]["properties"]["tools"][
+        "items"
+    ]["properties"]["resourceProjection"]["enum"]
+    assert {row[0] for row in expected.values()} <= set(projections)
+
+    settings_schema = json.loads(
+        (deployment / "config/microsoft-graph-office-v2-provider-settings.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    settings_template = json.loads(
+        (deployment / "config/microsoft-graph-office-v2-provider-settings.template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for flag in ("mail_metadata_enabled", "mail_drafts_enabled", "mail_send_enabled"):
+        assert settings_schema["properties"][flag] == {"type": "boolean"}
+        assert settings_template[flag] is False

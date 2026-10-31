@@ -53,6 +53,22 @@ ENABLED_FEATURES = {
 EXCHANGE_PROFILE_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,299}$")
 
 
+def mail_features(
+    *, metadata: bool = False, drafts: bool = False, send: bool = False
+) -> dict[str, bool]:
+    """Copy the non-mail profile and enable only explicitly selected Mail capabilities."""
+
+    features = dict(ENABLED_FEATURES)
+    features.update(
+        {
+            "mailMetadataEnabled": metadata,
+            "mailDraftsEnabled": drafts,
+            "mailSendEnabled": send,
+        }
+    )
+    return features
+
+
 def status_document(
     *,
     state: str = "NOT_LINKED",
@@ -64,10 +80,11 @@ def status_document(
     scopes: list[str] | None = None,
     enabled_features: dict[str, bool] | None = None,
     target_ref_count: int = 0,
+    mail_authorization_state: str | None = None,
 ) -> dict[str, Any]:
     """Build the exact safe status projection emitted by the fixed Exchange CLI."""
 
-    return {
+    document = {
         "state": state,
         "profileRef": PROFILE_REF,
         "provider": "microsoft_graph",
@@ -85,6 +102,22 @@ def status_document(
         "enabledFeatures": dict(ENABLED_FEATURES if enabled_features is None else enabled_features),
         "targetRefCount": target_ref_count,
     }
+    if mail_authorization_state is not None:
+        document["mailAuthorizationState"] = mail_authorization_state
+    return document
+
+
+def scopes_for_features(features: dict[str, bool]) -> list[str]:
+    """Return the small delegated scope set expected for the selected Office flags."""
+
+    scopes = list(SCOPES)
+    if features["mailDraftsEnabled"]:
+        scopes.append("Mail.ReadWrite")
+    elif features["mailMetadataEnabled"] or features["mailSendEnabled"]:
+        scopes.append("Mail.ReadBasic")
+    if features["mailSendEnabled"]:
+        scopes.append("Mail.Send")
+    return scopes
 
 
 def operator_context() -> setup.OperatorContext:
@@ -135,6 +168,8 @@ class FakeBridge:
         self.begin_calls = 0
         self.expires_at = "2099-01-01T00:00:00Z"
         self.linked = False
+        self.flow_kind_override: str | None = None
+        self.omit_flow_kind = False
         self.status_value = status_document()
         self.discoveries: dict[str, dict[str, Any]] = {
             "planner_plans": {
@@ -166,19 +201,28 @@ class FakeBridge:
                     {"id": "person@dohorizon.com", "displayName": "Pilot member", "kind": "person"}
                 ],
             },
+            "mail_folders": {
+                "resourceType": "mail_folders",
+                "items": [{"id": "mail-folder-1", "displayName": "Inbox", "kind": "mail_folder"}],
+            },
         }
 
     def invoke(self, operation: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((operation, dict(payload)))
-        if operation == "begin":
+        if operation in {"begin", "begin-mail-scope-upgrade"}:
             self.begin_calls += 1
-            return {
+            flow_kind = self.flow_kind_override or (
+                "scope_upgrade" if operation == "begin-mail-scope-upgrade" else "link"
+            )
+            scopes = " ".join(scopes_for_features(self.status_value["enabledFeatures"]))
+            response = {
                 "state": "AUTHORIZATION_REQUIRED",
                 "provider": "microsoft_graph",
                 "profileRef": PROFILE_REF,
                 "linkSessionRef": LINK_REF,
                 "authorizationUrl": authorization_url(
                     self.port,
+                    scopes=scopes,
                     state=(
                         "state-secret-123"
                         if self.begin_calls == 1
@@ -187,16 +231,37 @@ class FakeBridge:
                 ),
                 "expiresAt": self.expires_at,
             }
+            if not self.omit_flow_kind:
+                response["flowKind"] = flow_kind
+            return response
         if operation == "status":
             return dict(self.status_value)
-        if operation == "complete":
+        if operation in {"complete", "complete-scope-upgrade"}:
             self.linked = True
+            enabled_features = dict(self.status_value["enabledFeatures"])
+            scopes = scopes_for_features(enabled_features)
+            state = (
+                "READY"
+                if any(
+                    enabled_features[name]
+                    for name in ("mailMetadataEnabled", "mailDraftsEnabled", "mailSendEnabled")
+                )
+                else "DISABLED"
+            )
+            revision = (
+                0
+                if operation == "complete"
+                else int(self.status_value["credentialRevision"] or 0) + 1
+            )
             self.status_value = status_document(
                 state="LINKED",
                 auth_status="healthy",
                 external_subject=EXTERNAL_SUBJECT,
-                revision=0,
+                revision=revision,
                 target_scope={"workspaceId": WORKSPACE},
+                scopes=scopes,
+                enabled_features=enabled_features,
+                mail_authorization_state=state,
             )
             return dict(self.status_value)
         if operation == "discover":
@@ -220,7 +285,12 @@ class FakeBridge:
                 external_subject=EXTERNAL_SUBJECT,
                 revision=revision,
                 target_scope={"workspaceId": WORKSPACE, **payload["targets"]},
+                scopes=list(self.status_value["requiredOAuthScopes"]),
+                enabled_features=dict(self.status_value["enabledFeatures"]),
                 target_ref_count=sum(len(rows) for rows in payload["targets"].values()),
+                mail_authorization_state=self.status_value.get(
+                    "mailAuthorizationState", "DISABLED"
+                ),
             )
             return dict(self.status_value)
         raise AssertionError(f"unexpected operation: {operation}")
@@ -395,6 +465,38 @@ def test_cli_bridge_rejects_multiline_and_non_json_output() -> None:
         setup.ExchangeCliBridge(runner=runner).invoke("status", {})
 
 
+@pytest.mark.parametrize(
+    "operation",
+    ["begin-mail-scope-upgrade", "complete-scope-upgrade"],
+)
+def test_cli_bridge_exposes_only_fixed_scope_upgrade_operations(operation: str) -> None:
+    """Add fixed OAuth upgrade verbs without allowing arbitrary operation selectors."""
+
+    seen: dict[str, Any] = {}
+
+    def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen["command"] = command
+        seen.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout=b'{"ok":true}\n', stderr=b"")
+
+    payload = (
+        {"requestId": "fixed-request-id"}
+        if operation.startswith("begin-")
+        else {
+            "state": "state-secret",
+            "code": "code-secret",
+        }
+    )
+    response = setup.ExchangeCliBridge(runner=runner).invoke(operation, payload)
+    assert response == {"ok": True}
+    assert seen["command"][3] == operation
+    assert json.loads(seen["input"]) == payload
+    assert "state-secret" not in seen["command"] and "code-secret" not in seen["command"]
+
+    with pytest.raises(setup.OfficeSetupError, match="office_operation_invalid"):
+        setup.ExchangeCliBridge(runner=runner).invoke("complete-mail-from-client", {})
+
+
 def test_authorization_url_accepts_only_loopback_and_no_mail_scope() -> None:
     """Pin Microsoft sign-in to the registered localhost callback and deny Mail scopes."""
 
@@ -446,6 +548,38 @@ def test_authorization_url_accepts_only_loopback_and_no_mail_scope() -> None:
         )
 
 
+def test_mail_oauth_scopes_are_minimal_and_exact_for_opted_in_features() -> None:
+    """Derive Basic/ReadWrite/Send grants only from explicit Mail flags."""
+
+    cases = (
+        (mail_features(metadata=True), {"Mail.ReadBasic"}),
+        (mail_features(drafts=True), {"Mail.ReadWrite"}),
+        (mail_features(send=True), {"Mail.ReadBasic", "Mail.Send"}),
+        (mail_features(drafts=True, send=True), {"Mail.ReadWrite", "Mail.Send"}),
+    )
+    for features, expected_mail_scopes in cases:
+        scopes = scopes_for_features(features)
+        actual_mail_scopes = {scope for scope in scopes if scope.startswith("Mail.")}
+        assert actual_mail_scopes == expected_mail_scopes
+        setup._validate_scope_policy(scopes, features)
+
+    with pytest.raises(setup.OfficeSetupError, match="office_mail_scope_forbidden"):
+        invalid_mail_features = mail_features(metadata=True)
+        setup._safe_status(
+            status_document(
+                state="LINKED",
+                auth_status="healthy",
+                external_subject=EXTERNAL_SUBJECT,
+                revision=0,
+                target_scope={"workspaceId": WORKSPACE},
+                scopes=SCOPES + ["Mail.Read"],
+                enabled_features=invalid_mail_features,
+                mail_authorization_state="READY",
+            ),
+            operator_context(),
+        )
+
+
 def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
     """Exchange validates the OAuth callback; the setup service does not retain its values."""
 
@@ -484,6 +618,118 @@ def test_begin_and_callback_keep_code_and_state_inside_cli_stdin() -> None:
     final_status = service.status(session)
     assert final_status["identityVerified"] is True
     assert final_status["credentialRevision"] == 1
+
+
+def test_explicit_mail_scope_upgrade_uses_server_flow_kind_and_preserves_owner_profile() -> None:
+    """Upgrade a healthy linked profile only from the explicit server-selected Mail flow."""
+
+    features = mail_features(metadata=True, drafts=True, send=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=4,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES,
+        enabled_features=features,
+        mail_authorization_state="REAUTHORIZATION_REQUIRED",
+    )
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    authorization = service.begin(session, mail_scope_upgrade=True)
+    operation, request = bridge.calls[-1]
+    assert operation == "begin-mail-scope-upgrade"
+    assert set(request) == {"requestId"}
+    assert re.fullmatch(r"[0-9a-f]{32}", request["requestId"])
+    assert service._active_flow is not None
+    assert service._active_flow.flow_kind == "scope_upgrade"
+    parsed_scopes = urllib.parse.parse_qs(urllib.parse.urlsplit(authorization).query)["scope"][
+        0
+    ].split()
+    assert {scope for scope in parsed_scopes if scope.startswith("Mail.")} == {
+        "Mail.ReadWrite",
+        "Mail.Send",
+    }
+
+    with pytest.raises(setup.OfficeSetupError, match="office_callback_flow_mismatch"):
+        service.complete_callback("state=other-state&code=must-not-be-forwarded")
+    assert not any(operation == "complete-scope-upgrade" for operation, _ in bridge.calls)
+
+    query = urllib.parse.urlencode(
+        {
+            "state": "state-secret-123",
+            "code": "code-secret-456",
+            "scope": " ".join(scopes_for_features(features)),
+        }
+    )
+    service.complete_callback(query)
+    operation, payload = bridge.calls[-1]
+    assert operation == "complete-scope-upgrade"
+    assert payload == {"state": "state-secret-123", "code": "code-secret-456"}
+    assert bridge.status_value["profileRef"] == PROFILE_REF
+    assert bridge.status_value["mailAuthorizationState"] == "READY"
+    assert service.status(session)["mailAuthorizationState"] == "READY"
+
+
+def test_mail_scope_upgrade_requires_explicit_need_and_exchange_flow_binding() -> None:
+    """Reject no-op upgrades and a link response returned for the upgrade operation."""
+
+    features = mail_features(metadata=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=4,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES + ["Mail.ReadBasic"],
+        enabled_features=features,
+        mail_authorization_state="READY",
+    )
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    with pytest.raises(setup.OfficeSetupError, match="office_mail_upgrade_not_required"):
+        service.begin(session, mail_scope_upgrade=True)
+    assert not any(operation == "begin-mail-scope-upgrade" for operation, _ in bridge.calls)
+
+    bridge.status_value["mailAuthorizationState"] = "REAUTHORIZATION_REQUIRED"
+    bridge.status_value["requiredOAuthScopes"] = list(SCOPES)
+    bridge.flow_kind_override = "link"
+    with pytest.raises(setup.OfficeSetupError, match="office_begin_flow_kind_invalid"):
+        service.begin(session, mail_scope_upgrade=True)
+    assert service._active_flow is None
+
+
+def test_legacy_begin_may_omit_flow_kind_but_mail_upgrade_may_not() -> None:
+    """Keep old initial-link response compatibility without guessing upgrade callbacks."""
+
+    bridge = FakeBridge()
+    bridge.omit_flow_kind = True
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    service.begin(session)
+    assert service._active_flow is not None
+    assert service._active_flow.flow_kind == "link"
+
+    features = mail_features(metadata=True)
+    upgrade_bridge = FakeBridge()
+    upgrade_bridge.omit_flow_kind = True
+    upgrade_bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=1,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES,
+        enabled_features=features,
+        mail_authorization_state="REAUTHORIZATION_REQUIRED",
+    )
+    upgrade_service = setup.OfficeSetupService(upgrade_bridge, operator_context=operator_context())
+    _, upgrade_session = upgrade_service.create_session()
+    with pytest.raises(setup.OfficeSetupError, match="office_begin_flow_kind_invalid"):
+        upgrade_service.begin(upgrade_session, mail_scope_upgrade=True)
 
 
 def test_begin_reopens_same_unexpired_provider_flow_and_replaces_only_after_expiry() -> None:
@@ -808,7 +1054,7 @@ def test_discovery_and_cas_selection_accept_only_server_observed_targets(
     """Pass only discovered IDs through the fixed owner-bound CAS target update."""
 
     service, bridge, session = linked_service
-    for resource_type in setup.ALLOWED_DISCOVERY_TYPES:
+    for resource_type in setup.ALLOWED_DISCOVERY_TYPES - {"mail_folders"}:
         service.discover(session, resource_type)
     targets = {
         "plannerPlanIds": ["plan-1"],
@@ -817,6 +1063,7 @@ def test_discovery_and_cas_selection_accept_only_server_observed_targets(
         "toDoTaskListIds": ["todo-1"],
         "calendarIds": ["calendar-1"],
         "freebusySubjects": ["person@dohorizon.com"],
+        "mailFolderIds": [],
     }
     result = service.select_targets(session, expected_revision=0, targets_value=targets)
     assert result["state"] == "UPDATED"
@@ -826,6 +1073,114 @@ def test_discovery_and_cas_selection_accept_only_server_observed_targets(
     assert payload == {"expectedCredentialRevision": 0, "targets": targets}
     assert "scopes" not in payload and "tenantId" not in payload and "workspaceId" not in payload
     assert service.status(session)["credentialRevision"] == 1
+
+
+def test_mail_folder_discovery_and_selection_are_opt_in_and_server_observed() -> None:
+    """Only Mail metadata opt-in can discover and select a server-returned folder ID."""
+
+    features = mail_features(metadata=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=2,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES + ["Mail.ReadBasic"],
+        enabled_features=features,
+        mail_authorization_state="READY",
+    )
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+
+    result = service.discover(session, "mail_folders")
+    assert result["items"] == [
+        {"id": "mail-folder-1", "displayName": "Inbox", "kind": "mail_folder"}
+    ]
+    targets = {
+        "plannerPlanIds": [],
+        "sharePointListIds": [],
+        "sharePointDriveIds": [],
+        "toDoTaskListIds": [],
+        "calendarIds": [],
+        "freebusySubjects": [],
+        "mailFolderIds": ["mail-folder-1"],
+    }
+    updated = service.select_targets(session, expected_revision=2, targets_value=targets)
+    assert updated["selectedCounts"]["mailFolders"] == 1
+    operation, payload = bridge.calls[-1]
+    assert operation == "select-targets"
+    assert payload["targets"] == targets
+
+
+def test_mail_folders_require_ready_scope_and_exact_discovery_kind() -> None:
+    """Do not issue folder reads before consent or accept arbitrary resources as folders."""
+
+    features = mail_features(metadata=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=2,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES,
+        enabled_features=features,
+        mail_authorization_state="REAUTHORIZATION_REQUIRED",
+    )
+    service = setup.OfficeSetupService(bridge, operator_context=operator_context())
+    _, session = service.create_session()
+    with pytest.raises(setup.OfficeSetupError, match="office_mail_authorization_required"):
+        service.discover(session, "mail_folders")
+    assert not any(operation == "discover" for operation, _ in bridge.calls)
+
+    bridge.status_value["requiredOAuthScopes"] = SCOPES + ["Mail.ReadBasic"]
+    bridge.status_value["mailAuthorizationState"] = "READY"
+    bridge.discoveries["mail_folders"]["items"][0]["kind"] = "message"
+    with service._lock:
+        service._invalidate_status_locked()
+    with pytest.raises(setup.OfficeSetupError, match="office_discovery_item_invalid"):
+        service.discover(session, "mail_folders")
+
+
+def test_mail_upgrade_status_keeps_existing_non_mail_profile_usable() -> None:
+    """A missing optional Mail grant does not invalidate an otherwise healthy owner link."""
+
+    features = mail_features(metadata=True, drafts=True)
+    status = setup._safe_status(
+        status_document(
+            state="LINKED",
+            auth_status="healthy",
+            external_subject=EXTERNAL_SUBJECT,
+            revision=3,
+            target_scope={"workspaceId": WORKSPACE},
+            scopes=SCOPES,
+            enabled_features=features,
+            mail_authorization_state="REAUTHORIZATION_REQUIRED",
+        ),
+        operator_context(),
+    )
+    assert status["identityVerified"] is True
+    assert status["reauthRequired"] is False
+    assert status["mailAuthorizationState"] == "REAUTHORIZATION_REQUIRED"
+
+    legacy_status = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=3,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES,
+        enabled_features=features,
+    )
+    assert "mailAuthorizationState" not in legacy_status
+    derived = setup._safe_status(legacy_status, operator_context())
+    assert derived["identityVerified"] is True
+    assert derived["mailAuthorizationState"] == "REAUTHORIZATION_REQUIRED"
+
+    malformed_status = dict(legacy_status, mailAuthorizationState=None)
+    with pytest.raises(setup.OfficeSetupError, match="office_status_mail_authorization_invalid"):
+        setup._safe_status(malformed_status, operator_context())
 
 
 def test_discovery_follows_opaque_continuation_only_inside_the_server() -> None:
@@ -1075,10 +1430,12 @@ def test_reused_homepage_keeps_same_origin_referrer_policy_and_api_stays_no_refe
         assert "setInterval(" not in page_body
         assert 'target="cyrene-office-oauth"' in page_body
         assert "try{authPopupDocument=popup.document;}catch(_error){}" in page_body
-        auth_submit = page_body.split(
-            "document.getElementById('authorize').addEventListener('submit',event=>{", 1
-        )[1].split("\ndocument.getElementById('discover')", 1)[0]
+        auth_submit = page_body.split("for(const form of [document.getElementById('authorize')", 1)[
+            1
+        ].split("\ndocument.getElementById('discover')", 1)[0]
         assert 'method="post" action="/authorize"' in page_body
+        assert 'action="/authorize-mail-scope-upgrade"' in page_body
+        assert "mailAuthorizationState==='REAUTHORIZATION_REQUIRED'" in page_body
         popup_access_fallback = auth_submit.split("authPopupDocument=null;", 1)[1]
         assert "event.preventDefault()" not in popup_access_fallback
         assert "setPopupMessage('Requesting Microsoft sign-in…')" in popup_access_fallback
@@ -1256,6 +1613,90 @@ def test_authorize_form_repeated_post_reuses_same_url_only_for_its_cookie_sessio
         thread.join(timeout=2)
 
 
+def test_mail_scope_upgrade_has_separate_explicit_csrf_protected_authorize_route() -> None:
+    """Only the dedicated user action starts Mail consent and no flow choice comes from body."""
+
+    features = mail_features(metadata=True)
+    bridge = FakeBridge()
+    bridge.status_value = status_document(
+        state="LINKED",
+        auth_status="healthy",
+        external_subject=EXTERNAL_SUBJECT,
+        revision=1,
+        target_scope={"workspaceId": WORKSPACE},
+        scopes=SCOPES,
+        enabled_features=features,
+        mail_authorization_state="REAUTHORIZATION_REQUIRED",
+    )
+    server, thread, port = _start_server(bridge)
+    try:
+        cookie, csrf, page = _page_session(port)
+        assert 'action="/authorize-mail-scope-upgrade"' in page
+        assert "REAUTHORIZATION_REQUIRED" in page
+        assert "flowKind" not in page
+
+        form = urllib.parse.urlencode({"csrf": csrf})
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+        connection.request(
+            "POST",
+            "/authorize-mail-scope-upgrade",
+            body=form,
+            headers={
+                "Host": f"localhost:{port}",
+                "Origin": f"http://localhost:{port}",
+                "Cookie": cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(form)),
+            },
+        )
+        response = connection.getresponse()
+        location = response.getheader("Location", "")
+        response.read()
+        assert response.status == HTTPStatus.SEE_OTHER
+        assert (
+            "Mail.ReadBasic"
+            in urllib.parse.parse_qs(urllib.parse.urlsplit(location).query)["scope"][0]
+        )
+        assert [operation for operation, _ in bridge.calls].count("begin-mail-scope-upgrade") == 1
+
+        connection.request(
+            "GET",
+            f"{setup.CALLBACK_PATH}?state=wrong-state&code=must-not-be-forwarded",
+            headers={"Host": f"localhost:{port}"},
+        )
+        bad_callback = connection.getresponse()
+        bad_callback_body = bad_callback.read().decode("utf-8")
+        assert bad_callback.status == HTTPStatus.OK
+        assert "office_callback_invalid" in bad_callback_body
+        assert server.service._active_flow is not None
+        assert server.service._active_flow.flow_kind == "scope_upgrade"
+        assert not any(operation == "complete-scope-upgrade" for operation, _ in bridge.calls)
+
+        forged_form = urllib.parse.urlencode({"csrf": csrf, "flowKind": "scope_upgrade"})
+        connection.request(
+            "POST",
+            "/authorize",
+            body=forged_form,
+            headers={
+                "Host": f"localhost:{port}",
+                "Origin": f"http://localhost:{port}",
+                "Cookie": cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(forged_form)),
+            },
+        )
+        forged = connection.getresponse()
+        forged_payload = json.loads(forged.read().decode("utf-8"))
+        assert forged.status == HTTPStatus.BAD_GATEWAY
+        assert forged_payload == {"error": "request_body_invalid"}
+        assert [operation for operation, _ in bridge.calls].count("begin-mail-scope-upgrade") == 1
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_callback_success_shows_query_free_completion_page_and_only_cli_receives_secrets() -> None:
     """Success gets a finished/close page; callback code and state stay out of its response."""
 
@@ -1410,10 +1851,13 @@ def test_callback_bridge_busy_is_shown_as_unsubmitted_not_completed() -> None:
     server, thread, port = _start_server(bridge)
     try:
         cookie, _csrf, _page = _page_session(port)
+        session_id = cookie.split(";", 1)[0].split("=", 1)[1]
+        session = server.service.get_session(session_id)
+        server.service.begin(session)
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
         connection.request(
             "GET",
-            f"{setup.CALLBACK_PATH}?state=state-secret&code=code-secret",
+            f"{setup.CALLBACK_PATH}?state=state-secret-123&code=code-secret",
             headers={"Host": f"localhost:{port}"},
         )
         response = connection.getresponse()
