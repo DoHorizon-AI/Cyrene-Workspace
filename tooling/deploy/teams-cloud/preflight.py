@@ -3237,21 +3237,29 @@ def _graph_public_target_scope(scope: dict[str, Any]) -> dict[str, Any]:
 
 
 def _graph_expected_oauth_scopes(scope: dict[str, Any]) -> set[str]:
-    """Derive the delegated OAuth union from the fixed Office v2 feature scope."""
+    """Mirror Exchange's exact Account Center v2 delegated-scope projection."""
 
-    features = scope["enabledFeatures"]
-    required = {"openid", "profile", "offline_access", "User.Read"}
-    if features["plannerEnabled"] or features["todoEnabled"]:
+    public_scope = _graph_public_target_scope(scope)
+    planner = public_scope["planner"]
+    todo = public_scope["todo"]
+    sharepoint = public_scope["sharepoint"]
+    calendar = public_scope["calendar"]
+    required = {"User.Read", "offline_access"}
+    if planner["tasksWrite"] or todo["tasksWrite"]:
         required.add("Tasks.ReadWrite")
-    if features["sharePointDriveMetadataEnabled"]:
+    elif planner["tasksRead"] or todo["tasksRead"]:
+        required.add("Tasks.Read")
+    if sharepoint["enabled"]:
         required.add("Sites.Selected")
-    if features["calendarEnabled"]:
+    if calendar["eventsWrite"]:
         required.add("Calendars.ReadWrite")
+    elif calendar["eventsRead"] or calendar["freebusyRead"]:
+        required.add("Calendars.ReadBasic")
     return required
 
 
 def _graph_enabled_feature_names(scope: dict[str, Any]) -> set[str]:
-    """Derive safe readiness feature labels from the public Account Center target scope."""
+    """Mirror Exchange's exact safe Account Center v2 readiness feature labels."""
 
     public_scope = _graph_public_target_scope(scope)
     features: set[str] = set()
@@ -3259,25 +3267,29 @@ def _graph_enabled_feature_names(scope: dict[str, Any]) -> set[str]:
         features.add("planner_read")
     if public_scope["planner"]["tasksWrite"]:
         features.add("planner_write")
-    if public_scope["todo"]["tasksRead"]:
-        features.add("todo_read")
-    if public_scope["todo"]["tasksWrite"]:
-        features.add("todo_write")
-    if public_scope["calendar"]["eventsRead"]:
-        features.add("calendar_read")
-    if public_scope["calendar"]["eventsWrite"]:
-        features.add("calendar_write")
-    if public_scope["calendar"]["freebusyRead"] and public_scope["calendar"]["freebusySubjects"]:
-        features.add("calendar_freebusy_read")
-    if public_scope["sharepoint"]["metadataRead"]:
-        features.add("sharepoint_drive_metadata_read")
+    if public_scope["todo"]["enabled"]:
+        features.add("todo")
+    if public_scope["calendar"]["enabled"]:
+        features.add("calendar")
+    if public_scope["sharepoint"]["enabled"]:
+        features.add("sharepoint_drive_metadata")
     return features
 
 
 def _graph_target_ref_count(scope: dict[str, Any]) -> int:
-    """Count every explicit Office target reference without counting feature flags."""
+    """Mirror Exchange's target count, excluding fixed site and mail metadata."""
 
-    return sum(len(values) for values in scope["targets"].values())
+    public_scope = _graph_public_target_scope(scope)
+    targets = (
+        len(public_scope["planner"]["planIds"])
+        + len(public_scope["todo"]["taskListIds"])
+        + len(public_scope["calendar"]["calendarIds"])
+        + len(public_scope["calendar"]["freebusySubjects"])
+    )
+    if public_scope["sharepoint"]["enabled"]:
+        targets += len(public_scope["sharepoint"]["listIds"])
+        targets += len(public_scope["sharepoint"]["driveIds"])
+    return targets
 
 
 def _validate_office_oauth_setup_mount(

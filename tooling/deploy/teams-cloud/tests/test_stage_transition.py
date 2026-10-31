@@ -8137,7 +8137,9 @@ def _account_center_unissued_graph_readiness_fixture(
     return snapshot, compose, database_state, provider_scope_digests
 
 
-def _issue_graph_readiness_row(snapshot: dict[str, Any], compose: dict[str, Any]) -> None:
+def _issue_graph_readiness_row(
+    snapshot: dict[str, Any], compose: dict[str, Any], *, persist_candidate: bool = True
+) -> None:
     """Add the exact owner Graph profile, connection, binding and catalog to a fixture.
 
     中文：按冻结 Office scope 生成已签发 Graph 行，仅供 Exchange readiness 合同测试。
@@ -8249,12 +8251,13 @@ def _issue_graph_readiness_row(snapshot: dict[str, Any], compose: dict[str, Any]
     snapshot["catalog"]["items"] = [
         row for row in snapshot["catalog"]["items"] if row.get("providerId") != "microsoft_graph"
     ] + [catalog_item]
-    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
-    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
-    bindings_path.write_text(
-        json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
-    )
-    catalog_path.write_text(json.dumps(snapshot["catalog"]), encoding="utf-8")
+    if persist_candidate:
+        bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+        catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+        bindings_path.write_text(
+            json.dumps({"schemaVersion": 1, "bindings": snapshot["bindings"]}), encoding="utf-8"
+        )
+        catalog_path.write_text(json.dumps(snapshot["catalog"]), encoding="utf-8")
 
 
 def test_github_image_readiness_returns_only_exact_issued_binding_refs(
@@ -9191,7 +9194,11 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
     snapshot, compose, _database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(tmp_path, phase=phase)
     )
-    _issue_graph_readiness_row(snapshot, compose)
+    _issue_graph_readiness_row(
+        snapshot,
+        compose,
+        persist_candidate=phase != stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+    )
     exchange_id = "a" * 64
     exchange_image_id = _image_id(158)
     plan = {
@@ -9277,6 +9284,264 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
         )
 
 
+def test_workspace_authority_graph_bootstrap_verifies_one_live_graph_delta_without_changing_nav_inputs(
+    tmp_path: Path,
+) -> None:
+    """Verify the OAuth-issued Graph delta while the frozen Navigator catalog stays pre-OAuth."""
+
+    snapshot, compose, _database_state, provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    bindings_path = Path(compose["configs"]["connector-bindings"]["file"])
+    catalog_path = Path(compose["configs"]["connector-tool-catalog"]["file"])
+    frozen_bindings_bytes = bindings_path.read_bytes()
+    frozen_catalog_bytes = catalog_path.read_bytes()
+    frozen_bindings = json.loads(frozen_bindings_bytes)
+    frozen_catalog = json.loads(frozen_catalog_bytes)
+    assert not any(row["providerId"] == "microsoft_graph" for row in frozen_bindings["bindings"])
+    assert not any(row["providerId"] == "microsoft_graph" for row in frozen_catalog["items"])
+
+    _issue_graph_readiness_row(snapshot, compose, persist_candidate=False)
+    assert bindings_path.read_bytes() == frozen_bindings_bytes
+    assert catalog_path.read_bytes() == frozen_catalog_bytes
+
+    exchange_id = "a" * 64
+    exchange_image_id = _image_id(44)
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+    )
+    receipt.update(
+        {
+            "exchangeContainerId": exchange_id,
+            "exchangeImageId": exchange_image_id,
+            "snapshotSha256": "8" * 64,
+        }
+    )
+    plan = {
+        "imageUpdateTarget": stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "activeServices": {"exchange": {"containerId": exchange_id, "imageId": exchange_image_id}},
+        "candidatePreflight": {"expectedProviderScopeDigests": provider_scope_digests},
+    }
+    journal = {"exchangeReadiness": {"receipt": receipt}}
+    checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+        plan, journal, candidate_compose=compose
+    )
+
+    assert receipt["status"] == "LIVE_VERIFIED"
+    assert receipt["verifiedProviderIds"] == [
+        "azure",
+        "gcp",
+        "huggingface",
+        "microsoft_graph",
+        "runpod",
+    ]
+    assert receipt["connectionRefByProvider"]["microsoft_graph"] == (
+        "77777777-7777-4777-8777-777777777777"
+    )
+    assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
+    assert receipt["bindingCount"] == len(frozen_bindings["bindings"]) + 1 == 16
+    assert receipt["connectionCount"] == len(snapshot["connections"]) == 16
+    assert receipt["profileCount"] == len(snapshot["profiles"]) == 7
+    assert checkpoint["verified"] is True
+    assert checkpoint["bindingCount"] == 16
+    assert checkpoint["connectionCount"] == 16
+    assert checkpoint["profileCount"] == 7
+    assert bindings_path.read_bytes() == frozen_bindings_bytes
+    assert catalog_path.read_bytes() == frozen_catalog_bytes
+
+    duplicate_connection_ref = copy.deepcopy(journal)
+    duplicate_connection_ref["exchangeReadiness"]["receipt"]["connectionRefByProvider"][
+        "microsoft_graph"
+    ] = frozen_bindings["bindings"][0]["connectionRef"]
+    with pytest.raises(stage_transition.StageTransitionError, match="references must be unique"):
+        stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, duplicate_connection_ref, candidate_compose=compose
+        )
+
+    duplicate_profile_ref = copy.deepcopy(journal)
+    duplicate_profile_ref["exchangeReadiness"]["receipt"]["profileRefByProvider"][
+        "microsoft_graph"
+    ] = frozen_bindings["bindings"][0]["profileRef"]
+    with pytest.raises(stage_transition.StageTransitionError, match="references must be unique"):
+        stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, duplicate_profile_ref, candidate_compose=compose
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_profile",
+        "duplicate_profile",
+        "missing_connection",
+        "duplicate_connection",
+        "missing_binding",
+        "duplicate_binding",
+        "missing_catalog",
+        "duplicate_catalog",
+        "changed_non_graph_binding",
+        "changed_non_graph_catalog",
+        "wrong_graph_owner",
+        "wrong_graph_scope",
+        "wrong_graph_operations",
+        "wrong_graph_tool_id",
+        "wrong_graph_tool_projection",
+        "wrong_graph_catalog_schema",
+        "misjoined_graph_catalog",
+    ],
+)
+def test_workspace_authority_graph_bootstrap_rejects_invalid_live_graph_delta(
+    mutation: str, tmp_path: Path
+) -> None:
+    """Reject incomplete, repeated, misjoined, unsafe, or drifting live Graph readiness."""
+
+    snapshot, compose, _database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    _issue_graph_readiness_row(snapshot, compose, persist_candidate=False)
+    graph_profile = next(
+        row for row in snapshot["profiles"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_connection = next(
+        row for row in snapshot["connections"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_binding = next(
+        row for row in snapshot["bindings"] if row["providerId"] == "microsoft_graph"
+    )
+    graph_catalog = next(
+        row for row in snapshot["catalog"]["items"] if row["providerId"] == "microsoft_graph"
+    )
+
+    if mutation == "missing_profile":
+        snapshot["profiles"].remove(graph_profile)
+    elif mutation == "duplicate_profile":
+        snapshot["profiles"].append(copy.deepcopy(graph_profile))
+    elif mutation == "missing_connection":
+        snapshot["connections"].remove(graph_connection)
+    elif mutation == "duplicate_connection":
+        snapshot["connections"].append(copy.deepcopy(graph_connection))
+    elif mutation == "missing_binding":
+        snapshot["bindings"].remove(graph_binding)
+    elif mutation == "duplicate_binding":
+        snapshot["bindings"].append(copy.deepcopy(graph_binding))
+    elif mutation == "missing_catalog":
+        snapshot["catalog"]["items"].remove(graph_catalog)
+    elif mutation == "duplicate_catalog":
+        snapshot["catalog"]["items"].append(copy.deepcopy(graph_catalog))
+    elif mutation == "changed_non_graph_binding":
+        next(row for row in snapshot["bindings"] if row["providerId"] == "runpod")["tools"][0][
+            "resourceProjection"
+        ] = "outside-frozen-scope"
+    elif mutation == "changed_non_graph_catalog":
+        next(row for row in snapshot["catalog"]["items"] if row["providerId"] == "runpod")["tools"][
+            0
+        ]["inputSchema"] = {"type": "string"}
+    elif mutation == "wrong_graph_owner":
+        graph_profile["externalSubject"] = (
+            f"{graph_profile['externalSubject'].split(':', 1)[0]}:"
+            "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        )
+    elif mutation == "wrong_graph_scope":
+        graph_profile["targetScope"]["tenantId"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    elif mutation == "wrong_graph_operations":
+        tool = graph_binding["tools"][0]
+        wrong_operation = "microsoft_graph.todo.task.create"
+        policy = preflight.CONNECTOR_OPERATION_POLICIES[wrong_operation]
+        tool.update(
+            {
+                "toolId": policy[0],
+                "operationId": wrong_operation,
+                "resourceProjection": policy[1],
+                "mutating": policy[2],
+            }
+        )
+        graph_catalog["tools"][0]["id"] = policy[0]
+        graph_catalog["tools"][0]["readOnly"] = not policy[2]
+    elif mutation == "wrong_graph_tool_id":
+        graph_binding["tools"][0]["toolId"] = "microsoft_graph.unrecognized.operation"
+    elif mutation == "wrong_graph_tool_projection":
+        graph_binding["tools"][0]["resourceProjection"] = "profile"
+    elif mutation == "wrong_graph_catalog_schema":
+        graph_catalog["tools"][0]["inputSchema"] = {"type": "string"}
+    elif mutation == "misjoined_graph_catalog":
+        graph_catalog["connectionRef"] = "88888888-8888-4888-8888-888888888888"
+
+    with pytest.raises(stage_transition.StageTransitionError):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        )
+
+
+def test_workspace_authority_graph_bootstrap_rejects_graph_in_frozen_navigator_inputs(
+    tmp_path: Path,
+) -> None:
+    """Never add or accept Graph in the frozen Navigator bootstrap projection."""
+
+    snapshot, compose, _database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    _issue_graph_readiness_row(snapshot, compose)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="Graph-bootstrap inputs must keep Graph bindings/catalog absent",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
+        )
+
+
+def test_workspace_authority_graph_bootstrap_delta_does_not_apply_to_other_targets(
+    tmp_path: Path,
+) -> None:
+    """Keep the one-Graph readiness exception exclusive to Workspace Authority."""
+
+    snapshot, compose, _database_state, _provider_scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    _issue_graph_readiness_row(snapshot, compose, persist_candidate=False)
+
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="live Exchange issued bindings differ from the frozen Navigator binding config",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=snapshot,
+            compose=compose,
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+            account_center_database_state={
+                "databasePathSha256": "1" * 64,
+                "schemaVersion": stage_transition.ACCOUNT_CENTER_DATABASE_USER_VERSION,
+                "schemaSha256": "2" * 64,
+                "foreignKeyViolationCount": 0,
+                "quickCheck": ["ok"],
+                "protectedProviderCount": 5,
+                "protectedProvidersSha256": "3" * 64,
+                "additionalMicrosoftProfileCount": 1,
+                "additionalMicrosoftProfileIdentitySha256": "4" * 64,
+            },
+        )
+
+
 def test_workspace_authority_graph_bootstrap_readiness_requires_linked_profile(
     tmp_path: Path,
 ) -> None:
@@ -9289,7 +9554,10 @@ def test_workspace_authority_graph_bootstrap_readiness_requires_linked_profile(
     )
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="candidate issued binding set differs|exactly one profile and connection for microsoft_graph",
+        match=(
+            "requires one live Graph binding and catalog entry|candidate issued binding set differs|"
+            "exactly one profile and connection for microsoft_graph"
+        ),
     ):
         stage_transition._verify_exchange_readiness_snapshot(
             snapshot=snapshot,

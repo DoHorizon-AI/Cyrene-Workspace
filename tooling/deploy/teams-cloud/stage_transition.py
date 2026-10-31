@@ -10218,6 +10218,11 @@ def _verify_exchange_readiness_snapshot(
     candidate_bindings = _sorted_exchange_bindings(bindings_document.get("bindings"))
     live_catalog = _sorted_exchange_catalog(snapshot.get("catalog"))
     candidate_catalog = _sorted_exchange_catalog(catalog_document)
+    workspace_authority_graph_bootstrap = (
+        not listener_repair
+        and image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
+        and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    )
     if listener_repair:
         _verify_listener_repair_connector_projection(
             snapshot=snapshot,
@@ -10228,6 +10233,57 @@ def _verify_exchange_readiness_snapshot(
             compose=compose,
             include_live_catalog=include_live_catalog,
         )
+    elif workspace_authority_graph_bootstrap:
+        frozen_graph_bindings = [
+            row for row in candidate_bindings if row["providerId"] == "microsoft_graph"
+        ]
+        frozen_graph_catalog = [
+            row for row in candidate_catalog["items"] if row["providerId"] == "microsoft_graph"
+        ]
+        live_graph_bindings = [
+            row for row in live_bindings if row["providerId"] == "microsoft_graph"
+        ]
+        live_graph_catalog = [
+            row for row in live_catalog["items"] if row["providerId"] == "microsoft_graph"
+        ]
+        if frozen_graph_bindings or frozen_graph_catalog:
+            raise StageTransitionError(
+                "Workspace Authority Graph-bootstrap inputs must keep Graph bindings/catalog absent"
+            )
+        if len(live_graph_bindings) != 1 or len(live_graph_catalog) != 1:
+            raise StageTransitionError(
+                "Workspace Authority Graph-bootstrap readiness requires one live Graph binding and catalog entry"
+            )
+        frozen_non_graph_bindings = [
+            row for row in candidate_bindings if row["providerId"] != "microsoft_graph"
+        ]
+        live_non_graph_bindings = [
+            row for row in live_bindings if row["providerId"] != "microsoft_graph"
+        ]
+        frozen_non_graph_catalog = [
+            row for row in candidate_catalog["items"] if row["providerId"] != "microsoft_graph"
+        ]
+        live_non_graph_catalog = [
+            row for row in live_catalog["items"] if row["providerId"] != "microsoft_graph"
+        ]
+        if _canonical_json(live_non_graph_bindings) != _canonical_json(frozen_non_graph_bindings):
+            raise StageTransitionError(
+                "live Exchange non-Graph bindings differ from the frozen Navigator binding config"
+            )
+        if _canonical_json(live_non_graph_catalog) != _canonical_json(frozen_non_graph_catalog):
+            raise StageTransitionError(
+                "live non-Graph tool catalog differs from the frozen Navigator catalog config"
+            )
+        graph_binding = live_graph_bindings[0]
+        graph_catalog_item = live_graph_catalog[0]
+        if (
+            graph_catalog_item["bindingId"] != graph_binding["bindingId"]
+            or graph_catalog_item["connectionRef"] != graph_binding["connectionRef"]
+            or graph_catalog_item["profileRef"] != graph_binding["profileRef"]
+        ):
+            raise StageTransitionError(
+                "live Graph catalog entry does not join to its single binding"
+            )
     else:
         if _canonical_json(live_bindings) != _canonical_json(candidate_bindings):
             raise StageTransitionError(
@@ -10338,7 +10394,11 @@ def _verify_exchange_readiness_snapshot(
         if graph_service_configured and not account_center_graph_unissued:
             expected_provider_ids.add("microsoft_graph")
     bindings_by_provider: dict[str, dict[str, Any]] = {}
-    provider_binding_rows = live_bindings if listener_repair else bindings_document["bindings"]
+    provider_binding_rows = (
+        live_bindings
+        if listener_repair or workspace_authority_graph_bootstrap
+        else bindings_document["bindings"]
+    )
     for row in provider_binding_rows:
         if isinstance(row, dict) and row.get("providerId") in expected_provider_ids:
             provider_id = row["providerId"]
@@ -10515,6 +10575,16 @@ def _verify_exchange_readiness_snapshot(
                     "candidate Exchange Graph Office v2 scope is unavailable"
                 )
             try:
+                graph_binding_document = {"schemaVersion": 1, "bindings": [binding]}
+                preflight._validate_connector_bindings_document(
+                    graph_binding_document, {"microsoft_graph"}
+                )
+                if include_live_catalog:
+                    preflight._validate_connector_tool_catalog_documents(
+                        {"schemaVersion": 1, "items": [catalog_item]},
+                        graph_binding_document,
+                        {"microsoft_graph"},
+                    )
                 preflight._validate_office_v2_host_scope(graph_office_scope, compose)
                 graph_operations = preflight._graph_operations_for_office_scope(graph_office_scope)
                 preflight._validate_new_provider_bindings_readonly(
@@ -11058,20 +11128,66 @@ def _image_update_exchange_readiness_checkpoint(
             )
         binding_document = _candidate_config_json(candidate_compose, "connector-bindings")
         binding_rows = _sorted_exchange_bindings(binding_document.get("bindings"))
-        if sum(row["providerId"] == "microsoft_graph" for row in binding_rows) != 1:
-            raise StageTransitionError(
-                "Workspace Authority readiness requires the one configured Microsoft Graph binding"
+        if plan["phase"] == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+            catalog_document = _candidate_config_json(candidate_compose, "connector-tool-catalog")
+            if "microsoft_graph" in expected_scope_digests:
+                raise StageTransitionError(
+                    "Graph-bootstrap readiness must keep Graph outside the frozen scope inventory"
+                )
+            catalog_rows = _sorted_exchange_catalog(catalog_document)
+            if any(row["providerId"] == "microsoft_graph" for row in binding_rows) or any(
+                row["providerId"] == "microsoft_graph" for row in catalog_rows["items"]
+            ):
+                raise StageTransitionError(
+                    "Workspace Authority Graph-bootstrap inputs must keep Graph bindings/catalog absent"
+                )
+            refs = receipt.get("connectionRefByProvider")
+            profile_refs = receipt.get("profileRefByProvider")
+            graph_connection_ref = refs.get("microsoft_graph") if isinstance(refs, dict) else None
+            graph_profile_ref = (
+                profile_refs.get("microsoft_graph") if isinstance(profile_refs, dict) else None
             )
-        connection_refs_from_bindings = [row["connectionRef"] for row in binding_rows]
-        if len(set(connection_refs_from_bindings)) != len(connection_refs_from_bindings):
-            raise StageTransitionError(
-                "Workspace Authority candidate bindings must have unique connection references"
+            if (
+                not isinstance(graph_connection_ref, str)
+                or not isinstance(graph_profile_ref, str)
+                or not graph_profile_ref
+            ):
+                raise StageTransitionError(
+                    "Workspace Authority Graph-bootstrap readiness lacks the validated live Graph join"
+                )
+            connection_refs_from_bindings = [row["connectionRef"] for row in binding_rows]
+            profile_refs_from_bindings = {row["profileRef"] for row in binding_rows}
+            if (
+                len(set(connection_refs_from_bindings)) != len(connection_refs_from_bindings)
+                or graph_connection_ref in connection_refs_from_bindings
+                or graph_profile_ref in profile_refs_from_bindings
+            ):
+                raise StageTransitionError(
+                    "Workspace Authority Graph-bootstrap references must be unique from frozen bindings"
+                )
+            expected_binding_count = len(binding_rows) + 1
+            expected_connection_count = len(
+                set(connection_refs_from_bindings) | {graph_connection_ref}
             )
-        expected_binding_count = len(binding_rows)
-        expected_connection_count = len(set(connection_refs_from_bindings))
-        expected_profile_count = len(
-            {(row["providerId"], row["profileRef"]) for row in binding_rows}
-        )
+            expected_profile_count = len(
+                {(row["providerId"], row["profileRef"]) for row in binding_rows}
+                | {("microsoft_graph", graph_profile_ref)}
+            )
+        else:
+            if sum(row["providerId"] == "microsoft_graph" for row in binding_rows) != 1:
+                raise StageTransitionError(
+                    "Workspace Authority readiness requires the one configured Microsoft Graph binding"
+                )
+            connection_refs_from_bindings = [row["connectionRef"] for row in binding_rows]
+            if len(set(connection_refs_from_bindings)) != len(connection_refs_from_bindings):
+                raise StageTransitionError(
+                    "Workspace Authority candidate bindings must have unique connection references"
+                )
+            expected_binding_count = len(binding_rows)
+            expected_connection_count = len(set(connection_refs_from_bindings))
+            expected_profile_count = len(
+                {(row["providerId"], row["profileRef"]) for row in binding_rows}
+            )
         expected_verified_provider_ids = expected_monitor_providers
         refs = receipt.get("connectionRefByProvider")
         connection_refs = refs if isinstance(refs, dict) else {}
