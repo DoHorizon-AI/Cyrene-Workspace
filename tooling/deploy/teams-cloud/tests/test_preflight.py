@@ -2024,7 +2024,9 @@ def test_antigravity_acp_requires_the_locked_image_profile_labels(
     }
     config = {"services": {"navigator": {"image": image}}}
     labels = dict(preflight.ANTIGRAVITY_ACP_IMAGE_LABELS)
-    inspected = [{"Id": image_id, "Config": {"Labels": labels}}]
+    inspected = [
+        {"Id": image_id, "Os": "linux", "Architecture": "arm64", "Config": {"Labels": labels}}
+    ]
     calls: list[list[str]] = []
 
     def inspect(argv: list[str], *, capture: bool = True) -> str:
@@ -2050,6 +2052,115 @@ def test_antigravity_acp_requires_the_locked_image_profile_labels(
             },
             ["docker"],
         )
+
+
+def test_antigravity_acp_capability_only_cli_needs_no_runtime_or_auth_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify the standby bundle from its exact image lock without Compose or provider auth."""
+
+    image = "ghcr.io/cyrene/dsh-executor@sha256:" + "b" * 64
+    image_id = "sha256:" + "a" * 64
+    image_lock = tmp_path / "image-lock.json"
+    image_lock.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "cyrene-teams-cloud-image-lock-v1",
+                "targetPlatform": "linux/arm64",
+                "images": [
+                    {
+                        "service": "dsh-executor",
+                        "image": image,
+                        "imageId": image_id,
+                        "platform": "linux/arm64",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    image_lock.chmod(0o600)
+    labels = dict(preflight.ANTIGRAVITY_ACP_STANDBY_IMAGE_LABELS)
+    inspected = [
+        {
+            "Id": image_id,
+            "Os": "linux",
+            "Architecture": "arm64",
+            "Config": {"Labels": labels},
+        }
+    ]
+    calls: list[list[str]] = []
+
+    def inspect(argv: list[str], *, capture: bool = True) -> str:
+        calls.append(argv)
+        assert capture is True
+        return json.dumps(inspected)
+
+    monkeypatch.setattr(preflight, "_private_artifact", lambda _path: True)
+    monkeypatch.setattr(preflight, "_run", inspect)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "preflight.py",
+            "--capability-only",
+            "antigravity-acp",
+            "--image-lock",
+            str(image_lock),
+            "--docker-prefix",
+            "docker",
+        ],
+    )
+
+    assert preflight.main() == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "capabilities": {"antigravity-acp": "1.4.5", "codebuddy": "2.163.0"},
+        "image": image,
+        "imageId": image_id,
+        "state": "CAPABILITY_LABELS_VERIFIED",
+        "targetPlatform": "linux/arm64",
+    }
+    assert calls == [["docker", "image", "inspect", image]]
+
+
+def test_antigravity_acp_standby_capability_rejects_codebuddy_only_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reject an old CodeBuddy release image until the pinned AGY pair is built into it."""
+
+    image = "ghcr.io/cyrene/dsh-executor:codebuddy"
+    image_id = "sha256:" + "a" * 64
+    image_lock = {
+        "schemaVersion": "cyrene-teams-cloud-image-lock-v1",
+        "targetPlatform": "linux/arm64",
+        "images": [
+            {
+                "service": "dsh-executor",
+                "image": image,
+                "imageId": image_id,
+                "platform": "linux/arm64",
+            }
+        ],
+    }
+    labels = {"com.cyrene.navigator.capability.codebuddy.version": "2.163.0"}
+    monkeypatch.setattr(
+        preflight,
+        "_run",
+        lambda *_args, **_kwargs: json.dumps(
+            [
+                {
+                    "Id": image_id,
+                    "Os": "linux",
+                    "Architecture": "arm64",
+                    "Config": {"Labels": labels},
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(preflight.PreflightError, match="declare both pinned runtime capabilities"):
+        preflight._validate_antigravity_acp_standby_capability(image_lock, ["docker"])
 
 
 def test_antigravity_acp_compose_profile_and_owner_directory_are_closed(

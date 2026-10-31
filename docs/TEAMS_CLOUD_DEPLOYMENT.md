@@ -468,6 +468,28 @@ Before enabling background work, back up the current service configuration, imag
 
 原生 CodeBuddy ACP 是独立可选项，按顺序叠加 `compose.yaml`、`compose.computer-runtime.yaml` 和 `compose.codebuddy-acp.yaml`，并在私有 runtime env 后加载 `config/codebuddy-acp.env.template`。不要与 `compose.proactive-assistant-v1.yaml` 叠加。它选择 `CYRENE_HARNESS_EXECUTION_BACKEND=codebuddy-acp`、精确的 `codebuddy` 可执行文件，以及 `glm-5.3-flash` 或 `deepseek-v4.1-flash`；旧 Harness model source 会清空，fallback 关闭。CodeBuddy CLI 状态继续保存在服务专属 owner-only `secrets/codebuddy` 中；预检验证目录 owner/权限，但不读取文件，也不能证明供应商账号身份。`CYRENE_HARNESS_CODEBUDDY_NO_PAID_TOPUP=true` 是 owner 的部署声明。CodeBuddy 已发布的 CLI 接口没有经过验证的设置可阻止账号 credits 被使用，因此不能把该变量当作扣费保证。
 
+The default CodeBuddy executor image now also includes the official Antigravity ACP 1.4.5 executable and its `localharness_external` sibling. A separate build stage downloads the architecture-matched Google archive and verifies its fixed SHA-256 before installing both files. This leaves the existing CodeBuddy CLI, `.codebuddy` profile, default model/runtime configuration, and active backend selection intact; it does not create or mount an Antigravity profile. Run the capability-only check against the exact private image lock after the image is built or loaded:
+
+```sh
+python3 tooling/deploy/teams-cloud/preflight.py \
+  --capability-only antigravity-acp \
+  --image-lock "$ARTIFACTS/image-lock.json" \
+  --docker-prefix docker
+```
+
+The check requires only the image lock and Docker image metadata. It does not load Compose or environment files, inspect CodeBuddy or Google login state, select Antigravity, establish entitlement, or report deployment acceptance. The normal immutable release workflow uses native ARM64 CI and packages the six-image release; exact source pins, the image lock, immutable manifest, publication proof, and canonical remote read-back form its evidence chain. The source recipe downloads Google binaries only during an explicit image build; neither binary is committed.
+
+默认 CodeBuddy 执行镜像也包含 Google 官方 Antigravity ACP 1.4.5 主程序及其 `localharness_external` 伴随可执行文件。独立构建阶段会按目标架构下载 Google 官方归档，并在安装前校验固定 SHA-256。现有 CodeBuddy CLI、`.codebuddy` profile、默认模型/运行时配置和活动 backend 选择保持不变；镜像不会创建或挂载 Antigravity profile。构建或加载镜像后，使用确切的私有 image lock 运行仅检查能力的预检：
+
+```sh
+python3 tooling/deploy/teams-cloud/preflight.py \
+  --capability-only antigravity-acp \
+  --image-lock "$ARTIFACTS/image-lock.json" \
+  --docker-prefix docker
+```
+
+该检查只需 image lock 与 Docker 镜像元数据，不读取 Compose 或环境文件，不检查 CodeBuddy/Google 登录状态，不选择 Antigravity，也不证明 entitlement 或部署验收。常规不可变发行流程使用原生 ARM64 CI 构建六镜像发行包；精确源码 pin、image lock、不可变 manifest、发布证明和 canonical 远端回读构成发行证据链。源码 recipe 只在显式构建镜像时下载 Google 二进制；两个二进制均不提交到仓库。
+
 The standalone Antigravity ACP profile is a separate explicit opt-in: compose the base file, `compose.computer-runtime.yaml`, then `compose.antigravity-acp.yaml`, and load `config/antigravity-acp.env.template` after the private runtime env. Use Compose v2.24 or later because the overlay uses `!override` to remove the base CodeBuddy login bind while retaining Navigator session and Teams authorization mounts. The authenticated owner inventory advertised `gemini-3.8-flash`, so the template recommends that exact ID; Navigator rereads session options and fails closed if it is absent. An empty model selector uses the ACP server's native default. The Google binary recipe fetches proprietary Antigravity ACP 1.4.5 from Google's release host and checks its x86_64 or ARM64 archive SHA-256 before installing both `agy_acp_server.par` and its executable `localharness_external` sibling into `/usr/local/bin`; see `tooling/deploy/teams-cloud/config/antigravity-acp-third-party-notice.md`. Neither binary is stored in this repository.
 
 Prepare a private copy of the build plan under the umbrella `.artifacts` directory, set a unique `taskId`, and replace both null source commits with the exact reviewed Workspace and Navigator SHAs. Then run the local-only ARM64 builder:
