@@ -66,6 +66,7 @@ LOCK_SERVICE_FOR_TARGET = {
     "navigator": "dsh-executor",
     "account-center": "account-center",
     "exchange": "exchange",
+    "microsoft-graph": "microsoft-graph",
     "cloud-management-phase2": "cloud-management",
     "workspace-authority": "workspace-authority",
 }
