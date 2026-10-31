@@ -71,6 +71,13 @@ def test_formal_stage_compose_targets_build_closed_no_image_io_argv_without_cli_
     assert runtime_update.FORMAL_STAGE_TRANSITION_TARGETS == approved
     assert runtime_update.TARGET_ORDER == ("github-issues", "exchange", "navigator")
     assert runtime_update.ALLOWED_TARGETS == set(runtime_update.TARGET_ORDER)
+    assert (
+        runtime_update.LOCK_SERVICE_FOR_TARGET[stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET]
+        == "microsoft-graph"
+    )
+    assert (
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET not in runtime_update.ALLOWED_TARGETS
+    )
 
     captured: list[tuple[list[str], float, bool]] = []
 

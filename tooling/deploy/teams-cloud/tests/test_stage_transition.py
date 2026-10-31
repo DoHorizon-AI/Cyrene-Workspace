@@ -1978,6 +1978,39 @@ def test_workspace_authority_is_not_a_generic_issued_activation_target(tmp_path:
     )
 
 
+def test_microsoft_graph_image_update_is_limited_to_graph_bootstrap(tmp_path: Path) -> None:
+    """The Graph target is formal-stage-only and never enters legacy runtime update CLI scope."""
+
+    active, _unused_candidate, active_lock, _unused_candidate_lock = (
+        _full_account_center_image_update(tmp_path)
+    )
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    target = stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
+    candidate_ref = "example.invalid/microsoft-graph:bootstrap-update"
+    candidate["services"][target]["image"] = candidate_ref
+    graph_row = next(row for row in candidate_lock["images"] if row["service"] == target)
+    graph_row["image"] = candidate_ref
+    graph_row["imageId"] = _image_id(158)
+
+    for phase in ("provider-bootstrap", "issued-connector-activation"):
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="Microsoft Graph image updates require the selected Graph provider-bootstrap phase",
+        ):
+            stage_transition._validate_phase_topology(
+                phase=phase,
+                image_update_target=target,
+                active=active,
+                candidate=candidate,
+                active_lock=active_lock,
+                candidate_lock=candidate_lock,
+            )
+
+    assert target in stage_transition.IMAGE_UPDATE_TARGETS
+    assert target not in runtime_update.ALLOWED_TARGETS
+
+
 @pytest.mark.parametrize(
     ("target", "phase"),
     [
@@ -1993,12 +2026,16 @@ def test_workspace_authority_is_not_a_generic_issued_activation_target(tmp_path:
             stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
             stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         ),
+        (
+            stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
     ],
 )
 def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     target: str, phase: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Validate Authority and Exchange continuations as one exact 15-service image delta."""
+    """Validate Graph, Authority, and Exchange image continuations against one 15-service delta."""
 
     active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
         tmp_path
@@ -2097,7 +2134,11 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     expected_error = (
         f"Workspace Authority image update changes an unselected image: {unselected_service}"
         if target == stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
-        else f"Exchange Graph-bootstrap image update changes an unselected image: {unselected_service}"
+        else (
+            f"Exchange Graph-bootstrap image update changes an unselected image: {unselected_service}"
+            if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET
+            else f"Microsoft Graph image update changes an unselected image: {unselected_service}"
+        )
     )
     with pytest.raises(
         stage_transition.StageTransitionError,
@@ -2105,7 +2146,10 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     ):
         stage_transition._validate_plan(changed)
 
-    if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET:
+    if target in {
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+    }:
         wrong_budget = copy.deepcopy(plan)
         wrong_budget["candidatePreflight"]["maxCpus"] = 1.90
         wrong_budget["planSha256"] = stage_transition._sha256_bytes(
@@ -4687,7 +4731,7 @@ def test_image_update_rejects_unchanged_or_unknown_targets(tmp_path: Path) -> No
     active, candidate, active_lock, candidate_lock = _active_image_update("exchange", tmp_path)
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Navigator, Persistence, or Workspace Authority",
+        match="must be Account Center, Cloud Management, Exchange, GitHub Issues, Hugging Face, Microsoft Graph, Navigator, Persistence, or Workspace Authority",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -4766,6 +4810,7 @@ def test_stage_transition_cli_closes_image_update_target_choices() -> None:
         "exchange",
         "github-issues",
         "huggingface",
+        "microsoft-graph",
         "navigator",
         "navigator-persistence",
         "workspace-authority",
@@ -9330,12 +9375,13 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
     [
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_changing_nav_inputs(
     target: str, tmp_path: Path
 ) -> None:
-    """Verify one live Graph delta for the two approved targets without changing Navigator inputs."""
+    """Verify the live Graph delta without adding Graph to frozen Navigator inputs."""
 
     snapshot, compose, _database_state, provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9394,7 +9440,41 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
                 "maxCpus": 1.95,
             }
         )
-    journal = {"exchangeReadiness": {"receipt": receipt}}
+    journal: dict[str, Any] = {"exchangeReadiness": {"receipt": receipt}}
+    if target == stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET:
+        graph_container_id = "e" * 64
+        graph_image_id = _image_id(46)
+        candidate_graph_image_id = _image_id(47)
+        plan["activeServices"][target] = {
+            "containerId": graph_container_id,
+            "imageId": graph_image_id,
+        }
+        plan["candidateServices"] = {
+            target: {
+                "active": {"imageRef": "graph:old", "imageId": graph_image_id},
+                "candidate": {"imageRef": "graph:new", "imageId": candidate_graph_image_id},
+                "added": False,
+                "configChanged": False,
+            }
+        }
+        plan["candidatePreflight"].update(
+            {
+                "composeCgroupMemoryLimitMiB": 3584,
+                "composeCgroupCpuLimit": 1.95,
+                "maxMemoryMiB": 3584,
+                "maxCpus": 1.95,
+            }
+        )
+        journal["targetProgress"] = {
+            target: {
+                "phase": "PREPARED",
+                "oldContainerId": graph_container_id,
+                "oldImageId": graph_image_id,
+                "candidateImageId": candidate_graph_image_id,
+                "candidateContainerId": None,
+                "applyIntent": False,
+            }
+        }
     checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
         plan, journal, candidate_compose=compose
     )
@@ -9418,6 +9498,9 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
     assert checkpoint["bindingCount"] == 16
     assert checkpoint["connectionCount"] == 16
     assert checkpoint["profileCount"] == 7
+    if target == stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET:
+        assert checkpoint["microsoftGraphContainerId"] == graph_container_id
+        assert checkpoint["microsoftGraphImageId"] == graph_image_id
     assert bindings_path.read_bytes() == frozen_bindings_bytes
     assert catalog_path.read_bytes() == frozen_catalog_bytes
 
@@ -9463,6 +9546,40 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
                 plan, unapplied_candidate, candidate_compose=compose
             )
 
+    if target == stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET:
+        candidate_container_id = "f" * 64
+        after_receipt = copy.deepcopy(receipt)
+        after_journal = {
+            "exchangeReadiness": {"receipt": after_receipt},
+            "targetProgress": {
+                target: {
+                    "phase": "APPLIED",
+                    "oldContainerId": graph_container_id,
+                    "oldImageId": graph_image_id,
+                    "candidateImageId": candidate_graph_image_id,
+                    "candidateContainerId": candidate_container_id,
+                    "healthyContainerId": candidate_container_id,
+                    "applyIntent": False,
+                }
+            },
+        }
+        after_checkpoint = stage_transition._image_update_exchange_readiness_checkpoint(
+            plan, after_journal, candidate_compose=compose
+        )
+        assert after_checkpoint["verified"] is True
+        assert after_checkpoint["microsoftGraphContainerId"] == candidate_container_id
+        assert after_checkpoint["microsoftGraphImageId"] == candidate_graph_image_id
+
+        inconsistent_candidate = copy.deepcopy(after_journal)
+        inconsistent_candidate["targetProgress"][target]["healthyContainerId"] = "d" * 64
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="post-update readiness lacks the exact applied candidate identity",
+        ):
+            stage_transition._image_update_exchange_readiness_checkpoint(
+                plan, inconsistent_candidate, candidate_compose=compose
+            )
+
     duplicate_connection_ref = copy.deepcopy(journal)
     duplicate_connection_ref["exchangeReadiness"]["receipt"]["connectionRefByProvider"][
         "microsoft_graph"
@@ -9487,6 +9604,7 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
     [
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
     ],
 )
 @pytest.mark.parametrize(
@@ -9603,6 +9721,7 @@ def test_graph_bootstrap_image_update_rejects_invalid_live_graph_delta(
     [
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_update_rejects_graph_in_frozen_navigator_inputs(
@@ -9669,12 +9788,13 @@ def test_workspace_authority_graph_bootstrap_delta_does_not_apply_to_other_targe
     [
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
     ],
 )
 def test_graph_bootstrap_image_readiness_requires_linked_profile(
     target: str, tmp_path: Path
 ) -> None:
-    """Do not let either approved image target use the pre-OAuth empty Graph path."""
+    """Do not let an approved image target use the pre-OAuth empty Graph path."""
 
     snapshot, compose, _database_state, _provider_scope_digests = (
         _account_center_unissued_graph_readiness_fixture(
@@ -9696,8 +9816,15 @@ def test_graph_bootstrap_image_readiness_requires_linked_profile(
         )
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
+    ],
+)
 def test_exchange_graph_bootstrap_live_graph_delta_is_not_allowed_in_issued_phase(
-    tmp_path: Path,
+    target: str, tmp_path: Path
 ) -> None:
     """Keep the live-only Graph row exception restricted to the exact bootstrap phase."""
 
@@ -9716,7 +9843,7 @@ def test_exchange_graph_bootstrap_live_graph_delta_is_not_allowed_in_issued_phas
             snapshot=snapshot,
             compose=compose,
             phase="issued-connector-activation",
-            image_update_target=stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+            image_update_target=target,
         )
 
 
@@ -10321,6 +10448,57 @@ def test_exchange_graph_bootstrap_image_update_journal_tracks_readiness_checkpoi
     summary = stage_transition._journal_summary(journal)
     assert summary["exchangeImageUpdateRequired"] is True
     assert summary["exchangeImageUpdateStatus"] == "VERIFIED"
+
+
+def test_microsoft_graph_image_update_journal_tracks_readiness_checkpoints(
+    tmp_path: Path,
+) -> None:
+    """Expose the before/after native readiness checks for the Graph image target."""
+
+    plan_path = tmp_path / "plan.json"
+    plan_path.write_text("{}", encoding="utf-8")
+    target = stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
+    plan = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "imageUpdateTarget": target,
+        "targets": [target],
+        "activeServices": {target: {"containerId": "b" * 64}},
+        "candidateServices": {
+            target: {
+                "active": {"imageId": _image_id(10)},
+                "candidate": {"imageId": _image_id(11)},
+                "added": False,
+                "configChanged": False,
+            }
+        },
+        "edgeDelivery": {"containerId": "c" * 64, "revision": 0, "deadCount": 0},
+        "navigatorDrain": {
+            "containerId": "d" * 64,
+            "instanceId": "11111111-1111-4111-8111-111111111111",
+            "generation": 0,
+        },
+        "database": {"backupPath": "/private/persistence.snapshot"},
+        "exchangeReadiness": {"required": True},
+        "candidateSelectionFile": "/private/runtime-selection.json",
+        "selectionBackupPath": "/private/previous-selection.json",
+        "activeSelection": {"sha256": None},
+    }
+
+    journal = stage_transition._make_journal(plan, plan_path)
+    assert journal["microsoftGraphImageUpdate"]["required"] is True
+    journal["state"] = "APPLIED"
+    journal["microsoftGraphImageUpdate"].update(
+        {"beforeReadiness": {"verified": True}, "afterReadiness": {"verified": True}}
+    )
+
+    summary = stage_transition._journal_summary(journal)
+    assert summary["microsoftGraphImageUpdateRequired"] is True
+    assert summary["microsoftGraphImageUpdateStatus"] == "VERIFIED"
+    assert summary["microsoftGraphBeforeReadinessStatus"] == "LIVE_VERIFIED"
+    assert summary["microsoftGraphAfterReadinessStatus"] == "LIVE_VERIFIED"
 
 
 def test_account_center_image_update_journal_reports_readonly_database_and_readiness_gates(
