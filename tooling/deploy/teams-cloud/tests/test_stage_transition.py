@@ -1585,7 +1585,7 @@ def test_office_graph_account_center_only_appends_graph_lease_role() -> None:
         stage_transition._validate_office_graph_account_center_config_delta(active, candidate)
 
 
-def test_exchange_graph_readiness_uses_unix_expiry_metadata() -> None:
+def test_exchange_graph_readiness_accepts_revision_zero_and_uses_unix_expiry_metadata() -> None:
     profile = {
         "profileRef": "opaque-profile",
         "profileAlias": "microsoft-graph-office",
@@ -1594,7 +1594,7 @@ def test_exchange_graph_readiness_uses_unix_expiry_metadata() -> None:
         "accessMode": "actor_owned",
         "targetScope": {"schemaVersion": 2},
         "authMode": "delegated_oauth",
-        "credentialRevision": 1,
+        "credentialRevision": 0,
         "externalSubject": "11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222",
         "scopeSchemaVersion": 2,
         "enabledFeatures": ["planner_read"],
@@ -1619,6 +1619,19 @@ def test_exchange_graph_readiness_uses_unix_expiry_metadata() -> None:
     stage_transition._assert_exchange_readiness_safe_shape(snapshot)
 
     profile["credentialExpiresAt"] = "2027-01-15T00:00:00Z"
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="profile metadata is malformed"
+    ):
+        stage_transition._assert_exchange_readiness_safe_shape(snapshot)
+
+    profile["credentialExpiresAt"] = 1_800_000_000
+    profile["credentialRevision"] = True
+    with pytest.raises(
+        stage_transition.StageTransitionError, match="profile metadata is malformed"
+    ):
+        stage_transition._assert_exchange_readiness_safe_shape(snapshot)
+
+    profile["credentialRevision"] = -1
     with pytest.raises(
         stage_transition.StageTransitionError, match="profile metadata is malformed"
     ):
