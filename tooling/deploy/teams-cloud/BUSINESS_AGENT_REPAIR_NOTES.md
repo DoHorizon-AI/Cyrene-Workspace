@@ -94,6 +94,36 @@ checks. A missing/null field must yield a clear contract error rather than an
 unhandled `.lower()` failure. See Microsoft's
 [definition contract](https://learn.microsoft.com/en-us/graph/api/resources/teamsappdefinition?view=graph-rest-1.0).
 
+## Private registry archives and bounded VM retention
+
+Use a private OCI registry for historical runtime images. Retain the current
+selected images and the reviewed recent rollback set on the VM; archive older
+images before considering local eviction. Sessions, credentials and databases
+remain in their existing persistent stores and are not image backups.
+
+For each archived image, record the original local reference, Docker image ID,
+platform, source revision, immutable registry manifest digest and config digest.
+These identifiers are distinct: a containerd image store can report the manifest
+digest as its Docker image ID. A real authenticated pull must preserve the
+expected local identity; do not assume that image ID always equals config hash.
+Verify private visibility and denied anonymous access before uploading runtime
+data. Establish the archive package without inheriting a public repository's
+access permissions; keep upload credentials off the VM. A temporary,
+repository-scoped pull token can verify recovery without giving the VM package
+write permission. Remove that temporary credential after the check.
+
+Local retirement requires fresh container references, current selector and
+rollback-lock checks, verified remote recovery, and an exact image-ID plan.
+Remove only unused reviewed images; do not use broad image/volume pruning or
+delete an active or unarchived rollback image. Restore the original local tag
+and verify the expected image ID before using an older saved deployment plan.
+A registry archive receipt does not turn a `LOCAL_ONLY` candidate into an
+approved full-stack release or replace the existing deployment/provenance gates.
+
+Operator-authenticated recovery and unattended registry authorization are
+separate capabilities. Do not claim that server-side credential renewal or
+automatic CD is configured merely because a manual push and pull succeeded.
+
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
@@ -145,3 +175,19 @@ readiness。不能只放宽 allowlist；普通 provider-bootstrap 仍拒绝，�
 发布个人应用时，Graph 生成的 catalog ID 用于接口路径；definition 的 teamsAppId
 是清单里的 manifest ID，不能互换。缺失或 null 应给明确合同错误，避免模糊异常
 和重复授权。个人发布流程的授权、真实 Graph 结果和撤销回读仍单独验收。
+
+### 镜像远端归档与 VM 保留范围
+
+历史镜像放到私有 OCI 仓库，VM 保留当前选择器使用的镜像和已审核的近期回退集。
+会话、凭据与数据库仍在原持久存储中，不能把镜像归档当作这些数据的备份。
+
+逐镜像记录原 tag、Docker image ID、架构、源码版本、registry manifest digest 和
+config digest。containerd 可能以 manifest digest 作为 image ID；必须真实拉取
+核验，不能固定假设 image ID 就是 config hash。先验证私有访问与匿名拒绝，
+避免归档仓库继承公开源码仓库的读取权限；上传凭据不放到 VM，验证拉取使用
+临时、限定仓库的只读 token 并在结束后移除。
+
+清理前重新核对容器引用、当前选择器和回退锁、远端恢复证据及精确 image ID。
+只删除已审核且未使用的旧副本，不运行全局 image/volume prune。恢复历史计划前
+先拉取固定 digest、恢复原本地 tag 并核对 ID；远端归档不绕过已有发布与部署门禁。
+人工授权下推送/拉取通过，不等于已经配置无人值守续期或自动 CD。
