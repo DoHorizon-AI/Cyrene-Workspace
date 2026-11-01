@@ -5,10 +5,10 @@ and bounded cloud-acceptance helpers for the Cyrene Teams workload.
 
 本目录提供 Cyrene Teams 工作负载的受控 ARM64 构建、运行编排、主机预检和有预算上限的云端验收工具。
 
-For unattended publication, Azure CD, safe VM reconciliation and real acceptance,
-read [Automatic deployment](AUTOMATIC_DEPLOYMENT.md).
+For source publication, the currently disabled manual Azure CD bridge, safe VM
+reconciliation and real acceptance, read [Automatic deployment](AUTOMATIC_DEPLOYMENT.md).
 
-自动发布、Azure CD、安全续跑及真实验收请见[自动部署说明](AUTOMATIC_DEPLOYMENT.md)。
+源码自动发布、当前禁用的手动 Azure CD 桥接、安全续跑及真实验收请见[自动部署说明](AUTOMATIC_DEPLOYMENT.md)。
 
 The existing nominal 4 GiB VM may report less RAM in Linux `MemTotal` after
 firmware/kernel reservations. Host recognition requires at least 3584 MiB of

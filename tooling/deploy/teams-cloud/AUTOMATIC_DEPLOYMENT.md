@@ -5,18 +5,28 @@ managed ARM64 images from exact, green `develop` source commits. Azure Pipelines
 verifies the immutable publication and invokes the existing VM update engine.
 Azure does not check out sources, rebuild images, or run a second source test lane.
 
+For the current local-only migration, the Azure CD bridge in
+`.github/workflows/teams-cloud-cd.yml` accepts manual dispatch only. The repository
+variable `CYRENE_TEAMS_AZDO_CD_ENABLED` remains `false`, and the job requires it to
+be `true`; merging code or publishing an image therefore does not start the Azure
+pipeline. Do not dispatch this bridge during local acceptance.
+
 发布和部署职责分开：GitHub Actions 从各仓库当前 `develop` 的精确绿色提交构建六个 ARM64
 镜像；Azure Pipelines 验证不可变发布后调用现有 VM 更新引擎，不重复检出、构建或做源码 CI。
+当前本地迁移期间，`.github/workflows/teams-cloud-cd.yml` 仅接受手动 dispatch；仓库变量
+`CYRENE_TEAMS_AZDO_CD_ENABLED` 保持为 `false`，且任务仍要求该变量为 `true` 才运行。因此合并
+代码或发布镜像不会启动 Azure pipeline。本地验收期间不要手动 dispatch 该桥接工作流。
 
 ```mermaid
 flowchart LR
   A[Green canonical source CI] --> B[Native ARM64 build]
   B --> C[Immutable release and run-bound proof]
-  C --> D[Verified HMAC event]
-  D --> E[Azure CD artifact verification]
-  E --> F[VM canonical plan and apply]
-  F --> G[Actual images and connector reads]
-  G --> H[Selector and observation read-back]
+  C --> D[Manual bridge dispatch]
+  D --> E[Verified HMAC event]
+  E --> F[Azure CD artifact verification]
+  F --> G[VM canonical plan and apply]
+  G --> H[Actual images and connector reads]
+  H --> I[Selector and observation read-back]
 ```
 
 ## Ownership and artifacts / 职责与发布物
@@ -66,16 +76,17 @@ publication receives a new publication identity; an immutable tag is never rewri
    of this lane.
 5. Create an Azure pipeline for `ci/teams-cloud-cd.yml`, authorize only its two
    connections, and set GitHub secret `CYRENE_TEAMS_AZDO_WEBHOOK_SECRET` to the same
-   dedicated HMAC value. Finally set repository variable
-   `CYRENE_TEAMS_AZDO_CD_ENABLED=true`. The bridge stays disabled before this step.
+   dedicated HMAC value. Set `CYRENE_TEAMS_AZDO_CD_ENABLED=true` only through a
+   separate reviewed deployment change; keep it `false` during local-only work.
 6. Verify one real publication and cutover, a duplicate delivery, a safe
    pre-mutation retry and an explicitly uncertain-operation hold. Local fixtures
    and source CI are not VM or external-provider acceptance evidence.
 
 一次性在服务端配置 owner、已绑定查询目标、私有策略文件、部署身份和 webhook。提供者凭据
 继续留在原服务存储中，不搬进发布包。Azure 只取得现有 VM 必要的读取/RunCommand 权限，
-不会扩容或创建计算资源。全部配置并验收后才开启 GitHub 启用变量；后续发布使用短期工作负载
-身份，无需每次个人登录。首次验收必须是真实发布/VM 操作，不能拿本地模拟测试替代。
+不会扩容或创建计算资源。全部配置并验收后，只能通过单独审查的部署变更开启 GitHub 启用变量；
+本地迁移期间保持 `false`。后续发布使用短期工作负载身份，无需每次个人登录。首次验收必须是真实
+发布/VM 操作，不能拿本地模拟测试替代。
 
 Source merges trigger Workspace publication. The scheduled source check also
 detects changes in Navigator, Exchange and Plugins; an unchanged successful
