@@ -76,7 +76,7 @@ Before starting product services, attach their acceptance containers to the exis
 
 ## P0–P10 behavior coverage matrix
 
-Each row ties a test stimulus to an observable result, the code area that must own the behavior, and a named evidence record. Once implementation candidates are fixed, record the exact repository SHA and replace the expected code area with exact source paths. A fixture, mock, or fake host is marked `SIMULATED`; it cannot satisfy a `REAL` gate.
+Each row ties a test stimulus to an observable result, the code area that must own the behavior, and a named evidence record. Once implementation candidates are fixed, record the exact repository SHA and replace the expected code area with exact source paths. Mark a result `SIMULATED` when a fixture, mock, or fake host substitutes for the capability or host being tested. A fixture used only as input to a real model/plugin/product execution remains `REAL`; record the input provenance separately. A component-level `REAL` result does not satisfy a broader product-flow gate.
 
 | Stage / gate | Input or action | Required observable result | Implementation location to trace | Acceptance evidence |
 |---|---|---|---|---|
@@ -101,12 +101,14 @@ Each row ties a test stimulus to an observable result, the code area that must o
 | P5 / dream bounded work | Run maintenance over a multi-page fixture and inspect memory/resource bounds | Processing is paginated, checkpointed, cancellable and resumes without duplicate mutations | Navigator DSH maintenance task; Plugins paginated storage | `P5/dream-recovery`, page/checkpoint counts and restart report |
 | P5 / dream change control | Preview and apply a merge, contradiction, expiry and deletion batch | Every change has source/version rationale, current-authorization check, audit and supported restore | Navigator dream planner/apply path; Client review screen | `P5/dream-audit-restore`, plan digest, audit entries and restore read-back |
 | P6 / research sources | Search and fetch a paginated public document, then cite selected content | Returned material is real, bounded, source-addressed and separated from private chat history | Plugins public-web/document tools; Navigator DSH research tasks | `P6/research-provenance`, source URL, page cursor and content digest |
+| P6 / search backend component | Query the restricted local search backend on two pages and inspect result sources | Real JSON results carry source URLs and page boundaries from the configured engine allowlist | Task-local SearXNG service and isolated search adapter | `P6/searxng-live-json-pagination`; backend component only, not a Navigator/DSH task |
 | P6 / background cancellation | Start a slow read task, cancel it, then deliver a late provider result | Cancelled result is retained as cancelled and cannot be injected or published | Navigator task runner and tool adapter | `P6/cancel-late-result`, task state and absence of context mutation |
 | P6 / work notes | Save a work note and a proposed operating guide separately | Notes retain origin and trust state; proposed guidance does not become trusted fact automatically | Navigator work-document/task state; Client review | `P6/work-note-trust`, record types and read-back |
 | P7 / Nous handoff | Create a promise, wait condition, active task, then hand off/restart the session | Durable handoff restores unfinished work and unknown external outcomes without replay | Navigator DSH session/task/schedule; Client task state | `P7/nous-handoff`, task IDs and before/after state |
 | P7 / proactive policy | Trigger follow-up, then disable subscription or enter quiet hours before send | No message is sent after policy change; current grants are checked at send time | Navigator proactive behavior and send gate; connector receipt path | `P7/proactive-send-gate`, policy read-back and connector result |
 | P7 / group hygiene | Feed burst, deleted, self-authored and loop-shaped events | Debounce/merge/retraction/loop rules produce the documented action and do not create duplicate replies | Navigator input/output policy; message connector | `P7/group-hygiene`, event-to-action ledger |
 | P8 / speech | Send the immutable upstream `zh.wav` fixture through the local provider process and typed DirectPluginRuntime client | A real nonempty transcript, language/status, duration and segments return; typed failures remain explicit. The current fixture result differs by one character from the documented sample text, so quality review remains open | Plugins `speech-sensevoice` provider; task-local sherpa-onnx CPU runtime; Navigator media adapter remains a separate gate | `P8/asr-real`, exact Plugins/Contracts SHAs, model/token/audio and FFmpeg hashes, typed response receipt |
+| P8 / vision model component | Send two generated PNG inputs directly through the real local vision model connector and DirectPlugin | Both inputs produce model responses; record that the inputs are synthetic fixtures | Exchange model connector; task-local llama.cpp and pinned SmolVLM weights | `P8/vision-model-inference`, model/connector hashes and input provenance; does not pass attachment or authorization flow |
 | P8 / image understanding | Attach a real test image to a message and request a grounded description | Model result identifies the attachment source; unsupported media fails clearly | Exchange multimodal route; Navigator attachment context | `P8/image-real`, attachment digest and response reference |
 | P8 / media directory | Add, search, deactivate and restore an authorized sticker/image | Search respects account/persona scope; generation/storage is separate from sending | Plugins media provider/tool; Client media UI | `P8/media-lifecycle`, object IDs and status read-back |
 | P8 / generated card | Render a card and inspect its artifact, then separately send through a local test connector | Artifact digest/version is stable; send receipt is a separate result | Plugins media tool; Navigator artifact/send APIs | `P8/card-and-send`, artifact digest and independent send receipt |
@@ -130,7 +132,7 @@ This snapshot supersedes the earlier pending note only for the named gates below
 
 The isolated SearXNG backend returned real JSON search results across two pages from its deliberately restricted Wikipedia-only engine allowlist (`PASS / REAL`, `searxng-live-json-pagination.json`). The PublicWeb DirectPlugin also completed live search/open against that backend and parsed a local TXT fixture in a child process (`PASS / SIMULATED`, `public-web-searxng-real-and-parser-0ae782b.json`): its caller was a local harness rather than the Navigator/DSH product path, and the document was a fixture. These component receipts do not pass the P6 product task, authorization, or attachment bridge gates.
 
-The pinned SmolVLM 256M CPU model produced descriptions for generated image fixtures through the model connector and DirectPlugin (`PASS / SIMULATED`, `smolvlm-256m-real-image-inference.json`). This proves local image inference only; it does not prove a user attachment reaches Navigator or Exchange. At the recorded snapshot the task Compose container reported `unhealthy`, so check its health before another dependent run. The SenseVoice bootstrap/typed gRPC inference remains `PASS / REAL` at the provider component boundary; the official sample transcript differs by one character from the documented expectation (`speech-sensevoice-real.json`).
+The pinned SmolVLM 256M CPU model produced descriptions for generated image inputs through the real model connector and DirectPlugin (`PASS / REAL`, `smolvlm-256m-real-model-inference-fixture-input.json`; the detailed receipt is `smolvlm-256m-real-image-inference.json`). The inputs are synthetic fixtures, while model execution is real. This proves local image inference only; it does not prove a user attachment reaches Navigator or Exchange, or that product authorization is enforced. The task Compose health probe initially targeted the wrong port; after changing it to the server's `8082/health` endpoint, the container became healthy (`smolvlm-compose-health.json`). The SenseVoice bootstrap/typed gRPC inference remains `PASS / REAL` at the provider component boundary; the official sample transcript differs by one character from the documented expectation (`speech-sensevoice-real.json`).
 
 The PostgreSQL provider test suite completed 17 tests against the isolated database (`database-test-20261101T003639Z-be7b31da.log`). The run used a source-composed provider runtime and host-supplied deterministic vectors; it does not establish official PackageSpec installation or E5-backed Product memory retrieval. The real E5 connector and Exchange Product embedding gate remains blocked by the missing endpoint noted above. Navigator/Client Web turn and browser acceptance had not run at this snapshot. Teams, QQ, and Bilibili remain `DEFERRED_BY_USER / NOT_RUN`; cloud VM, ACA, production ingress, and production Bot configuration remain outside the test boundary and unchanged.
 
@@ -139,7 +141,7 @@ Use these classifications consistently:
 | Status | Mode | Meaning |
 |---|---|---|
 | `PASS` or `FAIL` | `REAL` | Executed through the candidate product/plugin against the isolated local service or approved real endpoint |
-| `PASS` or `FAIL` | `SIMULATED` | Executed with a fixture, mock provider, or fake host; it does not prove a real external integration |
+| `PASS` or `FAIL` | `SIMULATED` | A fixture, mock provider, or fake host substitutes for the capability/host being tested; it does not prove that behavior. A fixture used only as input to a real execution is recorded separately and may still be `REAL` |
 | `NOT_RUN` | `NOT_RUN` | Not executed, blocked, or waiting for implementation; add a reason code |
 | `NOT_RUN` + `DEFERRED_BY_USER` | `NOT_RUN` | Dedicated Teams, QQ, or Bilibili credentials/accounts are intentionally configured later by the user |
 
@@ -236,7 +238,7 @@ pnpm --version
 
 ## P0–P10 行为覆盖矩阵
 
-每行将测试输入、可观察结果、行为归属代码区域和证据编号关联。候选提交固定后，记录对应仓库的精确 SHA，并把预期代码区域替换为实际源文件路径。fixture、mock 和 fake host 标记为 `SIMULATED`，不能满足 `REAL` 验收。
+每行将测试输入、可观察结果、行为归属代码区域和证据编号关联。候选提交固定后，记录对应仓库的精确 SHA，并把预期代码区域替换为实际源文件路径。只有当 fixture、mock 或 fake host 替代被测能力或宿主时才标记为 `SIMULATED`。若 fixture 仅是实际模型/插件/产品执行的输入，执行仍可标记为 `REAL`，同时单独记录输入来源。组件级 `REAL` 结果不能代替更完整的产品流程验收。
 
 | 阶段 / 验收项 | 输入或操作 | 必须观察到的结果 | 追踪实现位置 | 验收证据 |
 |---|---|---|---|---|
@@ -261,12 +263,14 @@ pnpm --version
 | P5 / Dream 有界处理 | 对多页 fixture 执行维护并检查内存/进度 | 分页、检查点、可取消；重启恢复且不重复变更 | Navigator DSH maintenance task；Plugins 分页存储 | `P5/dream-recovery`、页/检查点计数和重启报告 |
 | P5 / Dream 变更控制 | 预览并应用合并、冲突、过期和删除批次 | 每项变化有来源/版本说明、当前授权检查、审计和恢复方式 | Navigator dream planner/apply；Plugins 存储 | `P5/dream-audit-restore`、计划摘要、审计项和恢复回读 |
 | P6 / 研究来源 | 搜索、分页读取公开文档并引用选中内容 | 返回真实、受限、有来源标识的材料，并与私聊日志隔离 | Plugins public-web/document tools；Navigator DSH research tasks | `P6/research-provenance`、来源 URL、分页游标和内容摘要 |
+| P6 / 搜索后端组件 | 向受限本地搜索后端发起两页查询并检查结果来源 | 按配置的 engine allowlist 返回真实 JSON 结果、来源 URL 和分页边界 | 任务专属 SearXNG 服务与隔离 search adapter | `P6/searxng-live-json-pagination`；只证明后端组件，不证明 Navigator/DSH 任务 |
 | P6 / 后台取消 | 启动慢速读取后取消，再让 provider 返回迟到结果 | 任务保持取消状态；迟到结果不能注入上下文或发布 | Navigator task runner 和 tool adapter | `P6/cancel-late-result`、任务状态和未发生上下文变更的证明 |
 | P6 / 工作笔记 | 分别保存工作笔记与待审核操作指南 | 笔记保留来源和信任状态；待审指南不会自动成为可信事实 | Navigator work-document/task state；Client 审核 | `P6/work-note-trust`、记录类型和读取回执 |
 | P7 / Nous 交接 | 创建承诺、等待条件和活跃任务后交接/重启会话 | 持久交接恢复未完成工作和未知外部结果，不自动重放 | Navigator DSH session/task/schedule；Client 任务状态 | `P7/nous-handoff`、任务 ID 和前后状态 |
 | P7 / 主动行为策略 | 触发跟进，再在发送前关闭订阅或进入安静时段 | 策略变更后不发送；发送时检查当前授权 | Navigator proactive behavior/send gate；connector receipt | `P7/proactive-send-gate`、策略回读和 connector 结果 |
 | P7 / 群消息卫生 | 输入突发、撤回、自发及循环形状事件 | 防抖、合并、撤回和循环规则产生预期动作，不重复回复 | Navigator 输入/输出策略；消息 connector | `P7/group-hygiene`、事件到动作账本 |
 | P8 / 语音 | 通过本地 provider 进程和类型化 DirectPluginRuntime client 发送不可变上游 `zh.wav` fixture | 返回真实非空转写、语言/状态、时长和分段；类型化错误明确。当前 fixture 结果与文档预期相差一个字符，质量审核仍未完成 | Plugins `speech-sensevoice` provider；任务专属 sherpa-onnx CPU runtime；Navigator 附件适配器是独立门禁 | `P8/asr-real`、Plugins/Contracts 精确 SHA、模型/token/音频与 FFmpeg 哈希、类型化回执 |
+| P8 / 视觉模型组件 | 通过真实本地 vision model connector 和 DirectPlugin 直接发送两张生成的 PNG 输入 | 两项输入均得到模型响应；记录输入是合成 fixture | Exchange model connector；任务专属 llama.cpp 和固定 SmolVLM 权重 | `P8/vision-model-inference`、模型/connector 哈希和输入来源；不能通过附件或授权链路门禁 |
 | P8 / 图片理解 | 把真实测试图片附加到消息并请求有依据的描述 | 模型结果能指向附件来源；不支持的媒体明确失败 | Exchange multimodal route；Navigator attachment context | `P8/image-real`、附件摘要和回复引用 |
 | P8 / 媒体目录 | 添加、搜索、停用、恢复一张获授权表情/图片 | 搜索遵守账号/persona 范围；生成/保存与发送分离 | Plugins media provider/tool；Client media UI | `P8/media-lifecycle`、对象 ID 和状态回读 |
 | P8 / 卡片生成 | 生成卡片并检查制品，再通过本地测试 connector 单独发送 | 制品摘要/版本稳定；发送回执是独立结果 | Plugins media tool；Navigator artifact/send APIs | `P8/card-and-send`、制品摘要和独立发送回执 |
@@ -290,7 +294,7 @@ pnpm --version
 
 隔离 SearXNG 后端通过明确限制为 Wikipedia 的 engine allowlist，在两页结果中返回真实 JSON 搜索结果（`PASS / REAL`，`searxng-live-json-pagination.json`）。PublicWeb DirectPlugin 也通过该后端完成实时搜索/打开，并在子进程中解析本地 TXT fixture（`PASS / SIMULATED`，`public-web-searxng-real-and-parser-0ae782b.json`）：调用者是本地 harness，不是 Navigator/DSH 产品链路；文档输入是 fixture。这些组件回执不能通过 P6 产品任务、授权或附件桥接门禁。
 
-固定的 SmolVLM 256M CPU 模型通过 model connector 和 DirectPlugin 为生成的图像 fixture 生成了描述（`PASS / SIMULATED`，`smolvlm-256m-real-image-inference.json`）。这只证明本地图片推理，不证明用户附件已到达 Navigator 或 Exchange。在该回执快照时，任务 Compose 容器报告 `unhealthy`；再次运行依赖该服务的验收前须检查健康状态。SenseVoice bootstrap/类型化 gRPC 推理在 provider 组件边界仍为 `PASS / REAL`；官方样例转写与文档预期相差一个字符（`speech-sensevoice-real.json`）。
+固定的 SmolVLM 256M CPU 模型通过真实 model connector 和 DirectPlugin 为生成的图像输入推理并返回描述（`PASS / REAL`，`smolvlm-256m-real-model-inference-fixture-input.json`；详细回执为 `smolvlm-256m-real-image-inference.json`）。输入是合成 fixture，模型执行是真实的。这只证明本地图片推理，不证明用户附件已到达 Navigator/Exchange，也不证明产品授权检查。任务 Compose 健康探针最初指向错误端口；改为检查服务 `8082/health` 后容器已恢复健康（`smolvlm-compose-health.json`）。SenseVoice bootstrap/类型化 gRPC 推理在 provider 组件边界仍为 `PASS / REAL`；官方样例转写与文档预期相差一个字符（`speech-sensevoice-real.json`）。
 
 PostgreSQL provider 测试套件在隔离数据库上完成 17 项测试（`database-test-20261101T003639Z-be7b31da.log`）。该次运行使用源码组合的 provider runtime 和 host 提供的确定性向量；它不能证明官方 PackageSpec 安装或由 E5 驱动的 Product 记忆检索。真实 E5 connector 和 Exchange Product embedding 验收仍受上述缺失 endpoint 阻塞。此快照中 Navigator/Client Web turn 和浏览器验收尚未运行。Teams、QQ 与 Bilibili 仍为 `DEFERRED_BY_USER / NOT_RUN`；云端 VM、ACA、生产入口及生产 Bot 配置不属于本轮测试目标，保持未改动。
 
@@ -299,7 +303,7 @@ PostgreSQL provider 测试套件在隔离数据库上完成 17 项测试（`data
 | 状态 | 模式 | 含义 |
 |---|---|---|
 | `PASS` 或 `FAIL` | `REAL` | 通过候选产品/插件执行，并使用隔离本地服务或获批真实 endpoint |
-| `PASS` 或 `FAIL` | `SIMULATED` | 使用 fixture、mock provider 或 fake host；不证明真实外部集成 |
+| `PASS` 或 `FAIL` | `SIMULATED` | fixture、mock provider 或 fake host 替代了正在测试的能力/宿主，因此不能证明该行为。仅作为真实执行输入的 fixture 应单独记录，执行仍可能是 `REAL` |
 | `NOT_RUN` | `NOT_RUN` | 未运行、受阻或等待实现；同时填写原因码 |
 | `NOT_RUN` + `DEFERRED_BY_USER` | `NOT_RUN` | Teams、QQ 或 Bilibili 专用账号/凭据由用户稍后配置 |
 
