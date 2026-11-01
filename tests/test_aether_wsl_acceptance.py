@@ -151,7 +151,7 @@ def test_local_identity_prepare_is_private_scoped_and_idempotent(
     assert all(secret and secret not in first_output for secret in secret_values)
     assert env_path.stat().st_mode & 0o777 == 0o600
     assert principal_path.stat().st_mode & 0o777 == 0o600
-    assert principals["principals"][0]["actor_id"] == "aether-local-acceptance"
+    assert principals["principals"][0]["actor_id"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
     assert principals["principals"][0]["workspace_ids"] == ["local"]
     assert principals["principals"][1]["actor_private_scope"] is True
     assert principals["principals"][1].get("can_write_harness", False) is False
@@ -160,6 +160,8 @@ def test_local_identity_prepare_is_private_scoped_and_idempotent(
     assert profile["document_prefix"] == "passage: "
     assert profile["query_prefix"] == "query: "
     assert profile["model_sha256"] == pinned_e5["sha256"]
+    assert values["CYRENE_EXCHANGE_ACTOR_ID"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
+    assert values["CYRENE_WORKSPACE_OWNER_ACTOR_ID"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
     expected_chat = "http://10.247.253.4:8080/v1"
     expected_embeddings = "http://10.247.253.3:8081/v1"
 
@@ -186,9 +188,41 @@ def test_local_identity_prepare_is_private_scoped_and_idempotent(
             values, expanded_principal, expected_chat, expected_embeddings
         )
 
+    legacy_environment = dict(values)
+    legacy_environment.pop("CYRENE_WORKSPACE_OWNER_ACTOR_ID")
+    legacy_environment["CYRENE_EXCHANGE_ACTOR_ID"] = ACCEPTANCE.LEGACY_LOCAL_OWNER_ACTOR_ID
+    legacy_principals = json.loads(json.dumps(principals))
+    for principal in legacy_principals["principals"]:
+        principal["actor_id"] = ACCEPTANCE.LEGACY_LOCAL_OWNER_ACTOR_ID
+    ACCEPTANCE._write_private_file(
+        env_path,
+        "".join(f"{name}={value}\n" for name, value in legacy_environment.items()),
+    )
+    ACCEPTANCE._write_private_file(
+        principal_path, json.dumps(legacy_principals, separators=(",", ":")) + "\n"
+    )
+    ACCEPTANCE.cmd_identity_prepare(SimpleNamespace())
+    migration_output = capsys.readouterr().out
+    migrated_environment = ACCEPTANCE._read_private_env(env_path, "test local identity")
+    migrated_principals = ACCEPTANCE._read_private_json(principal_path, "test principal config")
+    assert migrated_environment["CYRENE_EXCHANGE_ACTOR_ID"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
+    assert (
+        migrated_environment["CYRENE_WORKSPACE_OWNER_ACTOR_ID"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
+    )
+    assert all(
+        migrated_environment[name] == value
+        for name, value in values.items()
+        if name.endswith(("TOKEN", "BEARER_TOKEN", "API_KEY"))
+    )
+    assert all(
+        principal["actor_id"] == ACCEPTANCE.LOCAL_OWNER_ACTOR_ID
+        for principal in migrated_principals["principals"]
+    )
+    assert all(secret not in migration_output for secret in secret_values)
+
     ACCEPTANCE.cmd_identity_prepare(SimpleNamespace())
     capsys.readouterr()
-    assert ACCEPTANCE._read_private_env(env_path, "test local identity") == values
+    assert ACCEPTANCE._read_private_env(env_path, "test local identity") == migrated_environment
 
 
 def test_private_env_reader_rejects_symlink(tmp_path: Path) -> None:

@@ -35,6 +35,7 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import UUID
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "tooling/aether-wsl-acceptance/compose.yaml"
@@ -43,6 +44,8 @@ PRIVATE_STATE_PARENT = Path("/home/baijin/.local/state")
 PROJECT_NAME = "cyrene-aether-wsl-acceptance"
 TASK_LABEL = "io.cyrene.task"
 TASK_LABEL_VALUE = "aether-wsl-acceptance-20261031"
+LOCAL_OWNER_ACTOR_ID = "0722b287-fb57-500d-9a17-7c48f2c524ef"
+LEGACY_LOCAL_OWNER_ACTOR_ID = "aether-local-acceptance"
 TOOLCHAIN_DIR = STATE_DIR / "toolchain"
 EVIDENCE_DIR = STATE_DIR / "evidence"
 DATABASE_ENV = STATE_DIR / "postgres.env"
@@ -1697,7 +1700,50 @@ def cmd_identity_prepare(_: argparse.Namespace) -> None:
     if all(existing):
         environment = _read_private_env(environment_path, "local service environment")
         principals = _read_private_json(principals_path, "Navigator principal configuration")
-        _validate_local_identity(environment, principals, chat_url, embeddings_url)
+        rows = principals.get("principals")
+        principal_actor_ids = (
+            [principal.get("actor_id") for principal in rows if isinstance(principal, dict)]
+            if isinstance(rows, list)
+            else []
+        )
+        migration_actor_ids = {LEGACY_LOCAL_OWNER_ACTOR_ID, LOCAL_OWNER_ACTOR_ID}
+        if (
+            environment.get("CYRENE_EXCHANGE_ACTOR_ID") in migration_actor_ids
+            and environment.get("CYRENE_WORKSPACE_OWNER_ACTOR_ID") in {None, *migration_actor_ids}
+            and all(actor_id in migration_actor_ids for actor_id in principal_actor_ids)
+            and (
+                environment.get("CYRENE_EXCHANGE_ACTOR_ID") != LOCAL_OWNER_ACTOR_ID
+                or environment.get("CYRENE_WORKSPACE_OWNER_ACTOR_ID") != LOCAL_OWNER_ACTOR_ID
+                or LEGACY_LOCAL_OWNER_ACTOR_ID in principal_actor_ids
+            )
+        ):
+            migrated_environment = dict(environment)
+            migrated_environment["CYRENE_EXCHANGE_ACTOR_ID"] = LOCAL_OWNER_ACTOR_ID
+            migrated_environment["CYRENE_WORKSPACE_OWNER_ACTOR_ID"] = LOCAL_OWNER_ACTOR_ID
+            migrated_principals = json.loads(json.dumps(principals))
+            principal_rows = migrated_principals.get("principals")
+            if isinstance(principal_rows, list):
+                for principal in principal_rows:
+                    if (
+                        isinstance(principal, dict)
+                        and principal.get("actor_id") == LEGACY_LOCAL_OWNER_ACTOR_ID
+                    ):
+                        principal["actor_id"] = LOCAL_OWNER_ACTOR_ID
+            _validate_local_identity(
+                migrated_environment, migrated_principals, chat_url, embeddings_url
+            )
+            _write_private_file(
+                environment_path,
+                "".join(f"{name}={value}\n" for name, value in migrated_environment.items()),
+            )
+            _write_private_file(
+                principals_path,
+                json.dumps(migrated_principals, separators=(",", ":")) + "\n",
+            )
+            environment = migrated_environment
+            principals = migrated_principals
+        else:
+            _validate_local_identity(environment, principals, chat_url, embeddings_url)
     else:
         data_token = secrets.token_hex(32)
         work_token = secrets.token_hex(32)
@@ -1712,7 +1758,8 @@ def cmd_identity_prepare(_: argparse.Namespace) -> None:
             "CYRENE_EXCHANGE_CONTROL_BEARER_TOKEN": control_token,
             "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN": bootstrap_token,
             "CYRENE_EXCHANGE_URL": "http://127.0.0.1:18682/v1",
-            "CYRENE_EXCHANGE_ACTOR_ID": "aether-local-acceptance",
+            "CYRENE_EXCHANGE_ACTOR_ID": LOCAL_OWNER_ACTOR_ID,
+            "CYRENE_WORKSPACE_OWNER_ACTOR_ID": LOCAL_OWNER_ACTOR_ID,
             "CYRENE_EXCHANGE_ORGANIZATION_ID": "cyrene-aether-local",
             "CYRENE_EXCHANGE_WORKSPACE_ID": "local",
             "CYRENE_EXCHANGE_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-data",
@@ -1743,7 +1790,7 @@ def cmd_identity_prepare(_: argparse.Namespace) -> None:
             "principals": [
                 {
                     "token_env": "CYRENE_SESSION_TOKEN",
-                    "actor_id": "aether-local-acceptance",
+                    "actor_id": LOCAL_OWNER_ACTOR_ID,
                     "workspace_ids": ["local"],
                     "organization_id": "cyrene-aether-local",
                     "can_takeover": True,
@@ -1752,7 +1799,7 @@ def cmd_identity_prepare(_: argparse.Namespace) -> None:
                 },
                 {
                     "token_env": "CYRENE_WORK_ATTACHMENT_TOKEN",
-                    "actor_id": "aether-local-acceptance",
+                    "actor_id": LOCAL_OWNER_ACTOR_ID,
                     "workspace_ids": ["local"],
                     "organization_id": "cyrene-aether-local",
                     "actor_private_scope": True,
@@ -1776,7 +1823,7 @@ def cmd_identity_prepare(_: argparse.Namespace) -> None:
         "status": "PREPARED",
         "classification": "LOCAL_STATIC_BEARER_CONFIGURATION",
         "identity": {
-            "actor_id": "aether-local-acceptance",
+            "actor_id": LOCAL_OWNER_ACTOR_ID,
             "organization_id": "cyrene-aether-local",
             "workspace_id": "local",
         },
@@ -1821,6 +1868,7 @@ def _validate_local_identity(
         "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN",
         "CYRENE_EXCHANGE_URL",
         "CYRENE_EXCHANGE_ACTOR_ID",
+        "CYRENE_WORKSPACE_OWNER_ACTOR_ID",
         "CYRENE_EXCHANGE_ORGANIZATION_ID",
         "CYRENE_EXCHANGE_WORKSPACE_ID",
         "CYRENE_EXCHANGE_CREDENTIAL_REF",
@@ -1853,7 +1901,8 @@ def _validate_local_identity(
         )
     required_values = {
         "CYRENE_EXCHANGE_URL": "http://127.0.0.1:18682/v1",
-        "CYRENE_EXCHANGE_ACTOR_ID": "aether-local-acceptance",
+        "CYRENE_EXCHANGE_ACTOR_ID": LOCAL_OWNER_ACTOR_ID,
+        "CYRENE_WORKSPACE_OWNER_ACTOR_ID": LOCAL_OWNER_ACTOR_ID,
         "CYRENE_EXCHANGE_ORGANIZATION_ID": "cyrene-aether-local",
         "CYRENE_EXCHANGE_WORKSPACE_ID": "local",
         "CYRENE_EXCHANGE_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-data",
@@ -1881,6 +1930,11 @@ def _validate_local_identity(
         raise AcceptanceError(
             "The private local service environment differs from the fixed profile."
         )
+    try:
+        if str(UUID(LOCAL_OWNER_ACTOR_ID)) != LOCAL_OWNER_ACTOR_ID:
+            raise ValueError
+    except ValueError:
+        raise AcceptanceError("The fixed local owner actor id must be a UUID.") from None
     for name in (
         "CYRENE_EXCHANGE_BEARER_TOKEN",
         "CYRENE_EXCHANGE_TOKEN",
@@ -1943,7 +1997,7 @@ def _validate_local_identity(
     if set(owner) != owner_fields or set(attachment) != attachment_fields:
         raise AcceptanceError("The private Navigator principal map contains unsupported grants.")
     expected_scope = {
-        "actor_id": "aether-local-acceptance",
+        "actor_id": LOCAL_OWNER_ACTOR_ID,
         "workspace_ids": ["local"],
         "organization_id": "cyrene-aether-local",
     }
