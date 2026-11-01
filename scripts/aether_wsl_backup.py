@@ -80,6 +80,7 @@ EXCLUSION_CATEGORIES = {
     "logs_evidence_test_fixtures",
 }
 REQUIRED_EXCLUSION_CATEGORIES = set(EXCLUSION_CATEGORIES)
+MANIFEST_EXTRA_EXCLUSION_CATEGORIES = {"postgres_restore_drill_databases"}
 OWNER_NAMES = {"navigator", "exchange", "plugins", "workspace"}
 SENSITIVE_NAME = re.compile(
     r"(^|[^a-z])(secret|password|passwd|access[_-]?token|refresh[_-]?token|"
@@ -1110,7 +1111,9 @@ def _postgres_physical_inventory(container_id: str) -> dict[str, int]:
     return {"files": file_count, "bytes": total_bytes}
 
 
-def _pg_query(query: str) -> list[str]:
+def _pg_query(query: str, *, database: str = "cyrene_aether") -> list[str]:
+    if not DB_IDENTIFIER.fullmatch(database):
+        raise BackupError("PostgreSQL database identifier is invalid")
     result = _run_compose(
         [
             "exec",
@@ -1122,7 +1125,7 @@ def _pg_query(query: str) -> list[str]:
             "-U",
             "cyrene_aether",
             "-d",
-            "cyrene_aether",
+            database,
             "-c",
             query,
         ]
@@ -1130,6 +1133,37 @@ def _pg_query(query: str) -> list[str]:
     if result.returncode != 0:
         raise BackupError("task PostgreSQL metadata query failed")
     return result.stdout.decode("utf-8", "strict").splitlines()
+
+
+def _pg_database_inventory() -> int:
+    """Rejects unlisted application databases and counts prior isolated restores.
+
+    中文：拒绝未登记的应用数据库，并记录此前独立恢复演练的数据库数量。
+    """
+    databases = _pg_query(
+        "SELECT datname FROM pg_database WHERE datistemplate = FALSE "
+        "AND datallowconn = TRUE ORDER BY datname"
+    )
+    if "cyrene_aether" not in databases:
+        raise BackupError("the required task PostgreSQL database is missing")
+    restore_databases = [name for name in databases if name.startswith("aether_restore_")]
+    recognized_restores = {
+        name
+        for name in restore_databases
+        if re.fullmatch(r"aether_restore_[a-f0-9]{10}_[a-f0-9]{6}", name)
+    }
+    unexpected = set(databases) - {"cyrene_aether", "postgres"} - recognized_restores
+    if unexpected:
+        raise BackupError("task PostgreSQL contains an unlisted application database")
+    if "postgres" in databases:
+        user_tables = _pg_query(
+            "SELECT COUNT(*) FROM pg_tables "
+            "WHERE schemaname NOT IN ('pg_catalog','information_schema')",
+            database="postgres",
+        )
+        if len(user_tables) != 1 or user_tables[0] != "0":
+            raise BackupError("the default PostgreSQL database contains unlisted application state")
+    return len(recognized_restores)
 
 
 def _pg_table_inventory() -> tuple[dict[str, int], dict[str, int]]:
@@ -1182,6 +1216,7 @@ def _pg_dump(destination: Path) -> dict[str, Any]:
     """
     container_id = _verify_postgres_container()
     physical_inventory = _postgres_physical_inventory(container_id)
+    restore_database_count = _pg_database_inventory()
     counts, excluded = _pg_table_inventory()
     reconciled_counts = {**counts, **{table: 0 for table in excluded}}
     args = [
@@ -1236,6 +1271,7 @@ def _pg_dump(destination: Path) -> dict[str, Any]:
         "table_counts": reconciled_counts,
         "excluded_secret_tables": excluded,
         "physical_database_files": physical_inventory,
+        "restore_drill_databases": restore_database_count,
         "format": "pg_dump_custom",
     }
 
@@ -1533,6 +1569,11 @@ def cmd_backup(args: argparse.Namespace) -> int:
                     **pg_physical,
                     "copied": 0,
                     "replacement": "pg_dump_custom",
+                },
+                "postgres_restore_drill_databases": {
+                    "databases": int(pg_resource.get("restore_drill_databases", 0)),
+                    "copied": 0,
+                    "reason": "prior fresh-restore namespaces are retained outside the active source database",
                 },
                 "models_toolchain_and_cache": {
                     "copied": 0,
@@ -1835,7 +1876,11 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
     ):
         raise BackupError("snapshot external secret references are missing or invalid")
     exclusions = manifest.get("excluded_categories")
-    required_exclusions = REQUIRED_EXCLUSION_CATEGORIES | {"models_toolchain_and_cache"}
+    required_exclusions = (
+        REQUIRED_EXCLUSION_CATEGORIES
+        | MANIFEST_EXTRA_EXCLUSION_CATEGORIES
+        | {"models_toolchain_and_cache"}
+    )
     if not isinstance(exclusions, dict) or not required_exclusions.issubset(exclusions):
         raise BackupError("snapshot exclusion categories or counts are incomplete")
     for category in (
@@ -1863,6 +1908,14 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
         or postgres_exclusion.get("replacement") != "pg_dump_custom"
     ):
         raise BackupError("snapshot PostgreSQL physical-file exclusion is invalid")
+    restore_databases = exclusions["postgres_restore_drill_databases"]
+    if (
+        not isinstance(restore_databases, dict)
+        or not isinstance(restore_databases.get("databases"), int)
+        or restore_databases["databases"] < 0
+        or restore_databases.get("copied") != 0
+    ):
+        raise BackupError("snapshot restore-drill database exclusion is invalid")
     reference_exclusion = exclusions["models_toolchain_and_cache"]
     if (
         not isinstance(reference_exclusion, dict)

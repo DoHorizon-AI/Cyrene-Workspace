@@ -39,6 +39,7 @@ If Exchange audit is stored in the same SQLite database as Exchange application 
 | `plaintext_credentials_session_tokens_secret_files` | `metadata_count_only` | Excluded file count and bytes. The tool never reads the file contents. |
 | `postgres_physical_database_files` | `logical_dump_only` | Physical file count and bytes; copied count remains zero because the database is represented by `pg_dump`. |
 | `logs_evidence_test_fixtures` | `metadata_count_only` | Excluded file count and bytes. |
+| `postgres_restore_drill_databases` | Utility-generated | Prior `aether_restore_*` databases remain isolated and are counted; any other unlisted application database causes backup to fail. |
 
 The catalog should list the known environment files individually, such as `postgres.env`, `local-product/services.env`, and runtime `*.env` files. Tree sources also omit credential-looking names, logs, evidence, fixtures, and cache paths by name. The catalog must list external secret references as opaque identifiers, for example `env:CYRENE_EXCHANGE_BEARER_TOKEN` or `cred:cyrene/aether-wsl-product-data`; never put secret values in either JSON file.
 
@@ -136,6 +137,7 @@ The focused unit suite uses real temporary SQLite databases and attachments, but
 | `plaintext_credentials_session_tokens_secret_files` | `metadata_count_only` | 排除文件数和字节数。工具绝不读取文件内容。 |
 | `postgres_physical_database_files` | `logical_dump_only` | PostgreSQL 物理文件数和字节数；复制数必须为零，数据库内容由 `pg_dump` 替代。 |
 | `logs_evidence_test_fixtures` | `metadata_count_only` | 排除文件数和字节数。 |
+| `postgres_restore_drill_databases` | 工具生成 | 既有 `aether_restore_*` 数据库保持隔离并计数；发现其他未登记应用数据库时拒绝备份。 |
 
 catalog 应逐一列出已知环境文件，例如 `postgres.env`、`local-product/services.env` 和运行时 `*.env` 文件。文件树会按名称排除凭据文件、日志、evidence、fixture 和 cache。外部 secret reference 只能填写不透明标识，例如 `env:CYRENE_EXCHANGE_BEARER_TOKEN` 或 `cred:cyrene/aether-wsl-product-data`；不得在任一 JSON 文件中写入 secret 值。
 

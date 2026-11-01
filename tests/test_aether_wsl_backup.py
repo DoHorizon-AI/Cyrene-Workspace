@@ -296,6 +296,7 @@ def _fixture(
             "table_counts": {"public.tasks": 2, "public.api_tokens": 0},
             "excluded_secret_tables": {"public.api_tokens": 1},
             "physical_database_files": {"files": 7, "bytes": 4096},
+            "restore_drill_databases": 0,
             "format": "pg_dump_custom",
         }
 
@@ -378,6 +379,7 @@ def test_full_state_backup_restore_and_safe_rollback(
     assert manifest["excluded_categories"]["logs_evidence_test_fixtures"]["files"] == 1
     assert manifest["excluded_categories"]["postgres_physical_database_files"]["files"] == 7
     assert manifest["excluded_categories"]["postgres_physical_database_files"]["copied"] == 0
+    assert manifest["excluded_categories"]["postgres_restore_drill_databases"]["databases"] == 0
     with tarfile.open(archive, mode="r:gz") as tar:
         pg_dump_member = tar.extractfile("payload/task-postgres/database.custom")
         assert pg_dump_member is not None and pg_dump_member.read() == PG_FIXTURE
@@ -499,6 +501,28 @@ def test_sqlite_credential_rows_fail_before_secret_data_reaches_staging(
     for file_path in partial.rglob("*"):
         if file_path.is_file():
             assert b"must-never-reach-staging" not in file_path.read_bytes()
+
+
+def test_postgres_inventory_rejects_unlisted_databases_and_counts_restore_namespaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    databases = [
+        "cyrene_aether",
+        "postgres",
+        "aether_restore_abcdef1234_abcdef",
+    ]
+
+    def query(statement: str, *, database: str = "cyrene_aether") -> list[str]:
+        if "FROM pg_database" in statement:
+            return databases
+        assert database == "postgres"
+        return ["0"]
+
+    monkeypatch.setattr(BACKUP, "_pg_query", query)
+    assert BACKUP._pg_database_inventory() == 1
+    databases.append("unregistered_plugin_store")
+    with pytest.raises(BACKUP.BackupError, match="unlisted application database"):
+        BACKUP._pg_database_inventory()
 
 
 @pytest.mark.parametrize("damage", ["truncated", "corrupted"])
