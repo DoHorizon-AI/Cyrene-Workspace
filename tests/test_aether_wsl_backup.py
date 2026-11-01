@@ -90,6 +90,64 @@ def _database(
     path.chmod(0o600)
 
 
+def _exchange_credentials(path: Path) -> None:
+    """Adds realistic Exchange verifier metadata without real bearer credentials.
+
+    中文：写入真实 schema 形状的测试 verifier，但不使用真实 bearer credential。
+    """
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE api_credentials (
+                credential_ref TEXT PRIMARY KEY,
+                token_digest TEXT NOT NULL UNIQUE,
+                actor_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                organization_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                created_at INTEGER NOT NULL,
+                api_key_id TEXT,
+                name TEXT,
+                expires_at INTEGER,
+                revoked_at INTEGER,
+                model_scope TEXT,
+                resource_version INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX ix_api_credentials_api_key_id "
+            "ON api_credentials(api_key_id) WHERE api_key_id IS NOT NULL"
+        )
+        connection.executemany(
+            """
+            INSERT INTO api_credentials(
+                credential_ref, token_digest, actor_id, workspace_id,
+                organization_id, enabled, created_at, api_key_id, name,
+                expires_at, revoked_at, model_scope, resource_version
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL, ?, 1)
+            """,
+            [
+                (
+                    f"cred://exchange/test-{index}",
+                    hashlib.sha256(f"synthetic-test-credential-{index}".encode()).hexdigest(),
+                    f"actor-{index}",
+                    "test-workspace",
+                    "test-organization",
+                    1_730_000_000_000 + index,
+                    f"key-{index}",
+                    f"fixture-key-{index}",
+                    "responses",
+                )
+                for index in range(3)
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _catalog(state_root: Path) -> dict[str, Any]:
     return {
         "format": BACKUP.CATALOG_FORMAT,
@@ -153,7 +211,7 @@ def _catalog(state_root: Path) -> dict[str, Any]:
             {
                 "id": "exchange-state-and-audit",
                 "owner": "exchange",
-                "secret_policy": "external_refs_only",
+                "secret_policy": BACKUP.EXCHANGE_SECRET_POLICY,
                 "kind": "sqlite",
                 "categories": ["exchange_database", "exchange_audit"],
                 "path": "local-product/exchange-product.sqlite3",
@@ -319,7 +377,9 @@ def _fixture(
     (dsh_home / "schedule-state.json").chmod(0o600)
     (dsh_home / "run.log").write_text("fixture log\n", encoding="utf-8")
     (dsh_home / "run.log").chmod(0o600)
-    _database(state_root / "local-product/exchange-product.sqlite3", ("exchanges", "route_audit"))
+    exchange_database = state_root / "local-product/exchange-product.sqlite3"
+    _database(exchange_database, ("exchanges", "route_audit"))
+    _exchange_credentials(exchange_database)
     _database(
         state_root / "navigator/providers/memory.sqlite3",
         ("memories", "memory_chunks"),
@@ -439,6 +499,14 @@ def test_full_state_backup_restore_and_safe_rollback(
         item for item in manifest["resources"] if item["id"] == "navigator-conversation-domains"
     )
     assert domain_resource["table_counts"]["reviews"] == 1
+    exchange_resource = next(
+        item for item in manifest["resources"] if item["id"] == "exchange-state-and-audit"
+    )
+    assert exchange_resource["table_counts"]["api_credentials"] == 3
+    assert exchange_resource["approved_verifier_fields"] == {
+        "api_credentials.token_digest": {"format": "sha256_lowercase_hex", "validated_rows": 3}
+    }
+    assert "api_credentials" not in exchange_resource["excluded_secret_tables"]
     plugin_resource = next(
         item for item in manifest["resources"] if item["id"] == "plugin-database"
     )
@@ -515,6 +583,15 @@ def test_full_state_backup_restore_and_safe_rollback(
         ).fetchone() == ("cred:cyrene/aether-wsl-product-data",)
     finally:
         restored_plugin.close()
+    restored_exchange = sqlite3.connect(target / "local-product/exchange-product.sqlite3")
+    try:
+        assert restored_exchange.execute("SELECT COUNT(*) FROM api_credentials").fetchone() == (3,)
+        assert restored_exchange.execute(
+            "SELECT COUNT(*) FROM api_credentials WHERE length(token_digest) = 64 "
+            "AND token_digest NOT GLOB '*[^0-9a-f]*'"
+        ).fetchone() == (3,)
+    finally:
+        restored_exchange.close()
     assert (target / "navigator/navigator.sqlite3.work-attachments/media.bin").read_bytes() == (
         state_root / "navigator/navigator.sqlite3.work-attachments/media.bin"
     ).read_bytes()
@@ -590,6 +667,76 @@ def test_sqlite_credential_rows_fail_before_secret_data_reaches_staging(
         sensitive_db.commit()
     finally:
         sensitive_db.close()
+
+    with pytest.raises(BACKUP.BackupError, match="candidate credential rows"):
+        BACKUP.cmd_backup(
+            SimpleNamespace(
+                catalog=str(catalog_path),
+                quiescence_receipt=str(quiescence_path),
+                output_dir=str(output_dir),
+                snapshot_id=SNAPSHOT_ID,
+            )
+        )
+    assert not output_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("unknown_column", "schema differs from the approved schema"),
+        ("invalid_digest", "verifier format is invalid"),
+    ],
+)
+def test_exchange_verifier_exception_requires_exact_schema_and_digest_format(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    _state_root, output_dir, _catalog, catalog_path, quiescence_path = _fixture(
+        tmp_path, monkeypatch
+    )
+    exchange_database = sqlite3.connect(
+        Path(BACKUP.STATE_DIR) / "local-product/exchange-product.sqlite3"
+    )
+    try:
+        if mutation == "unknown_column":
+            exchange_database.execute("ALTER TABLE api_credentials ADD COLUMN bearer_token TEXT")
+        else:
+            exchange_database.execute(
+                "UPDATE api_credentials SET token_digest = 'invalid-verifier' WHERE rowid = 1"
+            )
+        exchange_database.commit()
+    finally:
+        exchange_database.close()
+
+    with pytest.raises(BACKUP.BackupError, match=expected_error):
+        BACKUP.cmd_backup(
+            SimpleNamespace(
+                catalog=str(catalog_path),
+                quiescence_receipt=str(quiescence_path),
+                output_dir=str(output_dir),
+                snapshot_id=SNAPSHOT_ID,
+            )
+        )
+    assert not output_dir.exists()
+
+
+def test_token_digest_in_non_exchange_database_remains_excluded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _state_root, output_dir, _catalog, catalog_path, quiescence_path = _fixture(
+        tmp_path, monkeypatch
+    )
+    plugin_database = sqlite3.connect(
+        Path(BACKUP.STATE_DIR) / "navigator/providers/knowledge-graph.sqlite3"
+    )
+    try:
+        plugin_database.execute("CREATE TABLE api_credentials (token_digest TEXT NOT NULL)")
+        plugin_database.execute("INSERT INTO api_credentials VALUES (?)", ("a" * 64,))
+        plugin_database.commit()
+    finally:
+        plugin_database.close()
 
     with pytest.raises(BACKUP.BackupError, match="candidate credential rows"):
         BACKUP.cmd_backup(

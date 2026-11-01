@@ -77,6 +77,23 @@ REQUIRED_RESOURCE_PATHS = {
     "navigator/providers/knowledge-graph.sqlite3": ("sqlite", "plugin_database"),
     "local-product/exchange-product.sqlite3": ("sqlite", "exchange_database"),
 }
+EXCHANGE_DATABASE_PATH = "local-product/exchange-product.sqlite3"
+EXCHANGE_SECRET_POLICY = "external_refs_plus_approved_exchange_verifier"
+EXCHANGE_API_CREDENTIAL_SCHEMA = (
+    ("credential_ref", "TEXT", 0, None, 1),
+    ("token_digest", "TEXT", 1, None, 0),
+    ("actor_id", "TEXT", 1, None, 0),
+    ("workspace_id", "TEXT", 1, None, 0),
+    ("organization_id", "TEXT", 0, None, 0),
+    ("enabled", "INTEGER", 1, "1", 0),
+    ("created_at", "INTEGER", 1, None, 0),
+    ("api_key_id", "TEXT", 0, None, 0),
+    ("name", "TEXT", 0, None, 0),
+    ("expires_at", "INTEGER", 0, None, 0),
+    ("revoked_at", "INTEGER", 0, None, 0),
+    ("model_scope", "TEXT", 0, None, 0),
+    ("resource_version", "INTEGER", 1, "1", 0),
+)
 QUIESCENT_COMPONENTS = {"navigator", "dsh", "exchange", "plugins", "postgres"}
 CATEGORY_KINDS = {
     "navigator_business": {"sqlite"},
@@ -504,10 +521,13 @@ def _validate_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
             raise BackupError("source catalog resource kind is unsupported")
         if owner not in OWNER_NAMES:
             raise BackupError("source catalog resource owner is unsupported")
-        if resource.get("secret_policy") != "external_refs_only":
-            raise BackupError(
-                "each source owner must attest that credentials are external references only"
-            )
+        secret_policy = resource.get("secret_policy")
+        approved_exchange_store = _is_approved_exchange_store(resource)
+        expected_secret_policy = (
+            EXCHANGE_SECRET_POLICY if approved_exchange_store else "external_refs_only"
+        )
+        if secret_policy != expected_secret_policy:
+            raise BackupError("source credential policy is unsupported for this canonical resource")
         if not isinstance(categories, list) or not categories:
             raise BackupError("source catalog resource categories are required")
         if len(set(categories)) != len(categories):
@@ -687,7 +707,9 @@ def _validate_quiescence(path: Path) -> dict[str, Any]:
     return receipt
 
 
-def _sqlite_table_counts(path: Path) -> tuple[dict[str, int], dict[str, int]]:
+def _sqlite_table_counts(
+    path: Path, *, allow_exchange_verifier: bool = False
+) -> tuple[dict[str, int], dict[str, int]]:
     """Returns table row counts and counts for schema-detected secret tables.
 
     中文：返回各表行数，并统计按 schema 名称识别的敏感表记录数。
@@ -697,7 +719,10 @@ def _sqlite_table_counts(path: Path) -> tuple[dict[str, int], dict[str, int]]:
     try:
         connection = sqlite3.connect(uri, uri=True, timeout=30)
         try:
-            return _sqlite_connection_counts(connection)
+            connection.execute("BEGIN")
+            return _sqlite_connection_counts(
+                connection, allow_exchange_verifier=allow_exchange_verifier
+            )
         finally:
             connection.close()
     except sqlite3.Error as exc:
@@ -706,6 +731,8 @@ def _sqlite_table_counts(path: Path) -> tuple[dict[str, int], dict[str, int]]:
 
 def _sqlite_connection_counts(
     connection: sqlite3.Connection,
+    *,
+    allow_exchange_verifier: bool = False,
 ) -> tuple[dict[str, int], dict[str, int]]:
     """Counts tables on an existing SQLite snapshot transaction.
 
@@ -719,13 +746,20 @@ def _sqlite_connection_counts(
     )
     counts: dict[str, int] = {}
     secret_counts: dict[str, int] = {}
+    exchange_verifier_seen = False
     for index, (table,) in enumerate(table_cursor, start=1):
         if index > MAX_DATABASE_TABLES:
             raise BackupError("SQLite table inventory exceeds its bounded count")
         if not isinstance(table, str) or "\x00" in table:
             raise BackupError("SQLite contains an unsupported table identifier")
-        columns = connection.execute(f"PRAGMA table_info({_quote_sqlite(table)})").fetchall()
-        is_sensitive = _is_sensitive_schema(table, [str(column[1]) for column in columns])
+        column_info = connection.execute(f"PRAGMA table_info({_quote_sqlite(table)})").fetchall()
+        columns = [str(column[1]) for column in column_info]
+        if allow_exchange_verifier and table == "api_credentials":
+            _validate_exchange_api_credentials(connection, column_info)
+            exchange_verifier_seen = True
+            is_sensitive = False
+        else:
+            is_sensitive = _is_sensitive_schema(table, columns)
         count = int(
             connection.execute(f"SELECT COUNT(*) FROM {_quote_sqlite(table)}").fetchone()[0]
         )
@@ -733,6 +767,8 @@ def _sqlite_connection_counts(
             secret_counts[table] = count
         else:
             counts[table] = count
+    if allow_exchange_verifier and not exchange_verifier_seen:
+        raise BackupError("Exchange API credential verifier table is missing")
     return counts, secret_counts
 
 
@@ -774,7 +810,67 @@ def _quote_sqlite(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
+def _is_approved_exchange_store(resource: dict[str, Any]) -> bool:
+    """Limits the verifier exception to the canonical Exchange SQLite resource.
+
+    中文：将 verifier 例外限制在规范 Exchange SQLite source 上。
+    """
+    categories = resource.get("categories")
+    return (
+        resource.get("kind") == "sqlite"
+        and resource.get("owner") == "exchange"
+        and resource.get("path") == EXCHANGE_DATABASE_PATH
+        and isinstance(categories, list)
+        and "exchange_database" in categories
+    )
+
+
+def _validate_exchange_api_credentials(
+    connection: sqlite3.Connection, column_info: list[tuple[Any, ...]]
+) -> None:
+    """Validates Exchange's exact API-key verifier schema and SHA-256 encoding.
+
+    中文：仅允许规范 api_credentials schema，并校验 token_digest 为 SHA-256 小写十六进制。
+    """
+    actual_schema = tuple(
+        (
+            str(column[1]),
+            str(column[2]).upper(),
+            int(column[3]),
+            column[4],
+            int(column[5]),
+        )
+        for column in column_info
+    )
+    if actual_schema != EXCHANGE_API_CREDENTIAL_SCHEMA:
+        raise BackupError(
+            "Exchange API credential verifier schema differs from the approved schema"
+        )
+    unique_indexes: set[tuple[str, ...]] = set()
+    for index in connection.execute(f"PRAGMA index_list({_quote_sqlite('api_credentials')})"):
+        if int(index[2]) != 1:
+            continue
+        index_columns = tuple(
+            str(row[2])
+            for row in connection.execute(f"PRAGMA index_info({_quote_sqlite(str(index[1]))})")
+        )
+        unique_indexes.add(index_columns)
+    if not {("token_digest",), ("api_key_id",)}.issubset(unique_indexes):
+        raise BackupError(
+            "Exchange API credential verifier indexes differ from the approved schema"
+        )
+    invalid_digests = connection.execute(
+        "SELECT COUNT(*) FROM api_credentials "
+        "WHERE typeof(token_digest) != 'text' OR length(token_digest) != 64 "
+        "OR token_digest GLOB '*[^0-9a-f]*'"
+    ).fetchone()
+    if invalid_digests is None or int(invalid_digests[0]) != 0:
+        raise BackupError("Exchange API credential verifier format is invalid")
+
+
+def _sqlite_backup(
+    source: Path, destination: Path, *, allow_exchange_verifier: bool = False
+) -> dict[str, Any]:
     """Uses SQLite online backup only after proving candidate secret tables are empty.
 
     中文：先核对敏感 schema；发现任何候选凭据记录时拒绝落盘复制。
@@ -788,7 +884,9 @@ def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
     target_connection: sqlite3.Connection | None = None
     try:
         source_connection.execute("BEGIN")
-        source_counts, excluded = _sqlite_connection_counts(source_connection)
+        source_counts, excluded = _sqlite_connection_counts(
+            source_connection, allow_exchange_verifier=allow_exchange_verifier
+        )
         if any(excluded.values()):
             raise BackupError(
                 "SQLite source contains candidate credential rows; move them to external secret storage before backup"
@@ -820,12 +918,22 @@ def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
             raise BackupError("SQLite staging sidecar failed no-follow ownership checks")
         sidecar.unlink()
     os.chmod(destination, 0o600)
-    counts, remaining_sensitive = _sqlite_table_counts(destination)
+    counts, remaining_sensitive = _sqlite_table_counts(
+        destination, allow_exchange_verifier=allow_exchange_verifier
+    )
     if any(remaining_sensitive.values()):
         raise BackupError("sensitive table data remains in the sanitized SQLite snapshot")
     if counts != source_counts:
         raise BackupError("SQLite online backup table counts do not match the quiesced source")
-    return {"table_counts": counts, "excluded_secret_tables": excluded}
+    result = {"table_counts": counts, "excluded_secret_tables": excluded}
+    if allow_exchange_verifier:
+        result["approved_verifier_fields"] = {
+            "api_credentials.token_digest": {
+                "format": "sha256_lowercase_hex",
+                "validated_rows": counts["api_credentials"],
+            }
+        }
+    return result
 
 
 def _secret_file(relative: PurePosixPath) -> bool:
@@ -1408,7 +1516,9 @@ def _stage_resource(resource: dict[str, Any], staging: Path) -> dict[str, Any]:
         relative = PurePosixPath("payload", resource["id"], "database.sqlite3")
         destination = staging.joinpath(*relative.parts)
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        sanitized = _sqlite_backup(source, destination)
+        sanitized = _sqlite_backup(
+            source, destination, allow_exchange_verifier=_is_approved_exchange_store(resource)
+        )
         digest, size = _sha256_file(destination)
         record.update(sanitized)
         record.update({"archive_path": relative.as_posix(), "sha256": digest, "size_bytes": size})
@@ -1467,7 +1577,10 @@ def _preflight_catalog_sources(catalog: dict[str, Any], container_id: str) -> No
     for resource in catalog["sources"]:
         kind = resource["kind"]
         if kind == "sqlite":
-            _, sensitive = _sqlite_table_counts(_resource_path(resource))
+            _, sensitive = _sqlite_table_counts(
+                _resource_path(resource),
+                allow_exchange_verifier=_is_approved_exchange_store(resource),
+            )
             if any(sensitive.values()):
                 raise BackupError(
                     "SQLite source contains candidate credential rows; move them to external secret storage before backup"
@@ -1876,12 +1989,14 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
         raise BackupError("snapshot resource inventory is invalid")
     covered: set[str] = set()
     identifiers: set[str] = set()
+    resources_by_path: dict[str, dict[str, Any]] = {}
     for resource in resources:
         if not isinstance(resource, dict):
             raise BackupError("snapshot resource record is invalid")
         resource_id = resource.get("id")
         kind = resource.get("kind")
         categories = resource.get("categories")
+        owner = resource.get("owner")
         if (
             not isinstance(resource_id, str)
             or not SLUG.fullmatch(resource_id)
@@ -1891,8 +2006,15 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
         identifiers.add(resource_id)
         if kind not in {"sqlite", "tree", "postgres", "reference"}:
             raise BackupError("snapshot resource kind is invalid")
-        if resource.get("secret_policy") != "external_refs_only":
-            raise BackupError("snapshot does not record the source owner secret-policy attestation")
+        if owner not in OWNER_NAMES:
+            raise BackupError("snapshot resource owner is invalid")
+        secret_policy = resource.get("secret_policy")
+        approved_exchange_store = _is_approved_exchange_store(resource)
+        expected_secret_policy = (
+            EXCHANGE_SECRET_POLICY if approved_exchange_store else "external_refs_only"
+        )
+        if secret_policy != expected_secret_policy:
+            raise BackupError("snapshot source credential policy is invalid")
         if not isinstance(categories, list) or not categories:
             raise BackupError("snapshot resource categories are invalid")
         for category in categories:
@@ -1909,7 +2031,8 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
         ):
             raise BackupError("snapshot resource source-version digest is invalid")
         if kind == "reference":
-            _safe_relative(resource.get("path"))
+            relative = _safe_relative(resource.get("path"))
+            resources_by_path[relative.as_posix()] = resource
             if resource.get("copied") is not False:
                 raise BackupError("reference resources must not be copied into the archive")
             if not isinstance(resource.get("file_count"), int) or resource["file_count"] < 1:
@@ -1928,11 +2051,30 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
             if resource.get("archive_path") != f"payload/{resource_id}/database.custom":
                 raise BackupError("PostgreSQL archive path is outside the fixed resource mapping")
         elif kind == "sqlite":
-            _safe_relative(resource.get("path"))
+            relative = _safe_relative(resource.get("path"))
+            resources_by_path[relative.as_posix()] = resource
             if resource.get("archive_path") != f"payload/{resource_id}/database.sqlite3":
                 raise BackupError("SQLite archive path is outside the fixed resource mapping")
+            if relative.as_posix() == EXCHANGE_DATABASE_PATH and not _is_approved_exchange_store(
+                resource
+            ):
+                raise BackupError("Exchange database path is bound to the wrong canonical owner")
+            if _is_approved_exchange_store(resource):
+                expected_verifiers = {
+                    "api_credentials.token_digest": {
+                        "format": "sha256_lowercase_hex",
+                        "validated_rows": counts.get("api_credentials"),
+                    }
+                }
+                if resource.get("approved_verifier_fields") != expected_verifiers:
+                    raise BackupError(
+                        "Exchange API credential verifier validation receipt is invalid"
+                    )
+            elif resource.get("approved_verifier_fields"):
+                raise BackupError("non-Exchange resource contains an unapproved verifier exception")
         else:
-            _safe_relative(resource.get("path"))
+            relative = _safe_relative(resource.get("path"))
+            resources_by_path[relative.as_posix()] = resource
             files = resource.get("files")
             if not isinstance(files, list) or len(files) > MAX_RESOURCE_FILES:
                 raise BackupError("snapshot tree file inventory is invalid")
@@ -1984,6 +2126,14 @@ def _validate_snapshot_manifest(manifest: dict[str, Any]) -> None:
             raise BackupError("snapshot tree byte count is invalid")
     if REQUIRED_CATEGORIES - covered:
         raise BackupError("snapshot does not cover every required operational-state category")
+    for path_text, (required_kind, required_category) in REQUIRED_RESOURCE_PATHS.items():
+        resource = resources_by_path.get(path_text)
+        if (
+            resource is None
+            or resource.get("kind") != required_kind
+            or required_category not in resource.get("categories", [])
+        ):
+            raise BackupError("snapshot omits a canonical Aether application store")
     if manifest.get("required_categories") != sorted(REQUIRED_CATEGORIES):
         raise BackupError("snapshot required-category contract differs from this tool version")
     refs = manifest.get("external_secret_refs")
@@ -2138,7 +2288,9 @@ def _verify_sqlite_payload(archive: Path, resource: dict[str, Any]) -> None:
                 os.close(fd)
         if digest != resource["sha256"] or size != resource["size_bytes"]:
             raise BackupError("SQLite payload digest does not match the resource manifest")
-        counts, sensitive = _sqlite_table_counts(temporary)
+        counts, sensitive = _sqlite_table_counts(
+            temporary, allow_exchange_verifier=_is_approved_exchange_store(resource)
+        )
         if counts != resource.get("table_counts") or any(sensitive.values()):
             raise BackupError("SQLite table counts do not reconcile with the snapshot manifest")
 
@@ -2396,7 +2548,9 @@ def cmd_restore(args: argparse.Namespace) -> int:
                         destination,
                         {"sha256": resource["sha256"], "size_bytes": resource["size_bytes"]},
                     )
-                    counts, sensitive = _sqlite_table_counts(destination)
+                    counts, sensitive = _sqlite_table_counts(
+                        destination, allow_exchange_verifier=_is_approved_exchange_store(resource)
+                    )
                     if counts != resource["table_counts"] or any(sensitive.values()):
                         raise BackupError("restored SQLite database counts do not reconcile")
                     continue
