@@ -124,6 +124,16 @@ The initial WSL readiness gates are `PASS / REAL`: isolated PostgreSQL, the task
 
 The first model-connector integration receipt records real local Qwen/E5 inference and HTTP 200 through the candidate model-api-connector and Exchange gateway. Route planning, test-principal resolution, and audit observation in that run were simulated, so the persisted Product route, production identity, durable audit, and fixed `18682` service remain `NOT_RUN / ACCEPTANCE_PENDING`. The receipt and the separate `REAL` / `SIMULATED` classifications are in `model-api-connector-exchange-5afc0f4.json` and `evidence.jsonl`.
 
+### Live WSL evidence update (receipts through 2026-11-01 UTC)
+
+This snapshot supersedes the earlier pending note only for the named gates below. The fixed local Exchange process now uses the scoped-route candidate `5d5c68d30b353a15d486e639cbb3a7e7745f0d51`, model connector source `b700c61deff4382e8e47ad67d22abc91b28da798`, and SDK candidate `8e271a0942ade7d5d7a197c79e71e500da7f6bf7`. A Product-created endpoint and two scoped routes were persisted through the route-draft/confirm API. The authenticated model list and Qwen chat call returned HTTP 200 (`PASS / REAL`, `exchange-product-chat-5d5c68d.json`). The Product embedding call returned HTTP 404 because this candidate does not register `/v1/embeddings` (`FAIL / REAL`, `exchange-product-embedding-5d5c68d-fail.json`); this is an open P1 blocker, not a model-quality result.
+
+The isolated SearXNG backend returned real JSON search results across two pages from its deliberately restricted Wikipedia-only engine allowlist (`PASS / REAL`, `searxng-live-json-pagination.json`). The PublicWeb DirectPlugin also completed live search/open against that backend and parsed a local TXT fixture in a child process (`PASS / SIMULATED`, `public-web-searxng-real-and-parser-0ae782b.json`): its caller was a local harness rather than the Navigator/DSH product path, and the document was a fixture. These component receipts do not pass the P6 product task, authorization, or attachment bridge gates.
+
+The pinned SmolVLM 256M CPU model produced descriptions for generated image fixtures through the model connector and DirectPlugin (`PASS / SIMULATED`, `smolvlm-256m-real-image-inference.json`). This proves local image inference only; it does not prove a user attachment reaches Navigator or Exchange. At the recorded snapshot the task Compose container reported `unhealthy`, so check its health before another dependent run. The SenseVoice bootstrap/typed gRPC inference remains `PASS / REAL` at the provider component boundary; the official sample transcript differs by one character from the documented expectation (`speech-sensevoice-real.json`).
+
+The PostgreSQL provider test suite completed 17 tests against the isolated database (`database-test-20261101T003639Z-be7b31da.log`). The run used a source-composed provider runtime and host-supplied deterministic vectors; it does not establish official PackageSpec installation or E5-backed Product memory retrieval. The real E5 connector and Exchange Product embedding gate remains blocked by the missing endpoint noted above. Navigator/Client Web turn and browser acceptance had not run at this snapshot. Teams, QQ, and Bilibili remain `DEFERRED_BY_USER / NOT_RUN`; cloud VM, ACA, production ingress, and production Bot configuration remain outside the test boundary and unchanged.
+
 Use these classifications consistently:
 
 | Status | Mode | Meaning |
@@ -273,6 +283,16 @@ pnpm --version
 当前 WSL 基础设施门禁为 `PASS / REAL`：隔离 PostgreSQL、任务专用 Node/pnpm、Playwright Chromium 启动以及本地 Qwen/E5 推理。SenseVoice provider 子门禁也通过真实候选插件进程调用，但 sample 转写和上游预期相差一个字符。这些组件检查不能证明 Navigator 附件到上下文链路或完整 P8 产品验收；P1–P10 产品行为仍须等固定实现候选通过对应门禁后才能验收。用户稍后配置专用账号前，Teams、QQ 和 Bilibili 外部流量记为 `DEFERRED_BY_USER / NOT_RUN`。
 
 首轮模型 connector 集成回执记录了候选 model-api-connector 与 Exchange gateway 对本地 Qwen/E5 的真实调用及 HTTP 200。该轮的 route planner、测试 principal 和 audit observer 使用模拟实现，因此持久化 Product route、生产身份、持久审计和固定 `18682` 服务仍为 `NOT_RUN / ACCEPTANCE_PENDING`。回执及拆分后的 `REAL` / `SIMULATED` 分类记录在 `model-api-connector-exchange-5afc0f4.json` 与 `evidence.jsonl`。
+
+### WSL 实时验收证据更新（回执时间截至 2026-11-01 UTC）
+
+本快照仅对下列明确列出的验收项更新前文的待验收说明。当前固定本地 Exchange 进程使用 scoped-route 候选 `5d5c68d30b353a15d486e639cbb3a7e7745f0d51`、model connector 源码 `b700c61deff4382e8e47ad67d22abc91b28da798` 和 SDK 候选 `8e271a0942ade7d5d7a197c79e71e500da7f6bf7`。通过 route-draft/confirm API 创建并持久化了 Product endpoint 与两条带 scope 的路由。认证后的模型列表和 Qwen chat 均返回 HTTP 200（`PASS / REAL`，`exchange-product-chat-5d5c68d.json`）。Product embedding 请求返回 HTTP 404，因为该候选没有注册 `/v1/embeddings`（`FAIL / REAL`，`exchange-product-embedding-5d5c68d-fail.json`）；这是未解决的 P1 阻塞，不是模型质量结果。
+
+隔离 SearXNG 后端通过明确限制为 Wikipedia 的 engine allowlist，在两页结果中返回真实 JSON 搜索结果（`PASS / REAL`，`searxng-live-json-pagination.json`）。PublicWeb DirectPlugin 也通过该后端完成实时搜索/打开，并在子进程中解析本地 TXT fixture（`PASS / SIMULATED`，`public-web-searxng-real-and-parser-0ae782b.json`）：调用者是本地 harness，不是 Navigator/DSH 产品链路；文档输入是 fixture。这些组件回执不能通过 P6 产品任务、授权或附件桥接门禁。
+
+固定的 SmolVLM 256M CPU 模型通过 model connector 和 DirectPlugin 为生成的图像 fixture 生成了描述（`PASS / SIMULATED`，`smolvlm-256m-real-image-inference.json`）。这只证明本地图片推理，不证明用户附件已到达 Navigator 或 Exchange。在该回执快照时，任务 Compose 容器报告 `unhealthy`；再次运行依赖该服务的验收前须检查健康状态。SenseVoice bootstrap/类型化 gRPC 推理在 provider 组件边界仍为 `PASS / REAL`；官方样例转写与文档预期相差一个字符（`speech-sensevoice-real.json`）。
+
+PostgreSQL provider 测试套件在隔离数据库上完成 17 项测试（`database-test-20261101T003639Z-be7b31da.log`）。该次运行使用源码组合的 provider runtime 和 host 提供的确定性向量；它不能证明官方 PackageSpec 安装或由 E5 驱动的 Product 记忆检索。真实 E5 connector 和 Exchange Product embedding 验收仍受上述缺失 endpoint 阻塞。此快照中 Navigator/Client Web turn 和浏览器验收尚未运行。Teams、QQ 与 Bilibili 仍为 `DEFERRED_BY_USER / NOT_RUN`；云端 VM、ACA、生产入口及生产 Bot 配置不属于本轮测试目标，保持未改动。
 
 按以下分类记录：
 
