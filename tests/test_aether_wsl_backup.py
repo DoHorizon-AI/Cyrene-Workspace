@@ -1,6 +1,10 @@
-"""Offline tests for full Aether application-state backup and fresh restore.
-
-中文：使用真实临时 SQLite 数据库和附件文件验证备份、恢复、对账及失败恢复行为。
+"""
+┌────────────────────────────────────────────────────────────────────────────┐
+│ Module: tests.test_aether_wsl_backup                                        │
+│ Role: Verify isolated Aether backup, archive, and restore contracts.        │
+│                                                                            │
+│ 模块职责：验证 Aether 备份、归档和恢复契约。                                 │
+└────────────────────────────────────────────────────────────────────────────┘
 """
 
 from __future__ import annotations
