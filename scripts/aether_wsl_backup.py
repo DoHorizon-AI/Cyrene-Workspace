@@ -60,6 +60,23 @@ REQUIRED_CATEGORIES = {
     "plugin_blobs",
     "postgres_database",
 }
+REQUIRED_RESOURCE_PATHS = {
+    "navigator/navigator.sqlite3": ("sqlite", "navigator_business"),
+    "navigator/navigator.sqlite3.conversation-memory.sqlite3": (
+        "sqlite",
+        "navigator_business",
+    ),
+    "navigator/navigator.sqlite3.conversation-domains.sqlite3": (
+        "sqlite",
+        "navigator_business",
+    ),
+    "navigator/navigator.sqlite3.work-attachments": ("tree", "navigator_attachments"),
+    "navigator/artifacts": ("tree", "navigator_attachments"),
+    "navigator/dsh-home": ("tree", "navigator_dsh"),
+    "navigator/providers/memory.sqlite3": ("sqlite", "plugin_database"),
+    "navigator/providers/knowledge-graph.sqlite3": ("sqlite", "plugin_database"),
+    "local-product/exchange-product.sqlite3": ("sqlite", "exchange_database"),
+}
 QUIESCENT_COMPONENTS = {"navigator", "dsh", "exchange", "plugins", "postgres"}
 CATEGORY_KINDS = {
     "navigator_business": {"sqlite"},
@@ -84,7 +101,8 @@ MANIFEST_EXTRA_EXCLUSION_CATEGORIES = {"postgres_restore_drill_databases"}
 OWNER_NAMES = {"navigator", "exchange", "plugins", "workspace"}
 SENSITIVE_NAME = re.compile(
     r"(^|[^a-z])(secret|password|passwd|access[_-]?token|refresh[_-]?token|"
-    r"bearer[_-]?token|api[_-]?key|private[_-]?key|credential[_-]?value)([^a-z]|$)",
+    r"bearer[_-]?token|api[_-]?key|private[_-]?key|"
+    r"credential[_-]?(?:value|blob|data|bytes|token|secret|payload|ciphertext))([^a-z]|$)",
     re.IGNORECASE,
 )
 SENSITIVE_TABLE_NAME = re.compile(
@@ -377,6 +395,15 @@ def _copy_regular(source: Path, destination: Path) -> dict[str, Any]:
     中文：不跟随链接地将普通文件复制到私有暂存目录。
     """
     source_info = _lstat_owned(source, regular=True)
+    source_identity = (
+        source_info.st_dev,
+        source_info.st_ino,
+        source_info.st_uid,
+        source_info.st_mode,
+        source_info.st_size,
+        source_info.st_mtime_ns,
+        source_info.st_ctime_ns,
+    )
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(
         destination,
@@ -386,6 +413,13 @@ def _copy_regular(source: Path, destination: Path) -> dict[str, Any]:
     try:
         source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         try:
+            opened_info = os.fstat(source_fd)
+            if (
+                not stat.S_ISREG(opened_info.st_mode)
+                or opened_info.st_uid != os.geteuid()
+                or _file_identity(opened_info) != source_identity
+            ):
+                raise BackupError("source changed while opening; retry after quiescence")
             with (
                 os.fdopen(source_fd, "rb", closefd=False) as input_stream,
                 os.fdopen(fd, "wb", closefd=False) as output_stream,
@@ -393,13 +427,35 @@ def _copy_regular(source: Path, destination: Path) -> dict[str, Any]:
                 digest, size = _copy_stream(input_stream, output_stream)
                 output_stream.flush()
                 os.fsync(output_stream.fileno())
+            copied_info = os.fstat(source_fd)
         finally:
             os.close(source_fd)
     finally:
         os.close(fd)
-    if size != source_info.st_size:
+    final_info = _lstat_owned(source, regular=True)
+    if (
+        size != source_info.st_size
+        or _file_identity(copied_info) != source_identity
+        or _file_identity(final_info) != source_identity
+    ):
         raise BackupError("source changed while copying; retry after quiescence")
     return {"sha256": digest, "size_bytes": size}
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Returns stable file metadata used to detect mutation during a copy.
+
+    中文：返回复制期间用于检测文件变化的稳定元数据。
+    """
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
 def _catalog_digest(catalog: dict[str, Any]) -> str:
@@ -431,6 +487,7 @@ def _validate_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
     covered: set[str] = set()
     identifiers: set[str] = set()
     source_paths: dict[str, str] = {}
+    sources_by_path: dict[str, dict[str, Any]] = {}
     for resource in resources:
         if not isinstance(resource, dict):
             raise BackupError("source catalog resource is invalid")
@@ -481,6 +538,7 @@ def _validate_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
             if path_text in source_paths and resource_id != source_paths[path_text]:
                 raise BackupError("source path is assigned to more than one resource")
             source_paths[path_text] = resource_id
+            sources_by_path[path_text] = resource
             if kind == "reference" and not any(
                 category.endswith("_reference") for category in categories
             ):
@@ -503,6 +561,14 @@ def _validate_catalog(catalog: dict[str, Any]) -> dict[str, Any]:
                 _lstat_owned(source, directory=True)
             else:
                 _lstat_owned(source)
+    for path_text, (required_kind, required_category) in REQUIRED_RESOURCE_PATHS.items():
+        source = sources_by_path.get(path_text)
+        if (
+            source is None
+            or source.get("kind") != required_kind
+            or required_category not in source.get("categories", [])
+        ):
+            raise BackupError("source catalog is missing a canonical Aether application store")
     missing = REQUIRED_CATEGORIES - covered
     if missing:
         raise BackupError(
@@ -626,6 +692,7 @@ def _sqlite_table_counts(path: Path) -> tuple[dict[str, int], dict[str, int]]:
 
     中文：返回各表行数，并统计按 schema 名称识别的敏感表记录数。
     """
+    _validate_sqlite_sidecars(path)
     uri = f"file:{path.as_posix()}?mode=ro"
     try:
         connection = sqlite3.connect(uri, uri=True, timeout=30)
@@ -669,6 +736,21 @@ def _sqlite_connection_counts(
     return counts, secret_counts
 
 
+def _validate_sqlite_sidecars(path: Path) -> None:
+    """Rejects symlinked or foreign-owned SQLite WAL/SHM sidecars.
+
+    中文：拒绝符号链接或非当前用户所有的 SQLite WAL/SHM sidecar。
+    """
+    for suffix in ("-wal", "-shm", "-journal"):
+        sidecar = Path(f"{path}{suffix}")
+        try:
+            sidecar.lstat()
+        except FileNotFoundError:
+            continue
+        _ensure_no_symlink_components(sidecar)
+        _lstat_owned(sidecar, regular=True)
+
+
 def _is_sensitive_schema(table: str, columns: list[str]) -> bool:
     """Finds likely credential-value fields while preserving external reference fields.
 
@@ -698,6 +780,7 @@ def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
     中文：先核对敏感 schema；发现任何候选凭据记录时拒绝落盘复制。
     """
     _lstat_owned(source, regular=True)
+    _validate_sqlite_sidecars(source)
     if destination.exists() or destination.is_symlink():
         raise BackupError("SQLite staging destination already exists")
     source_uri = f"file:{source.as_posix()}?mode=ro"
@@ -723,7 +806,7 @@ def _sqlite_backup(source: Path, destination: Path) -> dict[str, Any]:
         if target_connection is not None:
             target_connection.close()
         source_connection.close()
-    for suffix in ("-wal", "-shm"):
+    for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{destination}{suffix}")
         try:
             sidecar_info = sidecar.lstat()
@@ -1376,6 +1459,33 @@ def _count_declared_exclusions(catalog: dict[str, Any]) -> dict[str, dict[str, i
     return totals
 
 
+def _preflight_catalog_sources(catalog: dict[str, Any], container_id: str) -> None:
+    """Checks every declared store before creating any snapshot payload.
+
+    中文：在创建任何快照 payload 前检查所有已登记 store，避免不完整预检留下备份内容。
+    """
+    for resource in catalog["sources"]:
+        kind = resource["kind"]
+        if kind == "sqlite":
+            _, sensitive = _sqlite_table_counts(_resource_path(resource))
+            if any(sensitive.values()):
+                raise BackupError(
+                    "SQLite source contains candidate credential rows; move them to external secret storage before backup"
+                )
+        elif kind in {"tree", "reference"}:
+            source = _resource_path(resource)
+            info = _lstat_owned(source)
+            if stat.S_ISDIR(info.st_mode):
+                for count, (_path, _file_info) in enumerate(_walk_no_follow(source), start=1):
+                    if count > MAX_RESOURCE_FILES:
+                        raise BackupError("source tree exceeds the bounded file-count limit")
+            elif not stat.S_ISREG(info.st_mode):
+                raise BackupError("tree and reference sources must be regular files or directories")
+    _postgres_physical_inventory(container_id)
+    _pg_database_inventory()
+    _pg_table_inventory()
+
+
 def _tree_manifest_files(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     files: list[dict[str, Any]] = []
     for resource in manifest["resources"]:
@@ -1466,7 +1576,8 @@ def cmd_backup(args: argparse.Namespace) -> int:
     catalog = _validate_catalog(_read_json(catalog_path))
     quiescence = _validate_quiescence(Path(args.quiescence_receipt).absolute())
     _verify_local_docker_engine()
-    _verify_postgres_container()
+    container_id = _verify_postgres_container()
+    _preflight_catalog_sources(catalog, container_id)
     declared_exclusions = _count_declared_exclusions(catalog)
     output_dir = Path(args.output_dir).absolute()
     if output_dir == STATE_DIR or output_dir.is_relative_to(STATE_DIR):

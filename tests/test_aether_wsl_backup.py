@@ -77,7 +77,7 @@ def _database(
             connection.execute(f'INSERT INTO "{table}" (value) VALUES (?)', (f"fixture-{table}",))
         if secret:
             connection.execute(
-                "CREATE TABLE plugin_credentials (id INTEGER PRIMARY KEY, access_token TEXT NOT NULL)"
+                "CREATE TABLE plugin_credentials (id INTEGER PRIMARY KEY, access_token TEXT NOT NULL, credential_blob BLOB)"
             )
             if secret_value is not None:
                 connection.execute(
@@ -108,15 +108,31 @@ def _catalog(state_root: Path) -> dict[str, Any]:
                 "secret_policy": "external_refs_only",
                 "kind": "sqlite",
                 "categories": ["navigator_business"],
-                "path": "navigator/persistence.sqlite3",
+                "path": "navigator/navigator.sqlite3",
+            },
+            {
+                "id": "navigator-conversation-memory",
+                "owner": "navigator",
+                "secret_policy": "external_refs_only",
+                "kind": "sqlite",
+                "categories": ["navigator_business"],
+                "path": "navigator/navigator.sqlite3.conversation-memory.sqlite3",
+            },
+            {
+                "id": "navigator-conversation-domains",
+                "owner": "navigator",
+                "secret_policy": "external_refs_only",
+                "kind": "sqlite",
+                "categories": ["navigator_business"],
+                "path": "navigator/navigator.sqlite3.conversation-domains.sqlite3",
             },
             {
                 "id": "dsh-durable-state",
                 "owner": "navigator",
                 "secret_policy": "external_refs_only",
-                "kind": "sqlite",
+                "kind": "tree",
                 "categories": ["navigator_dsh"],
-                "path": "navigator/harness/dsh.sqlite3",
+                "path": "navigator/dsh-home",
             },
             {
                 "id": "navigator-attachments",
@@ -124,7 +140,15 @@ def _catalog(state_root: Path) -> dict[str, Any]:
                 "secret_policy": "external_refs_only",
                 "kind": "tree",
                 "categories": ["navigator_attachments"],
-                "path": "navigator/attachments",
+                "path": "navigator/navigator.sqlite3.work-attachments",
+            },
+            {
+                "id": "navigator-artifacts",
+                "owner": "navigator",
+                "secret_policy": "external_refs_only",
+                "kind": "tree",
+                "categories": ["navigator_attachments"],
+                "path": "navigator/artifacts",
             },
             {
                 "id": "exchange-state-and-audit",
@@ -141,6 +165,14 @@ def _catalog(state_root: Path) -> dict[str, Any]:
                 "kind": "sqlite",
                 "categories": ["plugin_database"],
                 "path": "navigator/providers/memory.sqlite3",
+            },
+            {
+                "id": "knowledge-graph-provider-database",
+                "owner": "plugins",
+                "secret_policy": "external_refs_only",
+                "kind": "sqlite",
+                "categories": ["plugin_database"],
+                "path": "navigator/providers/knowledge-graph.sqlite3",
             },
             {
                 "id": "plugin-blobs",
@@ -238,6 +270,17 @@ def _fixture(
     monkeypatch.setattr(BACKUP, "DEFAULT_OUTPUT_DIR", tmp_path / "backups")
     monkeypatch.setattr(BACKUP, "_verify_local_docker_engine", lambda: None)
     monkeypatch.setattr(BACKUP, "_verify_postgres_container", lambda: "fixture-container-id")
+    monkeypatch.setattr(
+        BACKUP,
+        "_postgres_physical_inventory",
+        lambda _container_id: {"files": 7, "bytes": 4096},
+    )
+    monkeypatch.setattr(BACKUP, "_pg_database_inventory", lambda: 0)
+    monkeypatch.setattr(
+        BACKUP,
+        "_pg_table_inventory",
+        lambda: ({"public.tasks": 2}, {"public.api_tokens": 1}),
+    )
     (state_root / "postgres-data").mkdir(mode=0o700)
     (state_root / "evidence").mkdir(mode=0o700)
     (state_root / "evidence/fixture.json").write_text("{}\n", encoding="utf-8")
@@ -249,12 +292,39 @@ def _fixture(
     (local_product / "smolvlm-runtime/vision.env").write_text(
         "VISION_TOKEN=not-read\n", encoding="utf-8"
     )
-    _database(state_root / "navigator/persistence.sqlite3", BUSINESS_TABLES[:15], secret=True)
     _database(
-        state_root / "navigator/harness/dsh.sqlite3", ("tasks", "schedules", "handover_state")
+        state_root / "navigator/navigator.sqlite3",
+        ("profiles", "personas", "policies", "tasks", "schedules", "audit_events", "plugin_state"),
     )
+    _database(
+        state_root / "navigator/navigator.sqlite3.conversation-memory.sqlite3",
+        ("conversations", "messages", "memories", "memory_sources"),
+    )
+    _database(
+        state_root / "navigator/navigator.sqlite3.conversation-domains.sqlite3",
+        (
+            "graph_nodes",
+            "graph_edges",
+            "notes",
+            "skills",
+            "watches",
+            "focus_items",
+            "handovers",
+            "reviews",
+        ),
+    )
+    dsh_home = state_root / "navigator/dsh-home"
+    dsh_home.mkdir(mode=0o700, parents=True)
+    (dsh_home / "schedule-state.json").write_text('{"pending":1}\n', encoding="utf-8")
+    (dsh_home / "schedule-state.json").chmod(0o600)
+    (dsh_home / "run.log").write_text("fixture log\n", encoding="utf-8")
+    (dsh_home / "run.log").chmod(0o600)
     _database(state_root / "local-product/exchange-product.sqlite3", ("exchanges", "route_audit"))
-    _database(state_root / "navigator/providers/memory.sqlite3", ("memories", "memory_chunks"))
+    _database(
+        state_root / "navigator/providers/memory.sqlite3",
+        ("memories", "memory_chunks"),
+        secret=True,
+    )
     plugin_db = sqlite3.connect(state_root / "navigator/providers/memory.sqlite3")
     try:
         plugin_db.execute(
@@ -267,7 +337,11 @@ def _fixture(
         plugin_db.commit()
     finally:
         plugin_db.close()
-    attachment_root = state_root / "navigator/attachments"
+    _database(
+        state_root / "navigator/providers/knowledge-graph.sqlite3",
+        ("graph_nodes", "graph_edges"),
+    )
+    attachment_root = state_root / "navigator/navigator.sqlite3.work-attachments"
     attachment_root.mkdir(mode=0o700, parents=True)
     payload = (b"attachment-payload-" * 131_072) + b"tail"
     (attachment_root / "media.bin").write_bytes(payload)
@@ -276,6 +350,10 @@ def _fixture(
         "SECRET_SENTINEL=never-export-this-secret\n", encoding="utf-8"
     )
     (attachment_root / "public-web-secrets.env").chmod(0o600)
+    artifact_root = state_root / "navigator/artifacts/blobs/sha256/ab"
+    artifact_root.mkdir(mode=0o700, parents=True)
+    (artifact_root / "abcdef.bin").write_bytes(b"published-artifact" * 4096)
+    (artifact_root / "abcdef.bin").chmod(0o600)
     plugin_blob_root = state_root / "plugins/state/blobs"
     plugin_blob_root.mkdir(mode=0o700, parents=True)
     (plugin_blob_root / "blob-0001.bin").write_bytes(b"plugin-blob" * 4096)
@@ -317,7 +395,9 @@ def test_full_state_backup_restore_and_safe_rollback(
     state_root, output_dir, _catalog_value, catalog_path, quiescence_path = _fixture(
         tmp_path, monkeypatch
     )
-    original = sqlite3.connect(state_root / "navigator/persistence.sqlite3")
+    original = sqlite3.connect(
+        state_root / "navigator/navigator.sqlite3.conversation-memory.sqlite3"
+    )
     try:
         original.execute("INSERT INTO conversations (value) VALUES ('wal-visible-row')")
         original.commit()
@@ -350,13 +430,20 @@ def test_full_state_backup_restore_and_safe_rollback(
         item for item in manifest["resources"] if item["id"] == "navigator-business"
     )
     assert navigator_resource["table_counts"]["personas"] == 1
-    assert navigator_resource["table_counts"]["reviews"] == 1
-    assert navigator_resource["table_counts"]["conversations"] == 2
-    assert navigator_resource["excluded_secret_tables"]["plugin_credentials"] == 0
+    assert navigator_resource["table_counts"]["policies"] == 1
+    conversation_resource = next(
+        item for item in manifest["resources"] if item["id"] == "navigator-conversation-memory"
+    )
+    assert conversation_resource["table_counts"]["conversations"] == 2
+    domain_resource = next(
+        item for item in manifest["resources"] if item["id"] == "navigator-conversation-domains"
+    )
+    assert domain_resource["table_counts"]["reviews"] == 1
     plugin_resource = next(
         item for item in manifest["resources"] if item["id"] == "plugin-database"
     )
     assert plugin_resource["table_counts"]["connector_credentials"] == 1
+    assert plugin_resource["excluded_secret_tables"]["plugin_credentials"] == 0
     assert (
         next(item for item in manifest["resources"] if item["id"] == "task-postgres")[
             "table_counts"
@@ -380,7 +467,7 @@ def test_full_state_backup_restore_and_safe_rollback(
         "cred:cyrene/aether-wsl-product-data",
     }
     assert manifest["excluded_categories"]["models_toolchain_and_cache"]["copied"] == 0
-    assert manifest["excluded_categories"]["logs_evidence_test_fixtures"]["files"] == 1
+    assert manifest["excluded_categories"]["logs_evidence_test_fixtures"]["files"] == 2
     assert manifest["excluded_categories"]["postgres_physical_database_files"]["files"] == 7
     assert manifest["excluded_categories"]["postgres_physical_database_files"]["copied"] == 0
     assert manifest["excluded_categories"]["postgres_restore_drill_databases"]["databases"] == 0
@@ -407,24 +494,38 @@ def test_full_state_backup_restore_and_safe_rollback(
         == 0
     )
     assert pg_restore_calls and pg_restore_calls[0][0].startswith("aether_restore_")
-    restored = sqlite3.connect(target / "navigator/persistence.sqlite3")
+    restored = sqlite3.connect(target / "navigator/navigator.sqlite3")
     try:
-        assert restored.execute("SELECT COUNT(*) FROM conversations").fetchone() == (2,)
-        assert restored.execute("SELECT COUNT(*) FROM plugin_credentials").fetchone() == (0,)
+        assert restored.execute("SELECT COUNT(*) FROM personas").fetchone() == (1,)
         assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
     finally:
         restored.close()
+    restored_memory = sqlite3.connect(
+        target / "navigator/navigator.sqlite3.conversation-memory.sqlite3"
+    )
+    try:
+        assert restored_memory.execute("SELECT COUNT(*) FROM conversations").fetchone() == (2,)
+    finally:
+        restored_memory.close()
     restored_plugin = sqlite3.connect(target / "navigator/providers/memory.sqlite3")
     try:
+        assert restored_plugin.execute("SELECT COUNT(*) FROM plugin_credentials").fetchone() == (0,)
         assert restored_plugin.execute(
             "SELECT credential_ref FROM connector_credentials"
         ).fetchone() == ("cred:cyrene/aether-wsl-product-data",)
     finally:
         restored_plugin.close()
-    assert (target / "navigator/attachments/media.bin").read_bytes() == (
-        state_root / "navigator/attachments/media.bin"
+    assert (target / "navigator/navigator.sqlite3.work-attachments/media.bin").read_bytes() == (
+        state_root / "navigator/navigator.sqlite3.work-attachments/media.bin"
     ).read_bytes()
-    assert not (target / "navigator/attachments/public-web-secrets.env").exists()
+    assert not (
+        target / "navigator/navigator.sqlite3.work-attachments/public-web-secrets.env"
+    ).exists()
+    assert (target / "navigator/dsh-home/schedule-state.json").is_file()
+    assert not (target / "navigator/dsh-home/run.log").exists()
+    assert (target / "navigator/artifacts/blobs/sha256/ab/abcdef.bin").read_bytes() == (
+        state_root / "navigator/artifacts/blobs/sha256/ab/abcdef.bin"
+    ).read_bytes()
     restore_receipt = target / "restore-receipt.json"
     restore_value = json.loads(restore_receipt.read_text(encoding="utf-8"))
     assert restore_value["status"] == "RESTORED"
@@ -434,7 +535,9 @@ def test_full_state_backup_restore_and_safe_rollback(
     assert rollback["status"] == "ROLLED_BACK_TO_PRESERVED_ORIGINAL"
     assert rollback["original_state_modified"] is False
     assert target.exists()
-    original = sqlite3.connect(state_root / "navigator/persistence.sqlite3")
+    original = sqlite3.connect(
+        state_root / "navigator/navigator.sqlite3.conversation-memory.sqlite3"
+    )
     try:
         assert original.execute("SELECT COUNT(*) FROM conversations").fetchone() == (2,)
     finally:
@@ -478,7 +581,7 @@ def test_sqlite_credential_rows_fail_before_secret_data_reaches_staging(
     _state_root, output_dir, _catalog, catalog_path, quiescence_path = _fixture(
         tmp_path, monkeypatch
     )
-    sensitive_db = sqlite3.connect(Path(BACKUP.STATE_DIR) / "navigator/persistence.sqlite3")
+    sensitive_db = sqlite3.connect(Path(BACKUP.STATE_DIR) / "navigator/providers/memory.sqlite3")
     try:
         sensitive_db.execute(
             "INSERT INTO plugin_credentials (access_token) VALUES (?)",
@@ -497,14 +600,25 @@ def test_sqlite_credential_rows_fail_before_secret_data_reaches_staging(
                 snapshot_id=SNAPSHOT_ID,
             )
         )
-    partial = output_dir / f".{SNAPSHOT_ID}.partial"
-    assert partial.is_dir()
-    payload_root = partial / "payload"
-    assert payload_root.is_dir()
-    assert not [path for path in payload_root.rglob("*") if path.is_file()]
-    for file_path in partial.rglob("*"):
-        if file_path.is_file():
-            assert b"must-never-reach-staging" not in file_path.read_bytes()
+    assert not output_dir.exists()
+
+
+def test_tree_copy_rejects_a_source_that_changes_during_streaming(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"stable-payload")
+    destination = tmp_path / "private" / "copy.bin"
+    original_copy = BACKUP._copy_stream
+
+    def mutate_after_copy(input_stream: Any, output_stream: Any) -> tuple[str, int]:
+        result = original_copy(input_stream, output_stream)
+        source.write_bytes(b"changed-payload")
+        return result
+
+    monkeypatch.setattr(BACKUP, "_copy_stream", mutate_after_copy)
+    with pytest.raises(BACKUP.BackupError, match="source changed while copying"):
+        BACKUP._copy_regular(source, destination)
 
 
 def test_postgres_inventory_rejects_unlisted_databases_and_counts_restore_namespaces(
@@ -618,7 +732,7 @@ def test_source_symlink_and_restore_overwrite_are_rejected(
     state_root, output_dir, catalog, catalog_path, quiescence_path = _fixture(tmp_path, monkeypatch)
     outside = tmp_path / "outside.sqlite3"
     _database(outside, ("outside",))
-    source = state_root / "navigator/persistence.sqlite3"
+    source = state_root / "navigator/navigator.sqlite3"
     source.unlink()
     source.symlink_to(outside)
     with pytest.raises(BACKUP.BackupError, match="symlink"):

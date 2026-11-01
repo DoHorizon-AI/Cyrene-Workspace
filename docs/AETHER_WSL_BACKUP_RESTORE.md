@@ -21,14 +21,16 @@ The required operational categories are:
 
 | Category | Required content |
 | --- | --- |
-| `navigator_business` | All canonical Navigator business SQLite databases, including memory, profile, graph, policy, persona, note, skill, watch, focus, handover, review, and conversation state where those stores exist. |
-| `navigator_dsh` | DSH durable task, handover, and schedule state. |
-| `navigator_attachments` | Authorized attachment and media artifacts. Generated test fixtures are excluded and counted. |
+| `navigator_business` | All canonical Navigator business SQLite databases, including `navigator/navigator.sqlite3` and the `navigator.sqlite3.conversation-memory.sqlite3` and `navigator.sqlite3.conversation-domains.sqlite3` sidecar stores. These retain message, memory, profile, graph, policy, persona, note, skill, watch, focus, handover, review, and conversation state. |
+| `navigator_dsh` | DSH durable task, handover, and schedule state below `navigator/dsh-home`. |
+| `navigator_attachments` | Work attachments below `navigator/navigator.sqlite3.work-attachments` and published artifact blobs below `navigator/artifacts/blobs/sha256`. Generated test fixtures are excluded and counted. |
 | `exchange_database` | Exchange persisted application database. |
 | `exchange_audit` | Exchange audit history, in the authoritative audit store. |
-| `plugin_database` | Every stateful Plugin-owned database. |
+| `plugin_database` | Every stateful Plugin-owned database, including the memory and knowledge-graph provider databases under `navigator/providers/` when present. |
 | `plugin_blobs` | Every stateful Plugin-owned blob store. |
 | `postgres_database` | The complete task database `cyrene_aether`, exported through `pg_dump`. |
+
+The Navigator paths above follow the current `serve-local.py` and WorkStore declarations. The acceptance owner must confirm the resolved runtime paths and store types after startup before creating the catalog; static source paths alone are not live acceptance evidence.
 
 If Exchange audit is stored in the same SQLite database as Exchange application state, one resource may carry both `exchange_database` and `exchange_audit`. A database or directory can satisfy multiple categories only when it is the canonical store for each one. Add every distinct store as its own resource.
 
@@ -43,7 +45,7 @@ If Exchange audit is stored in the same SQLite database as Exchange application 
 
 The catalog should list the known environment files individually, such as `postgres.env`, `local-product/services.env`, and runtime `*.env` files. Tree sources also omit credential-looking names, logs, evidence, fixtures, and cache paths by name. The catalog must list external secret references as opaque identifiers, for example `env:CYRENE_EXCHANGE_BEARER_TOKEN` or `cred:cyrene/aether-wsl-product-data`; never put secret values in either JSON file.
 
-SQLite uses the online backup API and reconciles every included table count. Before writing any SQLite snapshot to disk, the tool examines table and column names for credential-bearing schemas. If a candidate credential table contains rows, backup fails before creating a database payload; move those values to external secret storage and retain only references before retrying. PostgreSQL schema-detected secret tables keep their schema but their table data is excluded from `pg_dump`. Every source owner must attest that credentials are represented only by external references. This schema check does not inspect arbitrary user-authored text or binary attachment contents.
+SQLite uses the online backup API and reconciles every included table count. Before writing any SQLite snapshot to disk, the tool examines table and column names for credential-bearing schemas, including encrypted credential blobs. If a candidate credential table contains rows, backup fails before creating a database payload; move those values to external secret storage and retain only references before retrying. PostgreSQL schema-detected secret tables keep their schema but their table data is excluded from `pg_dump`. Every source owner must attest that credentials are represented only by external references. This schema check does not inspect arbitrary user-authored text or binary attachment contents.
 
 The quiescence receipt is an owner attestation rather than a process or port probe. It must name all of `navigator`, `dsh`, `exchange`, `plugins`, and `postgres`, and set `effects_suspended`, `outbound_sends_suspended`, `schedules_suspended`, and `automation_replay_disabled` to `true`. Its expiry may be no more than two hours after creation. The utility rejects an expired, incomplete, or incorrectly scoped receipt.
 
@@ -119,14 +121,16 @@ The focused unit suite uses real temporary SQLite databases and attachments, but
 
 | 类别 | 必需内容 |
 | --- | --- |
-| `navigator_business` | 所有规范 Navigator 业务 SQLite 数据库；按实际 store 覆盖 memory、profile、graph、policy、persona、note、skill、watch、focus、handover、review 与 conversation 状态。 |
-| `navigator_dsh` | DSH 持久任务、handover 与 schedule 状态。 |
-| `navigator_attachments` | 已授权的附件与媒体文件；生成的测试 fixture 要排除并计数。 |
+| `navigator_business` | 所有规范 Navigator 业务 SQLite 数据库，包括 `navigator/navigator.sqlite3` 以及 `navigator.sqlite3.conversation-memory.sqlite3`、`navigator.sqlite3.conversation-domains.sqlite3` sidecar store。它们保留 message、memory、profile、graph、policy、persona、note、skill、watch、focus、handover、review 和 conversation 状态。 |
+| `navigator_dsh` | `navigator/dsh-home` 下的 DSH 持久任务、handover 与 schedule 状态。 |
+| `navigator_attachments` | `navigator/navigator.sqlite3.work-attachments` 下的 Work attachment，以及 `navigator/artifacts/blobs/sha256` 下已发布的 artifact blob；生成的测试 fixture 要排除并计数。 |
 | `exchange_database` | Exchange 持久化应用数据库。 |
 | `exchange_audit` | Exchange 规范审计存储中的历史记录。 |
-| `plugin_database` | 每个有状态 Plugin 所有的数据库。 |
+| `plugin_database` | 每个有状态 Plugin 所有的数据库；存在时包括 `navigator/providers/` 下的 memory 和 knowledge-graph provider 数据库。 |
 | `plugin_blobs` | 每个有状态 Plugin 所有的 blob store。 |
 | `postgres_database` | 通过 `pg_dump` 导出的完整 task 数据库 `cyrene_aether`。 |
+
+上述 Navigator 路径遵循当前 `serve-local.py` 和 WorkStore 声明。验收 owner 必须在启动后确认实际解析出的运行时路径和 store 类型，再创建 catalog；静态源码路径不代表 live acceptance 证据。
 
 如果 Exchange 审计与应用状态保存在同一个 SQLite 数据库中，一项 source 可以同时标记 `exchange_database` 与 `exchange_audit`。只有在同一资源确实是这两类数据的规范存储时才允许多重分类。不同 store 必须分别登记。
 
@@ -141,7 +145,7 @@ The focused unit suite uses real temporary SQLite databases and attachments, but
 
 catalog 应逐一列出已知环境文件，例如 `postgres.env`、`local-product/services.env` 和运行时 `*.env` 文件。文件树会按名称排除凭据文件、日志、evidence、fixture 和 cache。外部 secret reference 只能填写不透明标识，例如 `env:CYRENE_EXCHANGE_BEARER_TOKEN` 或 `cred:cyrene/aether-wsl-product-data`；不得在任一 JSON 文件中写入 secret 值。
 
-SQLite 使用 online backup API，并对账每一张被包含的表。写入任何 SQLite 快照前，工具先检查表名和列名中的凭据特征。如果候选凭据表含有记录，工具会在创建数据库 payload 前失败；应先将这些值移入外部 secret storage，并只保留 reference 后再重试。PostgreSQL 中 schema 标记为敏感的表会保留 schema，但其表数据会从 `pg_dump` 中排除。每个 source owner 必须声明 credential 只以 external reference 形式保存。该 schema 检查不会扫描任意用户文本或二进制附件内容。
+SQLite 使用 online backup API，并对账每一张被包含的表。写入任何 SQLite 快照前，工具先检查表名和列名中的凭据特征，包括加密凭据 blob。如果候选凭据表含有记录，工具会在创建数据库 payload 前失败；应先将这些值移入外部 secret storage，并只保留 reference 后再重试。PostgreSQL 中 schema 标记为敏感的表会保留 schema，但其表数据会从 `pg_dump` 中排除。每个 source owner 必须声明 credential 只以 external reference 形式保存。该 schema 检查不会扫描任意用户文本或二进制附件内容。
 
 Quiescence receipt 是 owner attestation，不是进程或端口探测结果。它必须列出 `navigator`、`dsh`、`exchange`、`plugins` 和 `postgres`，并将 `effects_suspended`、`outbound_sends_suspended`、`schedules_suspended` 与 `automation_replay_disabled` 设为 `true`。有效期不得超过创建时间后的两小时。receipt 范围错误、过期或字段不全时，工具会拒绝备份。
 
