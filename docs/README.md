@@ -28,6 +28,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md): Linux Catalyst/Echo trial launcher, optional UI, remote binding, backup, and cleanup.
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md): Catalyst-only source review, isolated OCR setup, one-call local model acceptance, dual-profile publishing, and restart recovery.
 - [**Component update packaging**](../packaging/service-bundle.md): Linux component updater, verified catalog metadata, and immutable service packaging.
+- [**Aether migration WSL acceptance**](AETHER_MIGRATION_ACCEPTANCE.md): Isolated local services, the P0–P10 behavior matrix, and evidence rules.
 
 ---
 
@@ -77,6 +78,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**DATA_TOOLS_TRIAL.md**](DATA_TOOLS_TRIAL.md)：Linux Catalyst/Echo 试用启动器、可选 UI、远程绑定、备份和清理。
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md)：Catalyst-only 来源审核、隔离 OCR 配置、单次本地模型验收、双制品发布和重启恢复。
 - [**Component update packaging**](../packaging/service-bundle.md)：Linux 组件更新器、已验证目录元数据和不可变服务打包。
+- [**Aether 迁移 WSL 验收**](AETHER_MIGRATION_ACCEPTANCE.md)：隔离的本地服务、P0–P10 行为矩阵和证据规则。
 
 ---
 

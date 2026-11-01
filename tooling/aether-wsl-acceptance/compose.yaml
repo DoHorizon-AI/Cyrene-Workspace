@@ -1,0 +1,109 @@
+name: cyrene-aether-wsl-acceptance
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:7d0a41464797aeb9862dfdc0bbf1526b82cfd324cdd8036df19e3545f4a9ccb8
+    platform: linux/amd64
+    restart: "no"
+    env_file:
+      - ${CYRENE_AETHER_ACCEPTANCE_STATE:?}/postgres.env
+    volumes:
+      - ${CYRENE_AETHER_ACCEPTANCE_STATE:?}/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    labels:
+      io.cyrene.task: aether-wsl-acceptance-20261031
+      io.cyrene.owner: codex
+      io.cyrene.managed-by: scripts/aether_wsl_acceptance.py
+    networks:
+      - data
+
+  qwen:
+    image: ghcr.io/ggml-org/llama.cpp:server@sha256:d9e9e74ba3f7ef119b1939162b1631f99b75ec703c310d140cfa2fdac8907389
+    platform: linux/amd64
+    profiles: ["models"]
+    restart: "no"
+    user: ${CYRENE_AETHER_UID:?}:${CYRENE_AETHER_GID:?}
+    command:
+      - -m
+      - /models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - --alias
+      - cyrene-local-qwen25-05b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "4096"
+      - --threads
+      - "6"
+      - --parallel
+      - "1"
+    environment:
+      HOME: /tmp
+    volumes:
+      - ${CYRENE_AETHER_ACCEPTANCE_STATE:?}/models/qwen:/models:ro
+    labels:
+      io.cyrene.task: aether-wsl-acceptance-20261031
+      io.cyrene.owner: codex
+      io.cyrene.managed-by: scripts/aether_wsl_acceptance.py
+    networks:
+      data:
+        aliases:
+          - aether-qwen
+
+  embedding:
+    image: cyrene-aether/embedding-cpu:20261031
+    platform: linux/amd64
+    profiles: ["models"]
+    restart: "no"
+    user: ${CYRENE_AETHER_UID:?}:${CYRENE_AETHER_GID:?}
+    build:
+      context: .
+      dockerfile: embedding.Dockerfile
+      labels:
+        io.cyrene.task: aether-wsl-acceptance-20261031
+        io.cyrene.managed-by: scripts/aether_wsl_acceptance.py
+    environment:
+      AETHER_EMBEDDING_MODEL: intfloat/multilingual-e5-small
+      AETHER_EMBEDDING_MODEL_PATH: /models/model_qint8_avx512_vnni.onnx
+      AETHER_EMBEDDING_TOKENIZER_PATH: /models/tokenizer.json
+      AETHER_EMBEDDING_REVISION: 614241f622f53c4eeff9890bdc4f31cfecc418b3
+      AETHER_EMBEDDING_THREADS: "4"
+    volumes:
+      - ${CYRENE_AETHER_ACCEPTANCE_STATE:?}/models/e5:/models:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=2).read()
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    labels:
+      io.cyrene.task: aether-wsl-acceptance-20261031
+      io.cyrene.owner: codex
+      io.cyrene.managed-by: scripts/aether_wsl_acceptance.py
+    networks:
+      data:
+        aliases:
+          - aether-embedding
+
+networks:
+  data:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.247.253.0/24
+          gateway: 10.247.253.1
+    labels:
+      io.cyrene.task: aether-wsl-acceptance-20261031
+      io.cyrene.owner: codex
+      io.cyrene.managed-by: scripts/aether_wsl_acceptance.py
