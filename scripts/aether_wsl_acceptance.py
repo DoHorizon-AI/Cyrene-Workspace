@@ -55,6 +55,7 @@ PNPM_VERSION = "11.7.0"
 PNPM_INTEGRITY = "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=="
 MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
 MAX_EVIDENCE_FILE_BYTES = 50 * 1024 * 1024
+MAX_PRIVATE_ENV_BYTES = 64 * 1024
 SAFE_EVIDENCE_SUFFIXES = frozenset(
     {
         ".csv",
@@ -371,6 +372,36 @@ def _read_private_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise AcceptanceError(f"The private {label} JSON must be an object.")
     return value
+
+
+def _read_private_env(path: Path, label: str) -> dict[str, str]:
+    """Read one small task-owned env file without displaying its values."""
+    fd = _open_private_regular_file(path, os.O_RDONLY, 0o600, label)
+    try:
+        with os.fdopen(fd, "rb") as environment_file:
+            if os.fstat(environment_file.fileno()).st_size > MAX_PRIVATE_ENV_BYTES:
+                raise AcceptanceError(f"The private {label} file exceeds its size bound.")
+            raw = environment_file.read(MAX_PRIVATE_ENV_BYTES + 1)
+        if len(raw) > MAX_PRIVATE_ENV_BYTES:
+            raise AcceptanceError(f"The private {label} file exceeds its size bound.")
+        lines = raw.decode("utf-8").splitlines()
+    except AcceptanceError:
+        raise
+    except (OSError, UnicodeError):
+        raise AcceptanceError(f"The private {label} file is malformed or unreadable.") from None
+    if len(lines) > 1024:
+        raise AcceptanceError(f"The private {label} file exceeds its size bound.")
+    values: dict[str, str] = {}
+    for line in lines:
+        if not line or line.startswith("#"):
+            continue
+        name, separator, value = line.partition("=")
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", name):
+            raise AcceptanceError(f"The private {label} file contains an invalid entry.")
+        if name in values or "\n" in value or "\r" in value:
+            raise AcceptanceError(f"The private {label} file contains duplicate or invalid values.")
+        values[name] = value
+    return values
 
 
 def _ensure_state() -> None:
@@ -1572,6 +1603,372 @@ def cmd_speech_smoke(args: argparse.Namespace) -> None:
     print(f"speech_receipt={receipt_path}")
 
 
+def cmd_identity_prepare(_: argparse.Namespace) -> None:
+    """Create local-only service credentials and a strict Navigator principal map."""
+    _require_wsl2_x64()
+    _ensure_state()
+    model_receipt_path = EVIDENCE_DIR / "local-model-endpoints.json"
+    model_receipt = _read_private_json(model_receipt_path, "local model receipt")
+    if model_receipt.get("classification") != "REAL" or model_receipt.get("status") != "PASS":
+        raise AcceptanceError("Prepare and verify the local Qwen/E5 model endpoints first.")
+
+    def local_model_endpoint(name: str, expected_port: int) -> str:
+        raw = model_receipt.get(name)
+        if not isinstance(raw, str):
+            raise AcceptanceError(f"The local model receipt is missing {name}.")
+        parsed = urllib.parse.urlparse(raw)
+        try:
+            address = ipaddress.ip_address(parsed.hostname or "")
+            port = parsed.port
+        except ValueError:
+            raise AcceptanceError(f"The local model receipt has an invalid {name}.") from None
+        if (
+            parsed.scheme != "http"
+            or address not in TASK_SUBNET
+            or port != expected_port
+            or parsed.path != "/v1"
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise AcceptanceError(f"The local model receipt has a non-task {name} endpoint.")
+        return raw
+
+    chat_url = local_model_endpoint("wsl_host_chat_endpoint", 8080)
+    embeddings_url = local_model_endpoint("wsl_host_embedding_endpoint", 8081)
+    model_manifest = _read_private_json(
+        STATE_DIR / "models" / "manifest.json", "local model manifest"
+    )
+    expected_e5 = next(
+        item
+        for item in MODEL_ARTIFACTS
+        if item["model_id"] == "intfloat/multilingual-e5-small"
+        and item["relative_path"] == "onnx/model_qint8_avx512_vnni.onnx"
+    )
+    artifacts = model_manifest.get("artifacts")
+    e5_artifact = (
+        next(
+            (
+                item
+                for item in artifacts
+                if isinstance(item, dict)
+                and item.get("model_id") == "intfloat/multilingual-e5-small"
+                and item.get("sha256") == expected_e5["sha256"]
+            ),
+            None,
+        )
+        if isinstance(artifacts, list)
+        else None
+    )
+    if (
+        not isinstance(e5_artifact, dict)
+        or e5_artifact.get("revision") != expected_e5["revision"]
+        or e5_artifact.get("sha256") != expected_e5["sha256"]
+    ):
+        raise AcceptanceError(
+            "The local E5 model manifest differs from the pinned embedding profile."
+        )
+    embedding_profile_fields = {
+        "model_id": "intfloat/multilingual-e5-small",
+        "model_revision": expected_e5["revision"],
+        "model_sha256": expected_e5["sha256"],
+        "dimensions": 384,
+        "document_prefix": "passage: ",
+        "query_prefix": "query: ",
+    }
+    embedding_profile_digest = hashlib.sha256(
+        json.dumps(embedding_profile_fields, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    embedding_profile_id = f"sha256:{embedding_profile_digest}"
+    product_state = STATE_DIR / "local-product"
+    _secure_directory(product_state)
+    environment_path = product_state / "services.env"
+    principals_path = product_state / "navigator-principals.json"
+    embedding_profile_path = product_state / "embedding-profile.json"
+    identity_path = EVIDENCE_DIR / "local-service-identity.json"
+    existing = tuple(
+        path.exists() or path.is_symlink() for path in (environment_path, principals_path)
+    )
+    if any(existing) and not all(existing):
+        raise AcceptanceError(
+            "Local service identity files are incomplete; preserve them for review."
+        )
+    if all(existing):
+        environment = _read_private_env(environment_path, "local service environment")
+        principals = _read_private_json(principals_path, "Navigator principal configuration")
+        _validate_local_identity(environment, principals, chat_url, embeddings_url)
+    else:
+        data_token = secrets.token_hex(32)
+        work_token = secrets.token_hex(32)
+        session_token = secrets.token_hex(32)
+        control_token = secrets.token_hex(32)
+        bootstrap_token = secrets.token_hex(32)
+        local_control_token = secrets.token_hex(32)
+        model_id = "cyrene-local-qwen25-05b"
+        environment = {
+            "CYRENE_EXCHANGE_BEARER_TOKEN": data_token,
+            "CYRENE_EXCHANGE_TOKEN": data_token,
+            "CYRENE_EXCHANGE_CONTROL_BEARER_TOKEN": control_token,
+            "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN": bootstrap_token,
+            "CYRENE_EXCHANGE_URL": "http://127.0.0.1:18682/v1",
+            "CYRENE_EXCHANGE_ACTOR_ID": "aether-local-acceptance",
+            "CYRENE_EXCHANGE_ORGANIZATION_ID": "cyrene-aether-local",
+            "CYRENE_EXCHANGE_WORKSPACE_ID": "local",
+            "CYRENE_EXCHANGE_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-data",
+            "CYRENE_EXCHANGE_CONTROL_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-control",
+            "CYRENE_EXCHANGE_BOOTSTRAP_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-bootstrap",
+            "CYRENE_HARNESS_MODEL": model_id,
+            "CYRENE_HARNESS_MODEL_SOURCE": "exchange",
+            "CYRENE_VLLM_BASE_URL": chat_url,
+            "CYRENE_VLLM_MODEL": model_id,
+            "CYRENE_CHAT_BASE_URL": chat_url,
+            "CYRENE_CHAT_MODEL": model_id,
+            "CYRENE_CHAT_API_KEY": "",
+            "CYRENE_CHAT_TIMEOUT": "90",
+            "CYRENE_EMBEDDINGS_SUPPORTED": "true",
+            "CYRENE_EMBEDDINGS_BASE_URL": embeddings_url,
+            "CYRENE_EMBEDDINGS_MODEL": "intfloat/multilingual-e5-small",
+            "CYRENE_EMBEDDINGS_TIMEOUT": "30",
+            "CYRENE_SESSION_TOKEN": session_token,
+            "CYRENE_WORK_ATTACHMENT_TOKEN": work_token,
+            "CYRENE_WORK_ATTACHMENT_ORIGIN": "http://127.0.0.1:18681",
+            "CYRENE_WORK_ATTACHMENT_CREDENTIAL_REF": "cred://cyrene/aether-wsl-work-attachments",
+            "STUDIO_LOCAL_API_TOKEN": local_control_token,
+            "STUDIO_WORKSPACE_ID": "local",
+            "CYRENE_WORKSPACE_ID": "local",
+            "CYRENE_ORGANIZATION_ID": "cyrene-aether-local",
+        }
+        principals = {
+            "principals": [
+                {
+                    "token_env": "CYRENE_SESSION_TOKEN",
+                    "actor_id": "aether-local-acceptance",
+                    "workspace_ids": ["local"],
+                    "organization_id": "cyrene-aether-local",
+                    "can_takeover": True,
+                    "can_write_harness": True,
+                    "actor_private_scope": False,
+                },
+                {
+                    "token_env": "CYRENE_WORK_ATTACHMENT_TOKEN",
+                    "actor_id": "aether-local-acceptance",
+                    "workspace_ids": ["local"],
+                    "organization_id": "cyrene-aether-local",
+                    "actor_private_scope": True,
+                },
+            ]
+        }
+        _write_private_file(
+            environment_path,
+            "".join(f"{name}={value}\n" for name, value in environment.items()),
+        )
+        _write_private_file(principals_path, json.dumps(principals, separators=(",", ":")) + "\n")
+        _validate_local_identity(environment, principals, chat_url, embeddings_url)
+
+    _write_private_file(
+        embedding_profile_path,
+        json.dumps({"profile_id": embedding_profile_id, **embedding_profile_fields}, indent=2)
+        + "\n",
+    )
+
+    identity = {
+        "status": "PREPARED",
+        "classification": "LOCAL_STATIC_BEARER_CONFIGURATION",
+        "identity": {
+            "actor_id": "aether-local-acceptance",
+            "organization_id": "cyrene-aether-local",
+            "workspace_id": "local",
+        },
+        "service_endpoints": {
+            "navigator": "http://127.0.0.1:18680",
+            "persistence": "http://127.0.0.1:18681",
+            "exchange": "http://127.0.0.1:18682/v1",
+            "client": "http://127.0.0.1:18684",
+            "control": "http://127.0.0.1:18685",
+        },
+        "model_endpoints": {"chat": chat_url, "embeddings": embeddings_url},
+        "embedding_profile_id": embedding_profile_id,
+        "private_files": {
+            "environment": str(environment_path),
+            "navigator_principals": str(principals_path),
+            "embedding_profile": str(embedding_profile_path),
+        },
+        "secret_environment_names": sorted(
+            name for name in environment if name.endswith(("TOKEN", "BEARER_TOKEN", "API_KEY"))
+        ),
+        "external_directory_or_oidc": "NOT_CONFIGURED",
+        "prepared_at_utc": datetime.now(UTC).isoformat(),
+    }
+    _write_private_file(identity_path, json.dumps(identity, indent=2) + "\n")
+    print("local_identity=PREPARED auth=static-local-bearer external_directory=NOT_CONFIGURED")
+    print(f"local_service_environment={environment_path}")
+    print(f"navigator_principals={principals_path}")
+    print(f"local_identity_receipt={identity_path}")
+
+
+def _validate_local_identity(
+    environment: dict[str, str],
+    principal_config: dict[str, Any],
+    expected_chat_url: str,
+    expected_embeddings_url: str,
+) -> None:
+    """Fail closed unless private local identity and model bindings match this task."""
+    expected_environment_names = {
+        "CYRENE_EXCHANGE_BEARER_TOKEN",
+        "CYRENE_EXCHANGE_TOKEN",
+        "CYRENE_EXCHANGE_CONTROL_BEARER_TOKEN",
+        "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN",
+        "CYRENE_EXCHANGE_URL",
+        "CYRENE_EXCHANGE_ACTOR_ID",
+        "CYRENE_EXCHANGE_ORGANIZATION_ID",
+        "CYRENE_EXCHANGE_WORKSPACE_ID",
+        "CYRENE_EXCHANGE_CREDENTIAL_REF",
+        "CYRENE_EXCHANGE_CONTROL_CREDENTIAL_REF",
+        "CYRENE_EXCHANGE_BOOTSTRAP_CREDENTIAL_REF",
+        "CYRENE_HARNESS_MODEL",
+        "CYRENE_HARNESS_MODEL_SOURCE",
+        "CYRENE_VLLM_BASE_URL",
+        "CYRENE_VLLM_MODEL",
+        "CYRENE_CHAT_BASE_URL",
+        "CYRENE_CHAT_MODEL",
+        "CYRENE_CHAT_API_KEY",
+        "CYRENE_CHAT_TIMEOUT",
+        "CYRENE_EMBEDDINGS_SUPPORTED",
+        "CYRENE_EMBEDDINGS_BASE_URL",
+        "CYRENE_EMBEDDINGS_MODEL",
+        "CYRENE_EMBEDDINGS_TIMEOUT",
+        "CYRENE_SESSION_TOKEN",
+        "CYRENE_WORK_ATTACHMENT_TOKEN",
+        "CYRENE_WORK_ATTACHMENT_ORIGIN",
+        "CYRENE_WORK_ATTACHMENT_CREDENTIAL_REF",
+        "STUDIO_LOCAL_API_TOKEN",
+        "STUDIO_WORKSPACE_ID",
+        "CYRENE_WORKSPACE_ID",
+        "CYRENE_ORGANIZATION_ID",
+    }
+    if set(environment) != expected_environment_names:
+        raise AcceptanceError(
+            "The private local service environment contains extra or missing keys."
+        )
+    required_values = {
+        "CYRENE_EXCHANGE_URL": "http://127.0.0.1:18682/v1",
+        "CYRENE_EXCHANGE_ACTOR_ID": "aether-local-acceptance",
+        "CYRENE_EXCHANGE_ORGANIZATION_ID": "cyrene-aether-local",
+        "CYRENE_EXCHANGE_WORKSPACE_ID": "local",
+        "CYRENE_EXCHANGE_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-data",
+        "CYRENE_EXCHANGE_CONTROL_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-control",
+        "CYRENE_EXCHANGE_BOOTSTRAP_CREDENTIAL_REF": "cred://cyrene/aether-wsl-product-bootstrap",
+        "CYRENE_HARNESS_MODEL": "cyrene-local-qwen25-05b",
+        "CYRENE_HARNESS_MODEL_SOURCE": "exchange",
+        "CYRENE_VLLM_BASE_URL": expected_chat_url,
+        "CYRENE_VLLM_MODEL": "cyrene-local-qwen25-05b",
+        "CYRENE_CHAT_BASE_URL": expected_chat_url,
+        "CYRENE_CHAT_MODEL": "cyrene-local-qwen25-05b",
+        "CYRENE_CHAT_API_KEY": "",
+        "CYRENE_CHAT_TIMEOUT": "90",
+        "CYRENE_EMBEDDINGS_SUPPORTED": "true",
+        "CYRENE_EMBEDDINGS_BASE_URL": expected_embeddings_url,
+        "CYRENE_EMBEDDINGS_MODEL": "intfloat/multilingual-e5-small",
+        "CYRENE_EMBEDDINGS_TIMEOUT": "30",
+        "CYRENE_WORK_ATTACHMENT_ORIGIN": "http://127.0.0.1:18681",
+        "CYRENE_WORK_ATTACHMENT_CREDENTIAL_REF": "cred://cyrene/aether-wsl-work-attachments",
+        "STUDIO_WORKSPACE_ID": "local",
+        "CYRENE_WORKSPACE_ID": "local",
+        "CYRENE_ORGANIZATION_ID": "cyrene-aether-local",
+    }
+    if any(environment.get(name) != value for name, value in required_values.items()):
+        raise AcceptanceError(
+            "The private local service environment differs from the fixed profile."
+        )
+    for name in (
+        "CYRENE_EXCHANGE_BEARER_TOKEN",
+        "CYRENE_EXCHANGE_TOKEN",
+        "CYRENE_EXCHANGE_CONTROL_BEARER_TOKEN",
+        "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN",
+        "CYRENE_SESSION_TOKEN",
+        "CYRENE_WORK_ATTACHMENT_TOKEN",
+        "STUDIO_LOCAL_API_TOKEN",
+    ):
+        value = environment.get(name, "")
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise AcceptanceError(
+                "The private local service environment is missing a generated token."
+            )
+    if environment["CYRENE_EXCHANGE_BEARER_TOKEN"] != environment["CYRENE_EXCHANGE_TOKEN"]:
+        raise AcceptanceError(
+            "Navigator and Product must use the same local data-plane credential."
+        )
+    role_tokens = [
+        environment[name]
+        for name in (
+            "CYRENE_EXCHANGE_BEARER_TOKEN",
+            "CYRENE_EXCHANGE_CONTROL_BEARER_TOKEN",
+            "CYRENE_EXCHANGE_BOOTSTRAP_BEARER_TOKEN",
+            "CYRENE_SESSION_TOKEN",
+            "CYRENE_WORK_ATTACHMENT_TOKEN",
+            "STUDIO_LOCAL_API_TOKEN",
+        )
+    ]
+    if len(role_tokens) != len(set(role_tokens)):
+        raise AcceptanceError("Local service roles must use distinct bearer credentials.")
+    if set(principal_config) != {"principals"}:
+        raise AcceptanceError("The private Navigator principal map contains unsupported fields.")
+    rows = principal_config.get("principals")
+    if (
+        not isinstance(rows, list)
+        or len(rows) != 2
+        or any(not isinstance(row, dict) for row in rows)
+    ):
+        raise AcceptanceError("The private Navigator principal map is malformed.")
+    by_env = {row.get("token_env"): row for row in rows}
+    owner = by_env.get("CYRENE_SESSION_TOKEN", {})
+    attachment = by_env.get("CYRENE_WORK_ATTACHMENT_TOKEN", {})
+    owner_fields = {
+        "token_env",
+        "actor_id",
+        "workspace_ids",
+        "organization_id",
+        "can_takeover",
+        "can_write_harness",
+        "actor_private_scope",
+    }
+    attachment_fields = {
+        "token_env",
+        "actor_id",
+        "workspace_ids",
+        "organization_id",
+        "actor_private_scope",
+    }
+    if set(owner) != owner_fields or set(attachment) != attachment_fields:
+        raise AcceptanceError("The private Navigator principal map contains unsupported grants.")
+    expected_scope = {
+        "actor_id": "aether-local-acceptance",
+        "workspace_ids": ["local"],
+        "organization_id": "cyrene-aether-local",
+    }
+    if (
+        owner.get("token_env") != "CYRENE_SESSION_TOKEN"
+        or any(owner.get(name) != value for name, value in expected_scope.items())
+        or owner.get("actor_private_scope") is not False
+    ):
+        raise AcceptanceError("The private Navigator owner principal has an unexpected scope.")
+    if owner.get("can_takeover") is not True or owner.get("can_write_harness") is not True:
+        raise AcceptanceError("The private Navigator owner principal is missing local Work grants.")
+    if attachment.get("token_env") != "CYRENE_WORK_ATTACHMENT_TOKEN" or any(
+        attachment.get(name) != value for name, value in expected_scope.items()
+    ):
+        raise AcceptanceError("The private attachment principal has an unexpected scope.")
+    if (
+        any(
+            attachment.get(name) is True
+            for name in ("can_takeover", "can_write_harness", "can_publish_credential_health")
+        )
+        or attachment.get("actor_private_scope") is not True
+    ):
+        raise AcceptanceError("The private attachment principal is not read-only actor-scoped.")
+
+
 def _task_service_container(service: str) -> str:
     """Finds exactly one running container for a task-owned Compose service."""
     matches = _run(
@@ -2333,6 +2730,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-contracts-sha", help="Require this exact Contracts commit."
     )
     speech_smoke.set_defaults(handler=cmd_speech_smoke)
+    identity = subparsers.add_parser(
+        "identity", help="Prepare a local-only Navigator and Exchange bearer identity profile."
+    )
+    identity_actions = identity.add_subparsers(dest="identity_action", required=True)
+    identity_prepare = identity_actions.add_parser(
+        "prepare",
+        help="Create owner-only local service tokens and a scoped Navigator principal map.",
+    )
+    identity_prepare.set_defaults(handler=cmd_identity_prepare)
     down = subparsers.add_parser(
         "down", help="Stop this task's service while retaining its database files."
     )

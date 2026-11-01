@@ -30,6 +30,7 @@ python3 scripts/aether_wsl_acceptance.py browser-deps --playwright-package <inst
 python3 scripts/aether_wsl_acceptance.py up
 python3 scripts/aether_wsl_acceptance.py models prepare
 python3 scripts/aether_wsl_acceptance.py models up
+python3 scripts/aether_wsl_acceptance.py identity prepare
 python3 scripts/aether_wsl_acceptance.py speech prepare
 python3 scripts/aether_wsl_acceptance.py status
 ```
@@ -55,6 +56,8 @@ The expected database endpoint from a container attached to the internal network
 
 `models prepare` downloads an official Qwen2.5 0.5B Q4_K_M GGUF, a multilingual E5 small quantized ONNX model, and its tokenizer to the private state directory. Each file is pinned to an immutable Hugging Face revision and SHA-256. `models up` builds the pinned Python CPU embedding service, starts it with the pinned `llama.cpp` server, and verifies a real local chat generation plus two 384-dimensional normalized embeddings. Model services publish no host ports. Containers use `http://aether-qwen:8080/v1` and `http://aether-embedding:8081/v1`; the host-run Exchange process can source `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/models-host.env` to use the current private bridge addresses. E5 inputs should include `query: ` or `passage: ` prefixes as appropriate; the local endpoint embeds the supplied text unchanged. The Qwen model is Apache-2.0; the E5 model is MIT ([Qwen model](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF), [E5 model](https://huggingface.co/intfloat/multilingual-e5-small)).
 
+`identity prepare` creates independent random Product data-plane, Product control, Product endpoint-bootstrap, Navigator session, Work attachment, and local Control credentials under `local-product/`, plus an owner-only strict Navigator principal map. The identities are scoped to actor `aether-local-acceptance`, organization `cyrene-aether-local`, and workspace `local`; the attachment principal is actor-private and read-only. It also writes `embedding-profile.json` with the E5 model revision and digest, 384-dimensional vector binding, and `passage: `/`query: ` prefixes. The command prints paths and scope names only, never token values. This enables a real local static-Bearer acceptance path and does not configure production Directory or OIDC identity.
+
 `speech prepare` installs the hash-pinned `sherpa-onnx` CPU wheel and its runtime packages only under the task state, unpacks the pinned `imageio-ffmpeg` wheel there, and downloads the sherpa-compatible SenseVoice int8 ONNX model, tokenizer, and official `zh.wav` fixture at immutable revision `2365baeacb507f821a0c8120fcee3d484dba7a07`. It records wheel, model, tokenizer, audio, FFmpeg binary hashes, and runtime versions in `models/speech/manifest.json`. The model is governed by the [FunASR Model Open Source License Agreement](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE), including source/model attribution and keeping the model name. The bundled FFmpeg binary reports GPLv3; both are used only in local acceptance state and are not packaged into Cyrene releases.
 
 Run a real provider-process check against exact candidate checkouts with:
@@ -67,7 +70,7 @@ python3 scripts/aether_wsl_acceptance.py speech smoke \
   --expected-contracts-sha <full-40-character-sha>
 ```
 
-The command starts the formal provider bootstrap bound to an ephemeral `127.0.0.1` DirectPluginRuntime endpoint, sends the fixture through the typed gRPC client, checks the typed response, and stops the child process. It does not call a Product route or a cloud endpoint. The current real receipt confirms successful local CPU inference, but the returned sample has a one-character recognition difference from the upstream expected sentence; provider transport/inference passes while recognition quality remains a separate review item.
+The command starts the formal provider bootstrap bound to an ephemeral `127.0.0.1` DirectPluginRuntime endpoint, sends the fixture through the typed gRPC client, checks the typed response, and stops the child process. It does not call a Product route or a cloud endpoint. The repaired provider candidate normalizes the language to `zh` and passes local CPU inference, but the returned sample has a one-character recognition difference from the upstream expected sentence; provider transport/inference passes while recognition quality remains a separate review item. The current receipt records Plugins `96568cff65ddefed9ffe086127ebd6aa0d2ad3df` and Contracts `79a3984dd362c58b5d20fa8ce5ea972408148748`.
 
 Before starting product services, attach their acceptance containers to the existing network created by Compose and publish only the planned loopback ports. Confirm that ports `18680`, `18681`, `18682`, `18684`, and `18685` are free before starting those services. The `doctor` command reports port availability without contacting cloud Cyrene endpoints.
 
@@ -177,6 +180,7 @@ python3 scripts/aether_wsl_acceptance.py browser-deps --playwright-package <已�
 python3 scripts/aether_wsl_acceptance.py up
 python3 scripts/aether_wsl_acceptance.py models prepare
 python3 scripts/aether_wsl_acceptance.py models up
+python3 scripts/aether_wsl_acceptance.py identity prepare
 python3 scripts/aether_wsl_acceptance.py speech prepare
 python3 scripts/aether_wsl_acceptance.py status
 ```
@@ -184,6 +188,8 @@ python3 scripts/aether_wsl_acceptance.py status
 `up` 仅适用于 Ubuntu 24.04 WSL2 x86_64 和本地 Unix socket Docker context。启动前会检查固定任务子网 `10.247.253.0/24` 是否与现有 Docker network 或 WSL 路由重叠，然后只启动带任务标签的 PostgreSQL 依赖。Compose 文件按镜像清单 digest 锁定 pgvector，使用项目内部网络，不发布端口，并且只绑定新的任务状态目录。停止该服务时运行 `python3 scripts/aether_wsl_acceptance.py down --confirm-project cyrene-aether-wsl-acceptance`；数据库文件会保留。
 
 `browser-deps` 会校验 Ubuntu 包索引中的哈希，下载缺失的 Chromium 库但不安装系统包，并解包到任务状态目录。传入已安装 Playwright 包目录后，它还会启动 Chromium、读取本地 data 页面标题并关闭浏览器。`models prepare` 将固定版本的 Qwen2.5 0.5B Q4_K_M GGUF、多语种 E5 small 量化 ONNX 模型及 tokenizer 下载到私有状态目录，并逐个校验 SHA-256。`models up` 构建固定 Python CPU embedding 服务，启动 `llama.cpp` server，并通过真实推理验证本地聊天响应和两个 384 维归一化向量。模型服务不发布主机端口。容器使用 `http://aether-qwen:8080/v1` 与 `http://aether-embedding:8081/v1`；在 WSL 主机运行的 Exchange 可加载 `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/models-host.env`，使用当前私有 bridge 地址。E5 输入应按用途包含 `query: ` 或 `passage: ` 前缀；endpoint 不会改写输入。Qwen 模型许可为 Apache-2.0，E5 为 MIT（[Qwen 模型](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)、[E5 模型](https://huggingface.co/intfloat/multilingual-e5-small)）。运行 Playwright 命令前加载生成的环境文件：
+
+`identity prepare` 会在 `local-product/` 下分别生成 Product 数据面、Product 控制、Product endpoint bootstrap、Navigator session、Work 附件和本地 Control 凭据，并写入仅所有者可读的严格 Navigator principal map。身份限定为 actor `aether-local-acceptance`、organization `cyrene-aether-local`、workspace `local`；附件 principal 为 actor-private 且只读。同时写入 `embedding-profile.json`，固定 E5 模型 revision/摘要、384 维向量和 `passage: `/`query: ` 前缀。命令只打印文件路径和 scope 名，不显示 token 值。它为本地静态 Bearer 验收准备配置，不设置生产 Directory/OIDC 身份。
 
 `speech prepare` 会将带哈希固定的 `sherpa-onnx` CPU wheel 和运行包仅安装到任务状态目录，在那里解包固定版 `imageio-ffmpeg` wheel，并下载 sherpa 兼容的 SenseVoice int8 ONNX 模型、tokenizer 与官方 `zh.wav` fixture（不可变 revision `2365baeacb507f821a0c8120fcee3d484dba7a07`）。wheel、模型、tokenizer、音频、FFmpeg 二进制哈希和运行时版本记录在 `models/speech/manifest.json`。模型遵循 [FunASR Model Open Source License Agreement](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)，需保留来源/作者归属和模型名称。随包 FFmpeg 报告 GPLv3；这两项只用于本地验收状态，不进入 Cyrene release。
 
@@ -197,7 +203,7 @@ python3 scripts/aether_wsl_acceptance.py speech smoke \
   --expected-contracts-sha <完整的 40 位提交 SHA>
 ```
 
-命令会用正式 provider bootstrap 在临时 `127.0.0.1` DirectPluginRuntime 地址启动子进程，经类型化 gRPC client 发送 fixture、校验类型化响应，再停止子进程。它不会调用 Product route 或云端 endpoint。当前真实回执确认本地 CPU 推理成功，但 sample 转写和上游文档预期相差一个字符；provider transport/推理通过，识别质量仍需单独审核。
+命令会用正式 provider bootstrap 在临时 `127.0.0.1` DirectPluginRuntime 地址启动子进程，经类型化 gRPC client 发送 fixture、校验类型化响应，再停止子进程。它不会调用 Product route 或云端 endpoint。修复后的 provider candidate 将 language 规范化为 `zh` 且本地 CPU 推理成功，但 sample 转写和上游文档预期相差一个字符；provider transport/推理通过，识别质量仍需单独审核。当前回执记录 Plugins `96568cff65ddefed9ffe086127ebd6aa0d2ad3df` 与 Contracts `79a3984dd362c58b5d20fa8ce5ea972408148748`。
 
 运行 Playwright 命令前加载生成的环境文件：
 
