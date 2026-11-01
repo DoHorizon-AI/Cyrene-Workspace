@@ -120,7 +120,10 @@ REFERENCE_PATH_PART = re.compile(
     re.IGNORECASE,
 )
 SLUG = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
-ENV_REF = re.compile(r"^(env|cred|secret-ref):[A-Za-z0-9_./:@+-]{2,180}$")
+ENV_REF = re.compile(
+    r"^(?:env:[A-Z][A-Z0-9_]{2,127}|"
+    r"cred:(?://)?[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*){1,8})$"
+)
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DB_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_$]{0,62}$")
 
