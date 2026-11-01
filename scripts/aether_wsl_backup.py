@@ -1632,14 +1632,18 @@ def cmd_backup(args: argparse.Namespace) -> int:
         _fsync_directory(staging)
         os.replace(staging, final_dir)
         _fsync_directory(output_dir)
-    except BaseException:
-        with contextlib.suppress(Exception):
+    except BaseException as original_error:
+        try:
             _write_journal(
                 journal,
                 snapshot_id=snapshot_id,
                 state="INTERRUPTED",
                 completed=completed,
                 detail="incomplete; retained for review",
+            )
+        except (OSError, BackupError):
+            original_error.add_note(
+                "The interrupted-run journal could not be updated; inspect the private partial directory."
             )
         raise
     print(f"snapshot_id={snapshot_id} status=COMPLETE resources={len(resources)}")
@@ -2295,11 +2299,15 @@ def cmd_restore(args: argparse.Namespace) -> int:
         restore_receipt["completed_at"] = _iso(_now())
         _atomic_json(restore_receipt_path, restore_receipt)
         _fsync_directory(target)
-    except BaseException:
+    except BaseException as original_error:
         restore_receipt["status"] = "FAILED_RETAINED"
         restore_receipt["failed_at"] = _iso(_now())
-        with contextlib.suppress(Exception):
+        try:
             _atomic_json(restore_receipt_path, restore_receipt)
+        except (OSError, BackupError):
+            original_error.add_note(
+                "The failure receipt could not be updated; inspect the private restore target."
+            )
         raise
     print(
         f"restore_id={restore_receipt['restore_id']} status=RESTORED resources={len(manifest['resources'])}"
