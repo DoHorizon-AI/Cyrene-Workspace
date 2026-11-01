@@ -1201,6 +1201,89 @@ def test_account_center_image_update_requires_its_closed_schema_state() -> None:
         )
 
 
+def test_github_unknown_preservation_plan_state_is_graph_bootstrap_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recognize the opt-in closed state only for the exact Graph GitHub continuation."""
+
+    required_fields = {
+        "schemaVersion",
+        "operationId",
+        "phase",
+        "createdAtUtc",
+        "project",
+        "activeInputs",
+        "candidateInputs",
+        "candidateInputPaths",
+        "activeConfigDir",
+        "candidateConfigDir",
+        "activeSecretsDir",
+        "journalDir",
+        "candidateSelectionFile",
+        "selectionBackupPath",
+        "activeSelection",
+        "runtimeConfigIdentity",
+        "candidateServices",
+        "targets",
+        "activeServices",
+        "edgeDelivery",
+        "navigatorDrain",
+        "database",
+        "candidatePreflight",
+        "exchangeReadiness",
+        "policy",
+        "planSha256",
+    }
+    connection_ref = "10000000-0000-4000-8000-000000000001"
+    lock_sha256 = "f" * 64
+    preserved_unknown = {
+        "schemaVersion": 1,
+        "operatorEvidenceSha256": "a" * 64,
+        "providerId": "github",
+        "connectionRef": connection_ref,
+        "connectionRefSha256": stage_transition._sha256_bytes(connection_ref.encode()),
+        "actorSha256": "b" * 64,
+        "invocationRowSha256": "c" * 64,
+        "requestIdSha256": "d" * 64,
+        "operationIdSha256": "e" * 64,
+        "candidateImageId": _image_id(159),
+        "candidateImageLockSha256": lock_sha256,
+    }
+    plan = {field: {} for field in required_fields}
+    plan.update(
+        {
+            "schemaVersion": stage_transition.PLAN_SCHEMA,
+            "operationId": "00000000-0000-4000-8000-000000000001",
+            "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            "project": "cyrene-teams-cloud",
+            "imageUpdateTarget": stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+            "githubIssuesImageUpdateState": {"preservedUnknown": preserved_unknown},
+            "candidateInputs": {
+                "imageLock": {"path": "/private/candidate-lock.json", "sha256": lock_sha256},
+                "githubIssuesUnknownPreservationEvidence": {
+                    "path": "/private/github-unknown.json",
+                    "sha256": preserved_unknown["operatorEvidenceSha256"],
+                },
+            },
+            "activeConfigDir": "/private/active-config",
+            "candidateConfigDir": "/private/candidate-config",
+            "targets": [],
+        }
+    )
+    monkeypatch.setattr(
+        stage_transition, "_validate_config_directory_policy", lambda **_kwargs: None
+    )
+
+    with pytest.raises(stage_transition.StageTransitionError) as accepted_schema_error:
+        stage_transition._validate_plan(plan)
+    assert "unsupported closed schema" not in str(accepted_schema_error.value)
+
+    wrong_phase = copy.deepcopy(plan)
+    wrong_phase["phase"] = "issued-connector-activation"
+    with pytest.raises(stage_transition.StageTransitionError, match="unsupported closed schema"):
+        stage_transition._validate_plan(wrong_phase)
+
+
 @pytest.mark.parametrize(
     "update_mode",
     [
@@ -2220,6 +2303,34 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
         "exchangeReadiness": {"required": True, "status": "PENDING_LIVE_READBACK"},
         "policy": {},
     }
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        evidence_sha256 = "a" * 64
+        image_lock_sha256 = "f" * 64
+        connection_ref = "10000000-0000-4000-8000-000000000001"
+        plan["candidateInputs"] = {
+            "imageLock": {"path": "/private/candidate-lock.json", "sha256": image_lock_sha256},
+            "githubIssuesUnknownPreservationEvidence": {
+                "path": "/private/github-unknown.json",
+                "sha256": evidence_sha256,
+            },
+        }
+        plan["githubIssuesImageUpdateState"] = {
+            "preservedUnknown": {
+                "schemaVersion": 1,
+                "operatorEvidenceSha256": evidence_sha256,
+                "providerId": "github",
+                "connectionRef": connection_ref,
+                "connectionRefSha256": stage_transition._sha256_bytes(
+                    connection_ref.encode("utf-8")
+                ),
+                "actorSha256": "b" * 64,
+                "invocationRowSha256": "c" * 64,
+                "requestIdSha256": "d" * 64,
+                "operationIdSha256": "e" * 64,
+                "candidateImageId": candidate_services[target]["candidate"]["imageId"],
+                "candidateImageLockSha256": image_lock_sha256,
+            }
+        }
     plan["planSha256"] = stage_transition._sha256_bytes(stage_transition._canonical_json(plan))
     monkeypatch.setattr(
         stage_transition, "_validate_config_directory_policy", lambda **_kwargs: None
@@ -2232,6 +2343,33 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     )
 
     stage_transition._validate_plan(plan)
+
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        missing_evidence = copy.deepcopy(plan)
+        del missing_evidence["candidateInputs"]["githubIssuesUnknownPreservationEvidence"]
+        missing_evidence["planSha256"] = stage_transition._sha256_bytes(
+            stage_transition._canonical_json(
+                {key: value for key, value in missing_evidence.items() if key != "planSha256"}
+            )
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="not bound to its private evidence and candidate image",
+        ):
+            stage_transition._validate_plan(missing_evidence)
+
+        changed_candidate = copy.deepcopy(plan)
+        changed_candidate["candidateServices"][target]["candidate"]["imageId"] = _image_id(160)
+        changed_candidate["planSha256"] = stage_transition._sha256_bytes(
+            stage_transition._canonical_json(
+                {key: value for key, value in changed_candidate.items() if key != "planSha256"}
+            )
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="not bound to its private evidence and candidate image",
+        ):
+            stage_transition._validate_plan(changed_candidate)
 
     changed = copy.deepcopy(plan)
     unselected_service = (
@@ -2274,9 +2412,14 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
                 {key: value for key, value in wrong_phase.items() if key != "planSha256"}
             )
         )
+        phase_error = (
+            "unsupported closed schema"
+            if "githubIssuesImageUpdateState" in wrong_phase
+            else "GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation"
+        )
         with pytest.raises(
             stage_transition.StageTransitionError,
-            match="GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation",
+            match=phase_error,
         ):
             stage_transition._validate_plan(wrong_phase)
 
@@ -10955,6 +11098,7 @@ def test_github_image_update_journal_and_status_report_readiness_and_monitor_gat
         "project": "cyrene-teams-cloud",
         "phase": phase,
         "imageUpdateTarget": target,
+        "githubIssuesImageUpdateState": {"preservedUnknown": {"invocationRowSha256": "e" * 64}},
         "targets": [target],
         "activeServices": {target: {"containerId": "b" * 64}},
         "candidateServices": {
@@ -10984,7 +11128,16 @@ def test_github_image_update_journal_and_status_report_readiness_and_monitor_gat
     journal["githubIssuesImageUpdate"].update(
         {
             "beforeReadiness": {"verified": True},
-            "monitorQuiescence": {"verified": True},
+            "monitorQuiescence": {
+                "verified": True,
+                "preservedUnknownStatus": "PRESERVED_UNKNOWN_NOT_RESOLVED",
+                "preservedUnknownRowSha256": "e" * 64,
+            },
+            "afterMonitorQuiescence": {
+                "verified": True,
+                "preservedUnknownStatus": "PRESERVED_UNKNOWN_NOT_RESOLVED",
+                "preservedUnknownRowSha256": "e" * 64,
+            },
             "afterReadiness": {"verified": True},
         }
     )
@@ -10993,8 +11146,15 @@ def test_github_image_update_journal_and_status_report_readiness_and_monitor_gat
     assert summary["githubIssuesImageUpdateRequired"] is True
     assert summary["githubIssuesImageUpdateStatus"] == "VERIFIED"
     assert summary["githubIssuesMonitorQuiescenceStatus"] == "VERIFIED"
+    assert summary["githubIssuesUnknownPreservationStatus"] == "PRESERVED_UNKNOWN_NOT_RESOLVED"
     assert summary["githubIssuesBeforeReadinessStatus"] == "LIVE_VERIFIED"
     assert summary["githubIssuesAfterReadinessStatus"] == "LIVE_VERIFIED"
+    journal["githubIssuesImageUpdate"]["afterMonitorQuiescence"]["preservedUnknownRowSha256"] = (
+        "f" * 64
+    )
+    blocked_summary = stage_transition._journal_summary(journal)
+    assert blocked_summary["githubIssuesUnknownPreservationStatus"] == "BLOCKED"
+    assert blocked_summary["githubIssuesImageUpdateStatus"] == "BLOCKED"
 
 
 def _create_huggingface_monitor_database(
@@ -11371,6 +11531,7 @@ def _create_github_monitor_database(
     next_check_seconds: int,
     active_monitor_ref: str | None,
     in_flight_ref: str | None,
+    in_flight_state: str = "IN_PROGRESS",
     missing_monitor_ref: str | None = None,
 ) -> None:
     """Build ten actor-scoped GitHub connections and their monitor/call rows."""
@@ -11455,7 +11616,7 @@ def _create_github_monitor_database(
                     "configured-repository",
                     "a" * 64,
                     "b" * 64,
-                    "IN_PROGRESS",
+                    in_flight_state,
                     "sha256:" + "c" * 64,
                     0,
                     int(now.timestamp()),
@@ -12010,11 +12171,438 @@ def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates
 
 
 @pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "changed-after-update",
+        "changed-row",
+        "extra-call",
+        "extra-unknown",
+        "wrong-actor",
+        "wrong-connection",
+        "monitor-lease",
+        "outbox-job",
+        "outbox-claim",
+        "github-container",
+        "github-host",
+    ],
+)
+def test_github_unknown_is_preserved_through_graph_image_update(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """Recheck one sealed 20-column UNKNOWN before and after the exact GitHub replacement."""
+
+    actor = {
+        "issuer": "https://issuer.example/tenant",
+        "subject": "selected-owner",
+        "organizationId": "selected-organization",
+        "workspaceId": "selected-workspace",
+    }
+    connection_refs = [f"10000000-0000-4000-8000-{index:012d}" for index in range(1, 11)]
+    bindings = [{"providerId": "github", "connectionRef": ref} for ref in connection_refs]
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_config_json",
+        lambda _compose, _name: {"bindings": bindings},
+    )
+    monkeypatch.setattr(
+        stage_transition.preflight, "_connector_bootstrap_actor", lambda _compose: actor
+    )
+    github_connection_ref = connection_refs[0]
+    now = int(datetime.now(UTC).timestamp())
+    unknown_row = (
+        actor["organizationId"],
+        actor["workspaceId"],
+        actor["issuer"],
+        actor["subject"],
+        "sealed-unknown-request",
+        github_connection_ref,
+        "github",
+        "github-primary",
+        "issues.create",
+        "repo:owner/project#123",
+        "a" * 64,
+        "b" * 64,
+        "UNKNOWN_RESULT",
+        None,
+        "",
+        1,
+        now,
+        0,
+        None,
+        409,
+    )
+    unknown_row_sha256 = stage_transition._sha256_bytes(
+        stage_transition._canonical_json(
+            [{"sqliteType": type(value).__name__, "value": value} for value in unknown_row]
+        )
+    )
+    candidate_image_id = _image_id(701)
+    candidate_image_lock_sha256 = "f" * 64
+    evidence = {
+        "schemaVersion": stage_transition.GITHUB_ISSUES_UNKNOWN_PRESERVATION_SCHEMA,
+        "state": "OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT",
+        "createdAtUtc": stage_transition._utc_now(),
+        "candidateImageId": candidate_image_id,
+        "candidateImageLockSha256": candidate_image_lock_sha256,
+        "historicalUnknown": {
+            "providerId": "github",
+            "connectionRef": github_connection_ref,
+            "actorSha256": stage_transition._sha256_bytes(stage_transition._canonical_json(actor)),
+            "rowSha256": unknown_row_sha256,
+            "requestIdSha256": stage_transition._sha256_bytes(unknown_row[4].encode("utf-8")),
+            "operationIdSha256": stage_transition._sha256_bytes(unknown_row[8].encode("utf-8")),
+            "state": "UNKNOWN_RESULT",
+            "rowCount": 1,
+            "columnCount": 20,
+        },
+    }
+    private_dir = tmp_path / ".artifacts"
+    private_dir.mkdir()
+    evidence_path = private_dir / "github-unknown-preservation.json"
+    evidence_path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+    evidence_path.chmod(0o600)
+    evidence_record = stage_transition._operator_private_file_record(
+        evidence_path, "test GitHub unknown-preservation evidence"
+    )
+    preserved_unknown = stage_transition._github_issues_preserved_unknown_summary(
+        evidence_path=evidence_path,
+        evidence_record=evidence_record,
+        candidate_compose={"services": {}},
+        candidate_image_id=candidate_image_id,
+        candidate_image_lock_sha256=candidate_image_lock_sha256,
+    )
+
+    database_path = tmp_path / "exchange.sqlite3"
+    outbox_rows: list[tuple[Any, ...]] = []
+    if case in {"outbox-job", "outbox-claim"}:
+        available_at = datetime.now(UTC)
+        claimed = case == "outbox-claim"
+        outbox_rows.append(
+            (
+                "job-preserved-unknown",
+                "ISSUE_ACTION",
+                actor["organizationId"],
+                actor["workspaceId"],
+                actor["issuer"],
+                actor["subject"],
+                github_connection_ref,
+                "github-binding",
+                "issues.create",
+                "idempotency-preserved-unknown",
+                "CLAIMED" if claimed else "READY",
+                1 if claimed else 0,
+                available_at.isoformat(),
+                "dispatcher" if claimed else None,
+                1 if claimed else 0,
+                (available_at + timedelta(minutes=2)).isoformat() if claimed else None,
+                available_at.isoformat(),
+                available_at.isoformat(),
+                "{}",
+            )
+        )
+    _create_account_center_unknown_monitor_database(
+        database_path,
+        connection_refs={"github": connection_refs},
+        actor=actor,
+        invocations=[unknown_row],
+        outbox_rows=outbox_rows,
+    )
+    if case == "changed-row":
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "UPDATE connector_invocations SET response_status=200 "
+            "WHERE request_id='sealed-unknown-request'"
+        )
+        connection.commit()
+        connection.close()
+    elif case == "extra-call":
+        extra_row = list(unknown_row)
+        extra_row[4] = "other-in-progress-request"
+        extra_row[12] = "IN_PROGRESS"
+        extra_row[15] = 0
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "INSERT INTO connector_invocations VALUES("
+            + ",".join("?" for _ in stage_transition.ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+            + ")",
+            extra_row,
+        )
+        connection.commit()
+        connection.close()
+    elif case == "extra-unknown":
+        extra_row = list(unknown_row)
+        extra_row[4] = "second-unknown-request"
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "INSERT INTO connector_invocations VALUES("
+            + ",".join("?" for _ in stage_transition.ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+            + ")",
+            extra_row,
+        )
+        connection.commit()
+        connection.close()
+    elif case == "wrong-actor":
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "UPDATE connector_invocations SET actor_subject='other-owner' "
+            "WHERE request_id='sealed-unknown-request'"
+        )
+        connection.commit()
+        connection.close()
+    elif case == "wrong-connection":
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "UPDATE connector_invocations SET connection_ref=? "
+            "WHERE request_id='sealed-unknown-request'",
+            (connection_refs[1],),
+        )
+        connection.commit()
+        connection.close()
+    elif case == "monitor-lease":
+        connection = sqlite3.connect(database_path)
+        connection.execute(
+            "UPDATE authorization_monitor_state SET claim_owner='active-monitor', "
+            "lease_expires_at=? WHERE connection_id=?",
+            ((datetime.now(UTC) + timedelta(minutes=2)).isoformat(), github_connection_ref),
+        )
+        connection.commit()
+        connection.close()
+
+    active_services = _account_center_test_active_services(
+        exchange_container_id="a" * 64,
+        exchange_image_id=_image_id(702),
+    )
+    replacement_github_id = "c" * 64
+    process_check_outputs = {
+        name: "PID COMMAND\n" for name in stage_transition.OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    }
+    if case == "github-container":
+        process_check_outputs["github-issues"] = "PID COMMAND\n123 gh\n"
+    process_container_ids: dict[str, list[str]] = {}
+    monitor_script_calls: list[str] = []
+    phases: list[str] = []
+
+    def checked(argv: list[str], *, label: str, **_kwargs: Any) -> str:
+        if label.endswith("active GitHub CLI process readback"):
+            service_name = label.partition(" active GitHub CLI")[0]
+            process_container_ids.setdefault(service_name, []).append(argv[argv.index("top") + 1])
+            return process_check_outputs[service_name]
+        if label == "Connector authorization monitor quiescence readback":
+            monitor_script_calls.append(label)
+            script_index = argv.index("-c")
+            script = argv[script_index + 1]
+            arguments = list(argv[script_index + 2 :])
+            arguments[0] = str(database_path)
+            result = subprocess.run(
+                [sys.executable, "-c", script, *arguments],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise runtime_update.RuntimeUpdateError("test monitor SQL rejected the row")
+            return result.stdout
+        raise AssertionError(f"unexpected read-only command: {label}")
+
+    monkeypatch.setattr(runtime_update, "_checked_stdout", checked)
+    monkeypatch.setattr(
+        stage_transition,
+        "_write_journal",
+        lambda _path, _journal, phase: phases.append(phase),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_account_center_host_gh_cli_process_count",
+        lambda: 1 if case == "github-host" else 0,
+    )
+    plan = {
+        "phase": stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "imageUpdateTarget": stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        "activeServices": active_services,
+        "githubIssuesImageUpdateState": {"preservedUnknown": preserved_unknown},
+        "policy": {"healthTimeoutSeconds": 30},
+    }
+    journal = {
+        "exchangeReadiness": {"receipt": {"githubConnectionRefs": connection_refs}},
+        "githubIssuesImageUpdate": {
+            "required": True,
+            "monitorQuiescence": None,
+            "afterMonitorQuiescence": None,
+        },
+        "targetProgress": {
+            "github-issues": {
+                "phase": "APPLIED",
+                "candidateContainerId": replacement_github_id,
+            }
+        },
+    }
+
+    if case in {"valid", "changed-after-update"}:
+        before = stage_transition._verify_provider_monitor_quiescence(
+            plan=plan,
+            candidate_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "monitor.journal.json",
+            docker_prefix=["docker"],
+        )
+        if case == "changed-after-update":
+            connection = sqlite3.connect(database_path)
+            connection.execute(
+                "UPDATE connector_invocations SET response_status=200 "
+                "WHERE request_id='sealed-unknown-request'"
+            )
+            connection.commit()
+            connection.close()
+            with pytest.raises(
+                stage_transition.StageTransitionError,
+                match="could not be verified read-only",
+            ):
+                stage_transition._verify_provider_monitor_quiescence(
+                    plan=plan,
+                    candidate_compose={"services": {}},
+                    journal=journal,
+                    journal_path=tmp_path / "monitor.journal.json",
+                    docker_prefix=["docker"],
+                    checkpoint="after",
+                )
+            assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == before
+            assert journal["githubIssuesImageUpdate"]["afterMonitorQuiescence"] is None
+            assert process_container_ids["github-issues"] == [
+                active_services["github-issues"]["containerId"],
+                replacement_github_id,
+            ]
+            assert len(monitor_script_calls) == 2
+            assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+            return
+        after = stage_transition._verify_provider_monitor_quiescence(
+            plan=plan,
+            candidate_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "monitor.journal.json",
+            docker_prefix=["docker"],
+            checkpoint="after",
+        )
+        assert before["verified"] is True
+        assert before["rawNonterminalConnectorInvocationCount"] == 1
+        assert before["preservedUnknownResultCount"] == 1
+        assert before["activeInFlightConnectorCallCount"] == 0
+        assert before["preservedUnknownRowSha256"] == unknown_row_sha256
+        assert after["verified"] is True
+        assert after["preservedUnknownRowSha256"] == before["preservedUnknownRowSha256"]
+        assert process_container_ids["github-issues"] == [
+            active_services["github-issues"]["containerId"],
+            replacement_github_id,
+        ]
+        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == before
+        assert journal["githubIssuesImageUpdate"]["afterMonitorQuiescence"] == after
+        assert len(monitor_script_calls) == 2
+        assert phases == [
+            "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+            "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+        ]
+    else:
+        expected = (
+            "host GitHub CLI process"
+            if case == "github-host"
+            else "GitHub CLI process"
+            if case == "github-container"
+            else "blocked because"
+            if case
+            in {
+                "extra-call",
+                "wrong-connection",
+                "monitor-lease",
+                "outbox-job",
+                "outbox-claim",
+            }
+            else "could not be verified read-only"
+        )
+        with pytest.raises(stage_transition.StageTransitionError, match=expected):
+            stage_transition._verify_provider_monitor_quiescence(
+                plan=plan,
+                candidate_compose={"services": {}},
+                journal=journal,
+                journal_path=tmp_path / "monitor.journal.json",
+                docker_prefix=["docker"],
+            )
+        if case in {"github-container", "github-host"}:
+            assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] is None
+            assert monitor_script_calls == []
+        elif case in {
+            "extra-call",
+            "wrong-connection",
+            "monitor-lease",
+            "outbox-job",
+            "outbox-claim",
+        }:
+            assert journal["githubIssuesImageUpdate"]["monitorQuiescence"]["verified"] is False
+            assert len(monitor_script_calls) == 1
+        else:
+            assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] is None
+            assert len(monitor_script_calls) == 1
+
+
+def test_github_unknown_evidence_plan_flag_reaches_the_plan_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Route the optional GitHub evidence through the public plan CLI argument."""
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
+
+    def build_plan(**kwargs: Any) -> dict[str, str]:
+        captured.update(kwargs)
+        return {"operationId": "00000000-0000-4000-8000-000000000001", "planSha256": "a" * 64}
+
+    monkeypatch.setattr(stage_transition, "create_plan", build_plan)
+    evidence_path = tmp_path / ".artifacts" / "github-unknown.json"
+    paths = {
+        "--active-compose-file": tmp_path / "active.yml",
+        "--active-env-file": tmp_path / "active.env",
+        "--active-image-lock": tmp_path / "active-lock.json",
+        "--candidate-compose-file": tmp_path / "candidate.yml",
+        "--candidate-env-file": tmp_path / "candidate.env",
+        "--candidate-image-lock": tmp_path / "candidate-lock.json",
+        "--secrets-dir": tmp_path / "secrets",
+        "--active-config-dir": tmp_path / "active-config",
+        "--candidate-config-dir": tmp_path / "candidate-config",
+        "--candidate-huggingface-seed": tmp_path / "hf-seed.json",
+        "--connector-auth-evidence": tmp_path / "auth-evidence.json",
+        "--promote-selection": tmp_path / "selection.json",
+        "--backup-dir": tmp_path / "backups",
+        "--output": tmp_path / "plan.json",
+    }
+    arguments = [
+        "plan",
+        "--phase",
+        stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        "--image-update-target",
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        "--connector-auth-task-id",
+        "task-1",
+    ]
+    for option, path in paths.items():
+        arguments.extend([option, str(path)])
+    arguments.extend(["--github-issues-unknown-preservation-evidence", str(evidence_path)])
+
+    assert stage_transition.main(arguments) == 0
+    assert captured["github_issues_unknown_preservation_evidence"] == evidence_path.resolve()
+    assert captured["image_update_target"] == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+    assert capsys.readouterr().out.strip().startswith('{"operationId":')
+
+
+@pytest.mark.parametrize(
     ("blocker", "verified"),
     [
         (None, True),
         ("monitor-lease", False),
         ("in-flight-call", False),
+        ("unknown-result", False),
         ("short-window", False),
         ("missing-monitor", False),
     ],
@@ -12040,7 +12628,7 @@ def test_github_image_update_monitor_guard_checks_all_ten_exact_bindings(
         "workspaceId": "workspace-id",
     }
     active_monitor_ref = connection_refs[0] if blocker == "monitor-lease" else None
-    in_flight_ref = connection_refs[4] if blocker == "in-flight-call" else None
+    in_flight_ref = connection_refs[4] if blocker in {"in-flight-call", "unknown-result"} else None
     missing_monitor_ref = connection_refs[9] if blocker == "missing-monitor" else None
     next_check_seconds = 300 if blocker == "short-window" else 900
     database_path = tmp_path / "integrations.sqlite3"
@@ -12051,6 +12639,7 @@ def test_github_image_update_monitor_guard_checks_all_ten_exact_bindings(
         next_check_seconds=next_check_seconds,
         active_monitor_ref=active_monitor_ref,
         in_flight_ref=in_flight_ref,
+        in_flight_state=("UNKNOWN_RESULT" if blocker == "unknown-result" else "IN_PROGRESS"),
         missing_monitor_ref=missing_monitor_ref,
     )
     bindings = [{"providerId": "github", "connectionRef": ref} for ref in connection_refs]
@@ -12133,7 +12722,8 @@ def test_github_image_update_monitor_guard_checks_all_ten_exact_bindings(
             checkpoint="after",
         )
         assert after_result["verified"] is True
-        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == after_result
+        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == result
+        assert journal["githubIssuesImageUpdate"]["afterMonitorQuiescence"] == after_result
         assert phases == [
             "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
             "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",

@@ -219,6 +219,7 @@ EXCHANGE_OUTBOX_JOB_COLUMNS = (
     "document",
 )
 ACCOUNT_CENTER_UNKNOWN_PRESERVATION_SCHEMA = "cyrene-account-center-unknown-preservation-v1"
+GITHUB_ISSUES_UNKNOWN_PRESERVATION_SCHEMA = "cyrene-github-issues-unknown-preservation-v1"
 ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES = 256 * 1024
 ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS = 30 * 60
 ACCOUNT_CENTER_STARTUP_RECOVERY_PREDICATES = frozenset(
@@ -1265,6 +1266,15 @@ def _verify_provider_monitor_quiescence(
         )
         if preserved_unknown is not None:
             _validate_account_center_preserved_unknown_state(preserved_unknown)
+    elif target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        image_state = plan.get("githubIssuesImageUpdateState")
+        if image_state is not None:
+            if plan.get("phase") != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE:
+                raise StageTransitionError(
+                    "GitHub UNKNOWN preservation is limited to the Graph-bootstrap image update"
+                )
+            _validate_github_issues_image_update_state(image_state)
+            preserved_unknown = image_state["preservedUnknown"]
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET:
         target_journal_key = "huggingfaceImageUpdate"
         required_providers = [HUGGINGFACE_IMAGE_UPDATE_TARGET]
@@ -1409,28 +1419,27 @@ def _verify_provider_monitor_quiescence(
     active_gh_process_count_by_service: dict[str, int] = {}
     active_host_gh_process_count: int | None = None
     if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+        process_service_set = ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
+    elif target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and preserved_unknown is not None:
+        process_service_set = OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    else:
+        process_service_set = None
+    if process_service_set is not None:
         active_services = plan.get("activeServices")
-        if (
-            not isinstance(active_services, dict)
-            or set(active_services) != ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET
-        ):
+        if not isinstance(active_services, dict) or set(active_services) != process_service_set:
             raise StageTransitionError(
-                "Account Center process guard requires the exact 15-service inventory"
+                "GitHub CLI process guard requires the exact 15-service inventory"
             )
         process_container_by_service = {
             service_name: service.get("containerId")
             for service_name, service in active_services.items()
             if isinstance(service, dict)
         }
-        if len(process_container_by_service) != len(ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET):
-            raise StageTransitionError("Account Center process service identity map is malformed")
+        if len(process_container_by_service) != len(process_service_set):
+            raise StageTransitionError("GitHub CLI process service identity map is malformed")
         if checkpoint == "after":
             progress = journal.get("targetProgress")
-            target_progress = (
-                progress.get(ACCOUNT_CENTER_IMAGE_UPDATE_TARGET)
-                if isinstance(progress, dict)
-                else None
-            )
+            target_progress = progress.get(target) if isinstance(progress, dict) else None
             replacement_id = (
                 target_progress.get("candidateContainerId")
                 if isinstance(target_progress, dict)
@@ -1443,10 +1452,10 @@ def _verify_provider_monitor_quiescence(
                 or FULL_CONTAINER_ID_RE.fullmatch(replacement_id) is None
             ):
                 raise StageTransitionError(
-                    "post-update GitHub CLI guard lacks the applied Account Center container identity"
+                    "post-update GitHub CLI guard lacks the applied target container identity"
                 )
-            process_container_by_service[ACCOUNT_CENTER_IMAGE_UPDATE_TARGET] = replacement_id
-        for service_name in sorted(ACCOUNT_CENTER_IMAGE_UPDATE_SERVICE_SET):
+            process_container_by_service[target] = replacement_id
+        for service_name in sorted(process_service_set):
             process_container_id = process_container_by_service.get(service_name)
             if (
                 not isinstance(process_container_id, str)
@@ -1529,7 +1538,9 @@ def _verify_provider_monitor_quiescence(
         list(ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS),
         separators=(",", ":"),
     )
-    check_outbox_required = target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
+    check_outbox_required = target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET or (
+        target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and preserved_unknown is not None
+    )
     outbox_columns_json = json.dumps(list(EXCHANGE_OUTBOX_JOB_COLUMNS), separators=(",", ":"))
     script = (
         "import hashlib,json,sqlite3,sys\n"
@@ -1741,7 +1752,7 @@ def _verify_provider_monitor_quiescence(
         and report["nextCheckWindowSatisfied"] is True
         and report["cloudRefreshNonterminalCount"] == 0
         and all(value == 0 for value in active_gh_process_count_by_service.values())
-        and (target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET or active_host_gh_process_count == 0)
+        and (process_service_set is None or active_host_gh_process_count == 0)
     )
     reference_hashes = {
         provider: [_sha256_bytes(connection_ref.encode("utf-8")) for connection_ref in refs]
@@ -1775,7 +1786,10 @@ def _verify_provider_monitor_quiescence(
     update_state = journal.get(target_journal_key)
     if not isinstance(update_state, dict) or update_state.get("required") is not True:
         raise StageTransitionError("connector image update journal state is malformed")
-    if target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET and checkpoint == "after":
+    if (
+        target in {ACCOUNT_CENTER_IMAGE_UPDATE_TARGET, GITHUB_ISSUES_IMAGE_UPDATE_TARGET}
+        and checkpoint == "after"
+    ):
         update_state["afterMonitorQuiescence"] = evidence
     else:
         update_state["monitorQuiescence"] = evidence
@@ -4865,6 +4879,192 @@ def _account_center_preserved_unknown_summary(
     }
 
 
+def _github_issues_preserved_unknown_summary(
+    *,
+    evidence_path: Path,
+    evidence_record: dict[str, str],
+    candidate_compose: dict[str, Any],
+    candidate_image_id: str,
+    candidate_image_lock_sha256: str,
+) -> dict[str, Any]:
+    """Seal one exact historical GitHub UNKNOWN row for a Graph image continuation."""
+
+    _verify_operator_private_file_record(evidence_record, "GitHub unknown preservation evidence")
+    if evidence_record.get("path") != str(evidence_path.resolve(strict=True)):
+        raise StageTransitionError("GitHub unknown preservation evidence path changed")
+    evidence = _read_json(
+        evidence_path,
+        "GitHub unknown preservation evidence",
+        maximum_bytes=ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES,
+    )
+    evidence_fields = {
+        "schemaVersion",
+        "state",
+        "createdAtUtc",
+        "candidateImageId",
+        "candidateImageLockSha256",
+        "historicalUnknown",
+    }
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != evidence_fields
+        or evidence.get("schemaVersion") != GITHUB_ISSUES_UNKNOWN_PRESERVATION_SCHEMA
+        or evidence.get("state") != "OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT"
+        or evidence.get("candidateImageId") != candidate_image_id
+        or evidence.get("candidateImageLockSha256") != candidate_image_lock_sha256
+        or not isinstance(candidate_image_id, str)
+        or IMAGE_ID_RE.fullmatch(candidate_image_id) is None
+        or not isinstance(candidate_image_lock_sha256, str)
+        or SHA256_RE.fullmatch(candidate_image_lock_sha256) is None
+    ):
+        raise StageTransitionError(
+            "GitHub UNKNOWN preservation evidence schema or image binding is invalid"
+        )
+    created_at = _parse_private_utc_timestamp(
+        evidence.get("createdAtUtc"), "GitHub preservation evidence"
+    )
+    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
+    if age_seconds < -30 or age_seconds > ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS:
+        raise StageTransitionError("GitHub UNKNOWN preservation evidence is stale")
+
+    historical = evidence.get("historicalUnknown")
+    historical_fields = {
+        "providerId",
+        "connectionRef",
+        "actorSha256",
+        "rowSha256",
+        "requestIdSha256",
+        "operationIdSha256",
+        "state",
+        "rowCount",
+        "columnCount",
+    }
+    if (
+        not isinstance(historical, dict)
+        or set(historical) != historical_fields
+        or historical.get("providerId") != "github"
+        or historical.get("state") != "UNKNOWN_RESULT"
+        or historical.get("rowCount") != 1
+        or isinstance(historical.get("rowCount"), bool)
+        or historical.get("columnCount") != len(ACCOUNT_CENTER_UNKNOWN_INVOCATION_COLUMNS)
+        or isinstance(historical.get("columnCount"), bool)
+        or not isinstance(historical.get("connectionRef"), str)
+        or any(
+            not isinstance(historical.get(field), str)
+            or SHA256_RE.fullmatch(historical[field]) is None
+            for field in (
+                "actorSha256",
+                "rowSha256",
+                "requestIdSha256",
+                "operationIdSha256",
+            )
+        )
+    ):
+        raise StageTransitionError("sealed historical GitHub UNKNOWN row is malformed")
+    try:
+        canonical_connection_ref = str(uuid.UUID(historical["connectionRef"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise StageTransitionError(
+            "sealed historical GitHub connection ref is malformed"
+        ) from error
+    if canonical_connection_ref != historical["connectionRef"]:
+        raise StageTransitionError("sealed historical GitHub connection ref is not canonical")
+
+    actor = preflight._connector_bootstrap_actor(candidate_compose)
+    actor_sha256 = _sha256_bytes(_canonical_json(actor))
+    if historical["actorSha256"] != actor_sha256:
+        raise StageTransitionError(
+            "historical GitHub UNKNOWN row actor differs from the selected owner"
+        )
+    bindings = _candidate_config_json(candidate_compose, "connector-bindings").get("bindings")
+    github_refs = (
+        {
+            row.get("connectionRef")
+            for row in bindings
+            if isinstance(row, dict) and row.get("providerId") == "github"
+        }
+        if isinstance(bindings, list)
+        else set()
+    )
+    if canonical_connection_ref not in github_refs:
+        raise StageTransitionError(
+            "historical GitHub UNKNOWN row does not join a frozen GitHub binding"
+        )
+
+    return {
+        "schemaVersion": 1,
+        "operatorEvidenceSha256": evidence_record["sha256"],
+        "providerId": "github",
+        "connectionRef": canonical_connection_ref,
+        "connectionRefSha256": _sha256_bytes(canonical_connection_ref.encode("utf-8")),
+        "actorSha256": actor_sha256,
+        "invocationRowSha256": historical["rowSha256"],
+        "requestIdSha256": historical["requestIdSha256"],
+        "operationIdSha256": historical["operationIdSha256"],
+        "candidateImageId": candidate_image_id,
+        "candidateImageLockSha256": candidate_image_lock_sha256,
+    }
+
+
+def _validate_github_issues_preserved_unknown_state(value: Any) -> None:
+    """Validate one private GitHub UNKNOWN preservation record bound to its candidate image."""
+
+    fields = {
+        "schemaVersion",
+        "operatorEvidenceSha256",
+        "providerId",
+        "connectionRef",
+        "connectionRefSha256",
+        "actorSha256",
+        "invocationRowSha256",
+        "requestIdSha256",
+        "operationIdSha256",
+        "candidateImageId",
+        "candidateImageLockSha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or value.get("schemaVersion") != 1
+        or isinstance(value.get("schemaVersion"), bool)
+        or value.get("providerId") != "github"
+        or not isinstance(value.get("connectionRef"), str)
+        or any(
+            not isinstance(value.get(field), str) or SHA256_RE.fullmatch(value[field]) is None
+            for field in (
+                "operatorEvidenceSha256",
+                "connectionRefSha256",
+                "actorSha256",
+                "invocationRowSha256",
+                "requestIdSha256",
+                "operationIdSha256",
+                "candidateImageLockSha256",
+            )
+        )
+        or not isinstance(value.get("candidateImageId"), str)
+        or IMAGE_ID_RE.fullmatch(value["candidateImageId"]) is None
+    ):
+        raise StageTransitionError("GitHub preserved UNKNOWN plan record is malformed")
+    try:
+        canonical_connection_ref = str(uuid.UUID(value["connectionRef"]))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise StageTransitionError(
+            "GitHub preserved UNKNOWN connection reference is malformed"
+        ) from error
+    if canonical_connection_ref != value["connectionRef"]:
+        raise StageTransitionError("GitHub preserved UNKNOWN connection reference is not canonical")
+    if value["connectionRefSha256"] != _sha256_bytes(value["connectionRef"].encode("utf-8")):
+        raise StageTransitionError("GitHub preserved UNKNOWN connection reference digest changed")
+
+
+def _validate_github_issues_image_update_state(value: Any) -> None:
+    """Require the opt-in GitHub preservation state to contain one exact sealed row."""
+
+    if not isinstance(value, dict) or set(value) != {"preservedUnknown"}:
+        raise StageTransitionError("GitHub Issues image update preservation state is malformed")
+    _validate_github_issues_preserved_unknown_state(value["preservedUnknown"])
+
+
 def _validate_account_center_image_update_state(value: Any) -> None:
     """Require the sealed Account Center database state and exact 15-service budgets."""
 
@@ -7813,6 +8013,7 @@ def create_plan(
     required_free_gib: float,
     minimum_mem_available_mib: int,
     account_center_unknown_preservation_evidence: Path | None = None,
+    github_issues_unknown_preservation_evidence: Path | None = None,
     ingress_exposure: str = "public-cutover",
     host_caddy_binary: str = "/usr/local/bin/caddy",
     openssl_binary: str = "openssl",
@@ -7855,6 +8056,13 @@ def create_plan(
     ):
         raise StageTransitionError(
             "historical UNKNOWN preservation evidence is only valid for an Account Center image update"
+        )
+    if github_issues_unknown_preservation_evidence is not None and (
+        image_update_target != GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        or phase != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    ):
+        raise StageTransitionError(
+            "GitHub UNKNOWN preservation evidence is only valid for a Graph-bootstrap GitHub image update"
         )
     if image_update_target is not None and memory_update_target is not None:
         raise StageTransitionError("image and memory update modes are mutually exclusive")
@@ -8010,6 +8218,11 @@ def create_plan(
                 account_center_unknown_preservation_evidence.resolve(strict=True),
                 "Account Center unknown preservation evidence",
             )
+        )
+    if github_issues_unknown_preservation_evidence is not None:
+        candidate_inputs["githubIssuesUnknownPreservationEvidence"] = _operator_private_file_record(
+            github_issues_unknown_preservation_evidence.resolve(strict=True),
+            "GitHub unknown preservation evidence",
         )
     active_lock = runtime_update._load_lock(active_image_lock)
     candidate_lock = runtime_update._load_lock(candidate_image_lock)
@@ -8345,6 +8558,28 @@ def create_plan(
             )
         _validate_account_center_image_update_state(account_center_image_update_state)
 
+    github_issues_image_update_state = None
+    if github_issues_unknown_preservation_evidence is not None:
+        selected_image = target_images.get(GITHUB_ISSUES_IMAGE_UPDATE_TARGET)
+        candidate_image = (
+            selected_image.get("candidate") if isinstance(selected_image, dict) else None
+        )
+        if not isinstance(candidate_image, dict):
+            raise StageTransitionError(
+                "GitHub candidate image is unavailable for UNKNOWN preservation"
+            )
+        evidence_record = candidate_inputs["githubIssuesUnknownPreservationEvidence"]
+        github_issues_image_update_state = {
+            "preservedUnknown": _github_issues_preserved_unknown_summary(
+                evidence_path=github_issues_unknown_preservation_evidence.resolve(strict=True),
+                evidence_record=evidence_record,
+                candidate_compose=candidate_compose,
+                candidate_image_id=candidate_image.get("imageId"),
+                candidate_image_lock_sha256=candidate_inputs["imageLock"]["sha256"],
+            )
+        }
+        _validate_github_issues_image_update_state(github_issues_image_update_state)
+
     operation_id = str(uuid.uuid4())
     backup_path = backup_dir / f"{operation_id}.navigator-sessions.sqlite3"
     if memory_update_target is None and (backup_path.exists() or backup_path.is_symlink()):
@@ -8369,6 +8604,11 @@ def create_plan(
         **(
             {"accountCenterImageUpdateState": account_center_image_update_state}
             if account_center_image_update_state is not None
+            else {}
+        ),
+        **(
+            {"githubIssuesImageUpdateState": github_issues_image_update_state}
+            if github_issues_image_update_state is not None
             else {}
         ),
         "createdAtUtc": _utc_now(),
@@ -8570,6 +8810,13 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         if (
             image_update_target != ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
             or plan.get("phase") not in ACCOUNT_CENTER_IMAGE_UPDATE_PHASES
+        ):
+            image_update_target = "__invalid__"
+    elif set(plan) == required | {"imageUpdateTarget", "githubIssuesImageUpdateState"}:
+        image_update_target = plan.get("imageUpdateTarget")
+        if (
+            image_update_target != GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+            or plan.get("phase") != OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
         ):
             image_update_target = "__invalid__"
     elif set(plan) == required | {"imageUpdateTarget", "cloudRunnerState"}:
@@ -8874,6 +9121,37 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise StageTransitionError(
                 "Account Center preserved UNKNOWN state is not bound to its private evidence input"
             )
+    elif image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        github_state = plan.get("githubIssuesImageUpdateState")
+        evidence_record = plan["candidateInputs"].get("githubIssuesUnknownPreservationEvidence")
+        if github_state is None:
+            if evidence_record is not None:
+                raise StageTransitionError(
+                    "GitHub UNKNOWN evidence is present without explicit plan opt-in"
+                )
+        else:
+            _validate_github_issues_image_update_state(github_state)
+            preserved_unknown = github_state["preservedUnknown"]
+            candidate_service = plan["candidateServices"].get(GITHUB_ISSUES_IMAGE_UPDATE_TARGET)
+            candidate_image = (
+                candidate_service.get("candidate") if isinstance(candidate_service, dict) else None
+            )
+            image_lock = plan["candidateInputs"].get("imageLock")
+            if (
+                not isinstance(evidence_record, dict)
+                or evidence_record.get("sha256") != preserved_unknown.get("operatorEvidenceSha256")
+                or not isinstance(candidate_image, dict)
+                or candidate_image.get("imageId") != preserved_unknown.get("candidateImageId")
+                or not isinstance(image_lock, dict)
+                or image_lock.get("sha256") != preserved_unknown.get("candidateImageLockSha256")
+            ):
+                raise StageTransitionError(
+                    "GitHub preserved UNKNOWN state is not bound to its private evidence and candidate image"
+                )
+    elif "githubIssuesUnknownPreservationEvidence" in plan["candidateInputs"]:
+        raise StageTransitionError(
+            "GitHub UNKNOWN evidence is valid only for a Graph-bootstrap GitHub image update"
+        )
     if image_update_target == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET:
         candidate_preflight = plan.get("candidatePreflight")
         if (
@@ -9378,6 +9656,9 @@ def _verify_all_inputs(plan: dict[str, Any]) -> None:
             _verify_operator_private_file_record(
                 value, "Account Center unknown preservation evidence"
             )
+            continue
+        if key == "githubIssuesUnknownPreservationEvidence":
+            _verify_operator_private_file_record(value, "GitHub unknown preservation evidence")
             continue
         if value is None:
             continue
@@ -11802,7 +12083,11 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
             and plan.get("phase") in GITHUB_ISSUES_IMAGE_UPDATE_PHASES,
             "beforeReadiness": None,
             "monitorQuiescence": None,
+            "afterMonitorQuiescence": None,
             "afterReadiness": None,
+            "preservedUnknownPlan": copy.deepcopy(
+                plan.get("githubIssuesImageUpdateState", {}).get("preservedUnknown")
+            ),
         },
         "workspaceAuthorityImageUpdate": {
             "required": plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
@@ -12115,6 +12400,11 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(github_issues_update, dict)
         else None
     )
+    github_issues_after_monitor = (
+        github_issues_update.get("afterMonitorQuiescence")
+        if isinstance(github_issues_update, dict)
+        else None
+    )
     github_issues_after = (
         github_issues_update.get("afterReadiness")
         if isinstance(github_issues_update, dict)
@@ -12124,10 +12414,41 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "NOT_REQUIRED"
         if not github_issues_update_required
         else "VERIFIED"
-        if isinstance(github_issues_monitor, dict) and github_issues_monitor.get("verified") is True
-        else "BLOCKED"
         if isinstance(github_issues_monitor, dict)
-        and github_issues_monitor.get("verified") is False
+        and github_issues_monitor.get("verified") is True
+        and isinstance(github_issues_after_monitor, dict)
+        and github_issues_after_monitor.get("verified") is True
+        else "BLOCKED"
+        if (
+            isinstance(github_issues_monitor, dict)
+            and github_issues_monitor.get("verified") is False
+        )
+        or (
+            isinstance(github_issues_after_monitor, dict)
+            and github_issues_after_monitor.get("verified") is False
+        )
+        else "PENDING"
+    )
+    github_issues_unknown_expected = isinstance(
+        github_issues_update.get("preservedUnknownPlan"), dict
+    )
+    github_issues_unknown_status = (
+        "NOT_REQUIRED"
+        if not github_issues_unknown_expected
+        else "PRESERVED_UNKNOWN_NOT_RESOLVED"
+        if isinstance(github_issues_monitor, dict)
+        and isinstance(github_issues_after_monitor, dict)
+        and github_issues_monitor.get("preservedUnknownStatus") == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+        and github_issues_after_monitor.get("preservedUnknownStatus")
+        == "PRESERVED_UNKNOWN_NOT_RESOLVED"
+        and github_issues_monitor.get("preservedUnknownRowSha256")
+        == github_issues_after_monitor.get("preservedUnknownRowSha256")
+        else "BLOCKED"
+        if (
+            isinstance(github_issues_monitor, dict)
+            and isinstance(github_issues_after_monitor, dict)
+        )
+        or github_issues_monitor_status == "BLOCKED"
         else "PENDING"
     )
     github_issues_update_status = (
@@ -12137,10 +12458,11 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(github_issues_before, dict)
         and github_issues_before.get("verified") is True
         and github_issues_monitor_status == "VERIFIED"
+        and github_issues_unknown_status in {"NOT_REQUIRED", "PRESERVED_UNKNOWN_NOT_RESOLVED"}
         and isinstance(github_issues_after, dict)
         and github_issues_after.get("verified") is True
         else "BLOCKED"
-        if github_issues_monitor_status == "BLOCKED"
+        if github_issues_monitor_status == "BLOCKED" or github_issues_unknown_status == "BLOCKED"
         else "PENDING"
     )
     authority_update = journal.get("workspaceAuthorityImageUpdate", {})
@@ -12448,6 +12770,22 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         "githubIssuesImageUpdateRequired": github_issues_update_required,
         "githubIssuesImageUpdateStatus": github_issues_update_status,
         "githubIssuesMonitorQuiescenceStatus": github_issues_monitor_status,
+        "githubIssuesUnknownPreservationStatus": github_issues_unknown_status,
+        "githubIssuesRawNonterminalConnectorInvocationCount": (
+            github_issues_after_monitor.get("rawNonterminalConnectorInvocationCount")
+            if isinstance(github_issues_after_monitor, dict)
+            else None
+        ),
+        "githubIssuesPreservedUnknownResultCount": (
+            github_issues_after_monitor.get("preservedUnknownResultCount")
+            if isinstance(github_issues_after_monitor, dict)
+            else None
+        ),
+        "githubIssuesActiveInFlightConnectorCallCount": (
+            github_issues_after_monitor.get("activeInFlightConnectorCallCount")
+            if isinstance(github_issues_after_monitor, dict)
+            else None
+        ),
         "githubIssuesBeforeReadinessStatus": (
             "NOT_REQUIRED"
             if not github_issues_update_required
@@ -14766,6 +15104,11 @@ def _add_common_plan_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--connector-auth-evidence", type=Path, required=True)
     parser.add_argument("--connector-auth-task-id", required=True)
     parser.add_argument("--account-center-unknown-preservation-evidence", type=Path)
+    parser.add_argument(
+        "--github-issues-unknown-preservation-evidence",
+        type=Path,
+        help="owner-only snapshot for one unchanged Graph-bootstrap GitHub UNKNOWN invocation",
+    )
     parser.add_argument("--notification-anchor-file", type=Path)
     parser.add_argument("--notification-provenance-file", type=Path)
     parser.add_argument("--active-selection", type=Path)
@@ -14851,6 +15194,11 @@ def main(argv: list[str] | None = None) -> int:
                 account_center_unknown_preservation_evidence=(
                     arguments.account_center_unknown_preservation_evidence.resolve()
                     if arguments.account_center_unknown_preservation_evidence is not None
+                    else None
+                ),
+                github_issues_unknown_preservation_evidence=(
+                    arguments.github_issues_unknown_preservation_evidence.resolve()
+                    if arguments.github_issues_unknown_preservation_evidence is not None
                     else None
                 ),
                 notification_anchor_file=(
