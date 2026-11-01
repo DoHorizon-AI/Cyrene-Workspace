@@ -87,6 +87,22 @@ insufficient. Ordinary provider-bootstrap still rejects this target; issued
 activation retains its existing path. This image-only continuation does not
 authorize a catalog, profile, credential or repository-scope change.
 
+If the Exchange ledger contains the one reviewed historical GitHub
+`UNKNOWN_RESULT`, preserve it only with a fresh owner-only evidence file passed
+through `--github-issues-unknown-preservation-evidence`. The sealed record binds
+the Graph-bootstrap candidate image and image-lock digest to the actor, one of
+the ten frozen GitHub connections, and the SHA-256 fingerprints of all twenty
+invocation columns, including the request and operation IDs. Its schema is
+`cyrene-github-issues-unknown-preservation-v1` with state
+`OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT`; `historicalUnknown` records the
+provider, connection, actor/row/request/operation digests, `UNKNOWN_RESULT`, and
+the exact one-row/twenty-column counts. The plan rejects a stale record, another
+actor or connection, or any additional nonterminal call.
+Apply repeats the read-only row check before and after the image update, requires
+no active monitor lease, outbox work or GitHub CLI process, and checks the new
+GitHub container after replacement. The recorded UNKNOWN stays unresolved; it
+must never be replayed or rewritten.
+
 For personal app publication, read and validate the parent Graph `teamsApp`
 before linking a definition: `teamsApp.id` must match the catalog ID used in
 the endpoint, and `teamsApp.externalId` must match the expected manifest ID.
@@ -181,6 +197,17 @@ Graph-bootstrap 的现有十五服务已经包含 GitHub。本次只增加其单
 条目的关系、十个冻结的 GitHub 仓库连接，以及 journal/apply 前后的监视静默和
 readiness。不能只放宽 allowlist；普通 provider-bootstrap 仍拒绝，原 issued 路径
 保留。镜像更新不同时扩大 catalog、profile、凭据或仓库范围。
+
+如果 Exchange 账本中存在已审核的那一条历史 GitHub `UNKNOWN_RESULT`，仅可通过
+`--github-issues-unknown-preservation-evidence` 显式传入新鲜的 owner-only 证据文件予以
+封存。记录绑定 Graph-bootstrap 候选镜像及镜像锁摘要、actor、十个冻结 GitHub 连接之一，
+并记录包含 request/operation ID 指纹在内的全部 20 列调用行 SHA-256。计划会拒绝过期证据、
+证据 schema 为 `cyrene-github-issues-unknown-preservation-v1`，state 为
+`OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT`；`historicalUnknown` 记录 provider、connection、
+actor/行/request/operation 摘要、`UNKNOWN_RESULT`，并要求精确的 1 行和 20 列。计划会拒绝过期证据、
+其他 actor 或连接，以及任何额外的非终态调用。Apply 会在更新前后重复只读行核对，要求没有
+活跃 monitor lease、outbox 作业或 GitHub CLI 进程，并在替换后检查新的 GitHub 容器。UNKNOWN
+仍保持未解决；不得重放调用或改写记录。
 
 发布个人应用时，先读取并校验父 Graph `teamsApp`：`id` 必须匹配接口路径使用的
 catalog ID，`externalId` 必须匹配预期的 manifest ID。本租户实际读取到的
