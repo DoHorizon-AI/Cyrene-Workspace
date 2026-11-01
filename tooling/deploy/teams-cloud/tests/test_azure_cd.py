@@ -880,16 +880,37 @@ def test_ado_bootstrap_accepts_only_safe_archive_prefix_members(with_link: bool)
         assert command_calls[0][2:] == ["deploy", "--event-json", command_calls[0][-1]]
 
 
-def test_github_bridge_requires_successful_publisher_and_read_only_token() -> None:
-    """GitHub runs only after the trusted publisher with read-only repository scopes."""
+def test_github_bridge_is_manual_only_behind_its_disabled_by_default_gate() -> None:
+    """The bridge is manual-only and remains behind its disabled-by-default gate."""
 
     workflow_path = Path(__file__).resolve().parents[4] / ".github/workflows/teams-cloud-cd.yml"
     workflow = yaml.load(workflow_path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    assert workflow["on"]["workflow_run"]["workflows"] == ["Teams cloud ARM64 immutable release"]
+    assert set(workflow["on"]) == {"workflow_dispatch"}
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert set(inputs) == {
+        "publisher_run_id",
+        "publisher_run_attempt",
+        "publisher_head_sha",
+        "publisher_event",
+    }
+    assert inputs["publisher_run_id"]["type"] == "number"
+    assert inputs["publisher_run_attempt"]["type"] == "number"
+    assert all(spec["required"] == "true" for spec in inputs.values())
+    assert inputs["publisher_event"]["options"] == [
+        "workflow_run",
+        "schedule",
+        "workflow_dispatch",
+    ]
     assert workflow["permissions"] == {"actions": "read", "contents": "read"}
     job = workflow["jobs"]["forward-verified-release"]
+    assert "github.event_name == 'workflow_dispatch'" in job["if"]
     assert "CYRENE_TEAMS_AZDO_CD_ENABLED == 'true'" in job["if"]
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
+    publisher_env = job["steps"][2]["env"]
+    assert publisher_env["PUBLISHER_RUN_ID"] == "${{ inputs.publisher_run_id }}"
+    assert publisher_env["PUBLISHER_RUN_ATTEMPT"] == "${{ inputs.publisher_run_attempt }}"
+    assert publisher_env["PUBLISHER_HEAD_SHA"] == "${{ inputs.publisher_head_sha }}"
+    assert publisher_env["PUBLISHER_EVENT"] == "${{ inputs.publisher_event }}"
     assert "azure_cd.py bridge" in job["steps"][2]["run"]
 
 
