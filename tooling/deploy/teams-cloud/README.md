@@ -58,6 +58,7 @@ RSS, cgroup-limit, or disk-reserve checks.
 | `config/` | Non-secret templates and lock schemas / 非敏感模板与锁文件 Schema |
 | [`docs/TEAMS_CLOUD_DEPLOYMENT.md`](../../../docs/TEAMS_CLOUD_DEPLOYMENT.md) | Bilingual staging, identity, provider order, rollback, and evidence runbook / 双语 staging、身份、Provider 顺序、回滚和证据手册 |
 | [`AUTOMATION_PILOT_PREPARATION.md`](AUTOMATION_PILOT_PREPARATION.md) | Prepare-only source bindings, actor-scoped Work credentials, provider gates, VM capacity guard, and five-day measurement definitions / 仅准备的 source binding、actor-scoped Work credential、Provider 门禁、VM 容量保护和五日测量定义 |
+| [`BUSINESS_AGENT_REPAIR_NOTES.md`](BUSINESS_AGENT_REPAIR_NOTES.md) | Failure causes, evidence requirements, private Teams delivery, and behaviors to preserve during legacy-project or Aether integration / Agent 故障原因、证据要求、私有 Teams 投递及老项目合并时应保留的语义 |
 
 ### Microsoft Graph mail / Microsoft Graph 邮件
 
