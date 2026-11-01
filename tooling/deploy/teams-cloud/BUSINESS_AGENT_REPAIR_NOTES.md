@@ -87,11 +87,21 @@ insufficient. Ordinary provider-bootstrap still rejects this target; issued
 activation retains its existing path. This image-only continuation does not
 authorize a catalog, profile, credential or repository-scope change.
 
-For personal app publication, keep Graph-generated `teamsApp.id` (catalog ID)
-separate from manifest `teamsApp.externalId` / `teamsAppDefinition.teamsAppId`.
-Use the catalog ID in the endpoint and the manifest ID for definition identity
-checks. A missing/null field must yield a clear contract error rather than an
-unhandled `.lower()` failure. See Microsoft's
+For personal app publication, read and validate the parent Graph `teamsApp`
+before linking a definition: `teamsApp.id` must match the catalog ID used in
+the endpoint, and `teamsApp.externalId` must match the expected manifest ID.
+In this tenant's observed response, `teamsAppDefinition.teamsAppId` returned
+the parent catalog ID. Microsoft's resource documentation describes that
+property as the manifest ID, so the observed tenant response differs from the
+documented contract. Do not unconditionally interpret `teamsAppDefinition.teamsAppId`
+as the manifest ID. After validating the parent record, bind the definition
+foreign key to the verified parent catalog ID and check the returned definition
+link against that relationship. Missing, null, or mismatched identity fields
+must produce a clear contract error rather than an unhandled `.lower()` failure.
+Keep strict checks for the bot, `clientAppId`, RSC permissions, and version;
+normalize `permissionType` enum casing to Graph's canonical lowercase spelling
+(for example, `application`) before comparison without relaxing its required
+semantics. See Microsoft's
 [definition contract](https://learn.microsoft.com/en-us/graph/api/resources/teamsappdefinition?view=graph-rest-1.0).
 
 ## Private registry archives and bounded VM retention
@@ -172,9 +182,16 @@ Graph-bootstrap 的现有十五服务已经包含 GitHub。本次只增加其单
 readiness。不能只放宽 allowlist；普通 provider-bootstrap 仍拒绝，原 issued 路径
 保留。镜像更新不同时扩大 catalog、profile、凭据或仓库范围。
 
-发布个人应用时，Graph 生成的 catalog ID 用于接口路径；definition 的 teamsAppId
-是清单里的 manifest ID，不能互换。缺失或 null 应给明确合同错误，避免模糊异常
-和重复授权。个人发布流程的授权、真实 Graph 结果和撤销回读仍单独验收。
+发布个人应用时，先读取并校验父 Graph `teamsApp`：`id` 必须匹配接口路径使用的
+catalog ID，`externalId` 必须匹配预期的 manifest ID。本租户实际读取到的
+`teamsAppDefinition.teamsAppId` 是父 catalog ID；微软资源文档则将该字段描述为
+manifest ID，因此实际响应与文档契约存在差异。不要仅凭字段名就无条件把
+`teamsAppDefinition.teamsAppId` 当作 manifest ID。校验父记录后，definition 外键应绑定
+到已验证的父 catalog ID，并检查返回的 definition link 与父记录关系一致。任何必需
+身份字段缺失、为 null 或不匹配，都应返回明确的合同错误。继续严格校验 bot、
+`clientAppId`、RSC 权限和 version；比较前将 `permissionType` 归一为 Graph 规范的小写枚举
+（例如 `application`），但不放宽权限语义。个人发布流程的授权、真实 Graph 结果和撤销回读
+仍单独验收。
 
 ### 镜像远端归档与 VM 保留范围
 
