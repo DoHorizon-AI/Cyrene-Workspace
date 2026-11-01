@@ -75,6 +75,25 @@ Acceptance must record these independent facts:
 The VM has no implicit knowledge of desktop Git cleanup. A truthful “unknown” is
 expected until a separately authorized, verifiable receipt source exists.
 
+## Existing Graph-phase GitHub updates
+
+The selected Graph-bootstrap runtime already includes the GitHub service. Its
+single-image update path must preserve the exact fifteen-service topology and
+3584 MiB / 1.95 CPU budget, join the one live Graph binding/catalog while keeping
+Graph out of the prepared candidate binding/catalog, and verify all ten frozen
+GitHub repository connections. Keep the GitHub monitor/readiness checkpoints in
+the journal and before/after apply. Adding GitHub to a phase allowlist alone is
+insufficient. Ordinary provider-bootstrap still rejects this target; issued
+activation retains its existing path. This image-only continuation does not
+authorize a catalog, profile, credential or repository-scope change.
+
+For personal app publication, keep Graph-generated `teamsApp.id` (catalog ID)
+separate from manifest `teamsApp.externalId` / `teamsAppDefinition.teamsAppId`.
+Use the catalog ID in the endpoint and the manifest ID for definition identity
+checks. A missing/null field must yield a clear contract error rather than an
+unhandled `.lower()` failure. See Microsoft's
+[definition contract](https://learn.microsoft.com/en-us/graph/api/resources/teamsappdefinition?view=graph-rest-1.0).
+
 ---
 <!-- Chinese Translation / 中文翻译 -->
 
@@ -114,3 +133,15 @@ Teams 任务完成与消息送达是两个事实。使用个人凭据得到的�
 owner 身份、通知持久状态及供应商消息 ID。个人安装恢复后，应由既有 outbox
 投递原结果，不重跑业务任务。台式机清理记录没有正式数据来源时，Agent 回答
 “不知道”符合当前边界。
+
+### Graph 阶段更新和 Teams 应用身份
+
+Graph-bootstrap 的现有十五服务已经包含 GitHub。本次只增加其单镜像延续路径，
+仍须验证 3584 MiB / 1.95 CPU、唯一 live Graph binding/catalog 与候选中无 Graph
+条目的关系、十个冻结的 GitHub 仓库连接，以及 journal/apply 前后的监视静默和
+readiness。不能只放宽 allowlist；普通 provider-bootstrap 仍拒绝，原 issued 路径
+保留。镜像更新不同时扩大 catalog、profile、凭据或仓库范围。
+
+发布个人应用时，Graph 生成的 catalog ID 用于接口路径；definition 的 teamsAppId
+是清单里的 manifest ID，不能互换。缺失或 null 应给明确合同错误，避免模糊异常
+和重复授权。个人发布流程的授权、真实 Graph 结果和撤销回读仍单独验收。

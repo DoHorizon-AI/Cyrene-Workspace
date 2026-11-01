@@ -300,6 +300,7 @@ def test_create_plan_consumes_statuses_after_transport_and_single_validation(
 @pytest.mark.parametrize(
     "target",
     [
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
         stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ],
@@ -353,12 +354,19 @@ def test_graph_runtime_image_plan_requires_exact_bootstrap_budget_before_io(
     for field, invalid_value in (("max_memory_mib", 3583), ("max_cpus", 1.90)):
         with pytest.raises(
             stage_transition.StageTransitionError,
-            match="Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget",
+            match="GitHub, Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget",
         ):
             stage_transition.create_plan(**{**arguments, field: invalid_value})
 
     with pytest.raises(RuntimeError, match="reached output boundary"):
         stage_transition.create_plan(**arguments)
+
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation",
+        ):
+            stage_transition.create_plan(**{**arguments, "phase": "provider-bootstrap"})
 
     if target == stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET:
         with pytest.raises(
@@ -1763,6 +1771,29 @@ def _full_account_center_image_update(
     return active, candidate, active_lock, candidate_lock
 
 
+def _full_graph_github_image_update(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build one GitHub image delta on the exact 15-service Graph runtime."""
+
+    active, _unused_candidate, active_lock, _unused_lock = _full_account_center_image_update(
+        tmp_path
+    )
+    candidate = copy.deepcopy(active)
+    candidate_lock = copy.deepcopy(active_lock)
+    target = stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+    candidate_ref = "example.invalid/github-issues:graph-bootstrap-update"
+    candidate["services"][target]["image"] = candidate_ref
+    target_row = next(
+        row
+        for row in candidate_lock["images"]
+        if row["service"] == runtime_update.LOCK_SERVICE_FOR_TARGET[target]
+    )
+    target_row["image"] = candidate_ref
+    target_row["imageId"] = _image_id(104)
+    return active, candidate, active_lock, candidate_lock
+
+
 def _active_memory_update(
     tmp_path: Path, target: str = "teams-ingress"
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -2094,6 +2125,10 @@ def test_microsoft_graph_image_update_is_limited_to_graph_bootstrap(tmp_path: Pa
             stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         ),
         (
+            stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+            stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        ),
+        (
             stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
             stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
         ),
@@ -2210,21 +2245,19 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
             {key: value for key, value in changed.items() if key != "planSha256"}
         )
     )
+    target_label = {
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "GitHub Issues",
+        stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET: "Microsoft Graph",
+        stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET: "Navigator",
+        stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET: "Persistence",
+    }.get(target, "Exchange Graph-bootstrap")
     expected_error = (
         f"Workspace Authority image update changes an unselected image: {unselected_service}"
         if target == stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
         else (
             f"Exchange Graph-bootstrap image update changes an unselected image: {unselected_service}"
             if target == stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET
-            else (
-                f"Microsoft Graph image update changes an unselected image: {unselected_service}"
-                if target == stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET
-                else (
-                    f"Navigator image update changes an unselected image: {unselected_service}"
-                    if target == stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET
-                    else f"Persistence image update changes an unselected image: {unselected_service}"
-                )
-            )
+            else f"{target_label} image update changes an unselected image: {unselected_service}"
         )
     )
     with pytest.raises(
@@ -2233,8 +2266,23 @@ def test_selected_graph_image_plan_closes_to_one_graph_runtime_target(
     ):
         stage_transition._validate_plan(changed)
 
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        wrong_phase = copy.deepcopy(plan)
+        wrong_phase["phase"] = "provider-bootstrap"
+        wrong_phase["planSha256"] = stage_transition._sha256_bytes(
+            stage_transition._canonical_json(
+                {key: value for key, value in wrong_phase.items() if key != "planSha256"}
+            )
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation",
+        ):
+            stage_transition._validate_plan(wrong_phase)
+
     if target in {
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
         stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
         stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
@@ -2743,7 +2791,7 @@ def test_issued_github_image_update_preserves_exact_fourteen_service_inventory(
 
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="GitHub Issues image updates require issued-connector-activation",
+        match="GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation",
     ):
         stage_transition._validate_phase_topology(
             phase="provider-bootstrap",
@@ -2766,6 +2814,66 @@ def test_issued_github_image_update_preserves_exact_fourteen_service_inventory(
             image_update_target="github-issues",
             active=active,
             candidate=candidate,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+
+def test_graph_bootstrap_github_image_update_preserves_fifteen_services_and_mounts(
+    tmp_path: Path,
+) -> None:
+    """Permit one GitHub image change while freezing the full Graph runtime definition."""
+
+    active, candidate, active_lock, candidate_lock = _full_graph_github_image_update(tmp_path)
+    targets, images = stage_transition._validate_phase_topology(
+        phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+        image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        active=active,
+        candidate=candidate,
+        active_lock=active_lock,
+        candidate_lock=candidate_lock,
+    )
+    assert targets == [stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET]
+    assert set(images) == stage_transition.OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    assert (
+        images["github-issues"]["active"]["imageId"]
+        != images["github-issues"]["candidate"]["imageId"]
+    )
+    assert all(
+        row["active"] == row["candidate"]
+        for name, row in images.items()
+        if name != stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+    )
+    assert all(row["added"] is False and row["configChanged"] is False for row in images.values())
+
+    changed_mounts = copy.deepcopy(candidate)
+    changed_mounts["services"]["github-issues"]["volumes"] = [
+        {"type": "bind", "source": "/private/unexpected", "target": "/app/data"}
+    ]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="image update may change only its selected service image",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+            active=active,
+            candidate=changed_mounts,
+            active_lock=active_lock,
+            candidate_lock=candidate_lock,
+        )
+
+    missing_graph = copy.deepcopy(candidate)
+    del missing_graph["services"]["microsoft-graph"]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="GitHub Issues Graph-bootstrap image update must preserve the exact 15-service Graph runtime",
+    ):
+        stage_transition._validate_phase_topology(
+            phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE,
+            image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+            active=active,
+            candidate=missing_graph,
             active_lock=active_lock,
             candidate_lock=candidate_lock,
         )
@@ -5162,6 +5270,7 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         runtime_config_identity=identity,
     )
     for target in (
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.NAVIGATOR_IMAGE_UPDATE_TARGET,
         stage_transition.PERSISTENCE_IMAGE_UPDATE_TARGET,
     ):
@@ -5200,7 +5309,7 @@ def test_image_update_requires_current_selector_phase_and_unchanged_mounts() -> 
         )
     with pytest.raises(
         stage_transition.StageTransitionError,
-        match="GitHub Issues image updates require issued-connector-activation",
+        match="GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation",
     ):
         stage_transition._validate_image_update_selection_contract(
             target="github-issues",
@@ -8539,6 +8648,62 @@ def test_github_image_readiness_returns_only_exact_issued_binding_refs(
         )
 
 
+def test_graph_bootstrap_github_readiness_requires_exact_ten_connection_scope(
+    tmp_path: Path,
+) -> None:
+    """Join Graph readiness with the unchanged ten-repository GitHub installation scope."""
+
+    snapshot, compose, _database_state, _scope_digests = (
+        _account_center_unissued_graph_readiness_fixture(
+            tmp_path, phase=stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        )
+    )
+    _issue_graph_readiness_row(snapshot, compose, persist_candidate=False)
+    phase = stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+    receipt = stage_transition._verify_exchange_readiness_snapshot(
+        snapshot=snapshot,
+        compose=compose,
+        phase=phase,
+        image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+    )
+    expected_refs = sorted(
+        row["connectionRef"] for row in snapshot["connections"] if row["providerId"] == "github"
+    )
+    assert receipt["githubConnectionRefs"] == expected_refs
+    assert receipt["connectionRefByProvider"]["github"] == expected_refs
+    assert "github" in receipt["verifiedProviderIds"]
+    assert "microsoft_graph" in receipt["verifiedProviderIds"]
+
+    changed_scope = copy.deepcopy(snapshot)
+    github_profile = next(row for row in changed_scope["profiles"] if row["providerId"] == "github")
+    github_profile["targetScope"]["repositories"][0]["name"] = "outside-frozen-scope"
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="live GitHub profile repository scope differs from the frozen bootstrap config",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=changed_scope,
+            compose=compose,
+            phase=phase,
+            image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        )
+
+    missing_connection = copy.deepcopy(snapshot)
+    missing_connection["connections"] = [
+        row for row in missing_connection["connections"] if row["providerId"] != "github"
+    ] + [row for row in snapshot["connections"] if row["providerId"] == "github"][:-1]
+    with pytest.raises(
+        stage_transition.StageTransitionError,
+        match="one live profile and exactly ten issued connections/bindings",
+    ):
+        stage_transition._verify_exchange_readiness_snapshot(
+            snapshot=missing_connection,
+            compose=compose,
+            phase=phase,
+            image_update_target=stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        )
+
+
 def test_listener_repair_precheck_verifies_issued_state_without_live_catalog(
     tmp_path: Path,
 ) -> None:
@@ -9515,6 +9680,7 @@ def test_workspace_authority_readiness_accepts_only_the_issued_owner_graph_ident
 @pytest.mark.parametrize(
     "target",
     [
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
@@ -9627,17 +9793,33 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
     )
 
     assert receipt["status"] == "LIVE_VERIFIED"
-    assert receipt["verifiedProviderIds"] == [
-        "azure",
-        "gcp",
-        "huggingface",
-        "microsoft_graph",
-        "runpod",
-    ]
+    expected_provider_ids = ["azure", "gcp", "huggingface", "microsoft_graph", "runpod"]
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        expected_provider_ids.insert(2, "github")
+    assert receipt["verifiedProviderIds"] == expected_provider_ids
     assert receipt["profileRefByProvider"]["microsoft_graph"] == "microsoft-graph-profile-ref"
     assert receipt["connectionRefByProvider"]["microsoft_graph"] == (
         "77777777-7777-4777-8777-777777777777"
     )
+    if target == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+        github_refs = sorted(
+            row["connectionRef"] for row in snapshot["connections"] if row["providerId"] == "github"
+        )
+        assert receipt["githubConnectionRefs"] == github_refs
+        assert receipt["connectionRefByProvider"]["github"] == github_refs
+        mismatched_receipt = copy.deepcopy(journal)
+        mismatched_refs = list(github_refs)
+        mismatched_refs[0] = "88888888-8888-4888-8888-888888888888"
+        mismatched_receipt["exchangeReadiness"]["receipt"]["connectionRefByProvider"]["github"] = (
+            mismatched_refs
+        )
+        with pytest.raises(
+            stage_transition.StageTransitionError,
+            match="Graph-bootstrap GitHub readiness must match all ten frozen repository bindings",
+        ):
+            stage_transition._image_update_exchange_readiness_checkpoint(
+                plan, mismatched_receipt, candidate_compose=compose
+            )
     graph_binding = next(
         row for row in snapshot["bindings"] if row["providerId"] == "microsoft_graph"
     )
@@ -9757,6 +9939,7 @@ def test_graph_bootstrap_image_update_verifies_one_live_graph_delta_without_chan
 @pytest.mark.parametrize(
     "target",
     [
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
@@ -9876,6 +10059,7 @@ def test_graph_bootstrap_image_update_rejects_invalid_live_graph_delta(
 @pytest.mark.parametrize(
     "target",
     [
+        stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         stage_transition.WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET,
         stage_transition.EXCHANGE_IMAGE_UPDATE_TARGET,
         stage_transition.MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
@@ -10753,8 +10937,12 @@ def test_account_center_image_update_journal_reports_readonly_database_and_readi
     assert database_state["databasePathSha256"] not in json.dumps(summary)
 
 
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
 def test_github_image_update_journal_and_status_report_readiness_and_monitor_gates(
-    tmp_path: Path,
+    phase: str, tmp_path: Path
 ) -> None:
     """Record both GitHub readiness checkpoints and all-binding monitor quiescence."""
 
@@ -10765,7 +10953,7 @@ def test_github_image_update_journal_and_status_report_readiness_and_monitor_gat
         "operationId": "00000000-0000-4000-8000-000000000001",
         "planSha256": "a" * 64,
         "project": "cyrene-teams-cloud",
-        "phase": "issued-connector-activation",
+        "phase": phase,
         "imageUpdateTarget": target,
         "targets": [target],
         "activeServices": {target: {"containerId": "b" * 64}},
@@ -11831,7 +12019,12 @@ def test_account_center_unknown_is_preserved_through_readiness_and_monitor_gates
         ("missing-monitor", False),
     ],
 )
-def test_github_issued_monitor_guard_checks_all_ten_exact_bindings(
+@pytest.mark.parametrize(
+    "phase",
+    ["issued-connector-activation", stage_transition.OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE],
+)
+def test_github_image_update_monitor_guard_checks_all_ten_exact_bindings(
+    phase: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     blocker: str | None,
@@ -11895,7 +12088,7 @@ def test_github_issued_monitor_guard_checks_all_ten_exact_bindings(
         lambda _path, _journal, phase: phases.append(phase),
     )
     plan = {
-        "phase": "issued-connector-activation",
+        "phase": phase,
         "imageUpdateTarget": "github-issues",
         "activeServices": {"exchange": {"containerId": "a" * 64}},
         "policy": {"healthTimeoutSeconds": 300},
@@ -11931,7 +12124,20 @@ def test_github_issued_monitor_guard_checks_all_ten_exact_bindings(
         assert result["verified"] is True
         assert result["requiredWindowSeconds"] == 360
         assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == result
-        assert phases == ["CONNECTOR_MONITOR_QUIESCENCE_VERIFIED"]
+        after_result = stage_transition._verify_provider_monitor_quiescence(
+            plan=plan,
+            candidate_compose={"services": {}},
+            journal=journal,
+            journal_path=tmp_path / "journal.json",
+            docker_prefix=["docker"],
+            checkpoint="after",
+        )
+        assert after_result["verified"] is True
+        assert journal["githubIssuesImageUpdate"]["monitorQuiescence"] == after_result
+        assert phases == [
+            "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+            "CONNECTOR_MONITOR_QUIESCENCE_VERIFIED",
+        ]
     else:
         with pytest.raises(stage_transition.StageTransitionError, match="blocked because"):
             stage_transition._verify_provider_monitor_quiescence(

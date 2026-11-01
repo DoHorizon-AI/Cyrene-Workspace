@@ -68,6 +68,9 @@ WORKSPACE_AUTHORITY_IMAGE_UPDATE_PHASES = frozenset(
 )
 CLOUD_IMAGE_UPDATE_TARGET = "cloud-management-phase2"
 GITHUB_ISSUES_IMAGE_UPDATE_TARGET = "github-issues"
+GITHUB_ISSUES_IMAGE_UPDATE_PHASES = frozenset(
+    {OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE, "issued-connector-activation"}
+)
 HUGGINGFACE_IMAGE_UPDATE_TARGET = "huggingface"
 PERSISTENCE_IMAGE_UPDATE_TARGET = "navigator-persistence"
 PERSISTENCE_IMAGE_UPDATE_PHASES = frozenset(
@@ -77,6 +80,7 @@ OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS = frozenset(
     {
         ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
         EXCHANGE_IMAGE_UPDATE_TARGET,
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
         NAVIGATOR_IMAGE_UPDATE_TARGET,
         PERSISTENCE_IMAGE_UPDATE_TARGET,
@@ -86,6 +90,7 @@ OFFICE_GRAPH_IMAGE_UPDATE_CONTINUATION_TARGETS = frozenset(
 OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS = frozenset(
     {
         EXCHANGE_IMAGE_UPDATE_TARGET,
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
         MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET,
         NAVIGATOR_IMAGE_UPDATE_TARGET,
         PERSISTENCE_IMAGE_UPDATE_TARGET,
@@ -93,7 +98,11 @@ OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS = frozenset(
     }
 )
 OFFICE_GRAPH_EXACT_RUNTIME_IMAGE_UPDATE_TARGETS = frozenset(
-    {NAVIGATOR_IMAGE_UPDATE_TARGET, PERSISTENCE_IMAGE_UPDATE_TARGET}
+    {
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+        NAVIGATOR_IMAGE_UPDATE_TARGET,
+        PERSISTENCE_IMAGE_UPDATE_TARGET,
+    }
 )
 CLOUD_MONITOR_PROVIDER_IDS = frozenset({"azure", "gcp", "runpod"})
 PROVIDER_LISTENER_REPAIR_TARGETS = ("huggingface", "cloud-management-phase2")
@@ -1262,7 +1271,7 @@ def _verify_provider_monitor_quiescence(
         include_cloud_refresh = False
     elif (
         target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-        and plan.get("phase") == "issued-connector-activation"
+        and plan.get("phase") in GITHUB_ISSUES_IMAGE_UPDATE_PHASES
     ):
         target_journal_key = "githubIssuesImageUpdate"
         required_providers = ["github"]
@@ -4368,9 +4377,12 @@ def _validate_image_update_topology(
         raise StageTransitionError(
             "Account Center image updates require the selected Graph bootstrap or issued activation phase"
         )
-    if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
+    if (
+        target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and phase not in GITHUB_ISSUES_IMAGE_UPDATE_PHASES
+    ):
         raise StageTransitionError(
-            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+            "GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation and the existing connector runtime"
         )
     if target == HUGGINGFACE_IMAGE_UPDATE_TARGET and phase != "issued-connector-activation":
         raise StageTransitionError(
@@ -4420,6 +4432,14 @@ def _validate_image_update_topology(
     ):
         raise StageTransitionError(
             "Microsoft Graph image update must preserve the exact 15-service Graph runtime"
+        )
+    if (
+        target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+        and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+        and set(new_services) != OFFICE_GRAPH_RUNTIME_SERVICE_SET
+    ):
+        raise StageTransitionError(
+            "GitHub Issues Graph-bootstrap image update must preserve the exact 15-service Graph runtime"
         )
 
     try:
@@ -5657,10 +5677,10 @@ def _validate_image_update_selection_contract(
     if (
         not is_memory_update
         and target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in GITHUB_ISSUES_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+            "GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation and the existing connector runtime"
         )
     if (
         not is_memory_update
@@ -7854,10 +7874,10 @@ def create_plan(
         )
     if (
         image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-        and phase != "issued-connector-activation"
+        and phase not in GITHUB_ISSUES_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+            "GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation and the existing connector runtime"
         )
     if (
         image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
@@ -7883,7 +7903,7 @@ def create_plan(
         and (max_memory_mib != 3584 or max_cpus != 1.95)
     ):
         raise StageTransitionError(
-            "Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget"
+            "GitHub, Navigator and Persistence Graph image updates require the 3584 MiB/1.95 CPU budget"
         )
     if listener_repair and (
         phase != "provider-bootstrap"
@@ -8137,7 +8157,7 @@ def create_plan(
         )
     ):
         raise StageTransitionError(
-            "Navigator and Persistence candidate Compose must retain the 3584 MiB/1.95 CPU budget"
+            "GitHub, Navigator and Persistence candidate Compose must retain the 3584 MiB/1.95 CPU budget"
         )
     if (
         image_update_target is not None
@@ -8607,10 +8627,10 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         )
     if (
         image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-        and plan.get("phase") != "issued-connector-activation"
+        and plan.get("phase") not in GITHUB_ISSUES_IMAGE_UPDATE_PHASES
     ):
         raise StageTransitionError(
-            "GitHub Issues image updates require issued-connector-activation and the existing connector runtime"
+            "GitHub Issues image updates require Graph provider-bootstrap or issued-connector-activation and the existing connector runtime"
         )
     if (
         image_update_target == PERSISTENCE_IMAGE_UPDATE_TARGET
@@ -8646,7 +8666,7 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or listener_repair
     ):
         raise StageTransitionError(
-            "Graph bootstrap permits only its closed Account Center, Exchange, Microsoft Graph, Navigator, Persistence, or Workspace Authority image continuation"
+            "Graph bootstrap permits only its closed Account Center, Exchange, GitHub Issues, Microsoft Graph, Navigator, Persistence, or Workspace Authority image continuation"
         )
     if plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE and "cloudRunnerState" in plan:
         raise StageTransitionError("Graph provider bootstrap must not change the cloud runner")
@@ -8683,7 +8703,11 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     ):
         candidate_preflight = plan.get("candidatePreflight")
         target_label = (
-            "Navigator" if image_update_target == NAVIGATOR_IMAGE_UPDATE_TARGET else "Persistence"
+            "GitHub Issues"
+            if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+            else "Navigator"
+            if image_update_target == NAVIGATOR_IMAGE_UPDATE_TARGET
+            else "Persistence"
         )
         if (
             active_runtime_services != OFFICE_GRAPH_RUNTIME_SERVICE_SET
@@ -10460,6 +10484,7 @@ def _verify_exchange_readiness_snapshot(
     graph_bootstrap_image_update_label = {
         WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET: "Workspace Authority",
         EXCHANGE_IMAGE_UPDATE_TARGET: "Exchange",
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET: "GitHub Issues",
         MICROSOFT_GRAPH_IMAGE_UPDATE_TARGET: "Microsoft Graph",
         NAVIGATOR_IMAGE_UPDATE_TARGET: "Navigator",
         PERSISTENCE_IMAGE_UPDATE_TARGET: "Persistence",
@@ -11048,6 +11073,10 @@ def _verify_exchange_readiness_snapshot(
         and (
             phase == "issued-connector-activation"
             or (
+                image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+                and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+            )
+            or (
                 image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET
                 and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
             )
@@ -11060,7 +11089,10 @@ def _verify_exchange_readiness_snapshot(
     )
     catalog_digest = _sha256_bytes(_canonical_json(live_catalog)) if include_live_catalog else None
     verified_provider_ids = set(expected_provider_ids)
-    if image_update_target == ACCOUNT_CENTER_IMAGE_UPDATE_TARGET:
+    if image_update_target in {
+        ACCOUNT_CENTER_IMAGE_UPDATE_TARGET,
+        GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
+    }:
         verified_provider_ids.add("github")
     result = {
         "schemaVersion": 1,
@@ -11115,7 +11147,17 @@ def _verify_exchange_readiness_snapshot(
             else {}
         ),
         **(
-            {"connectionRefByProvider": dict(sorted(live_connection_refs.items()))}
+            {
+                "connectionRefByProvider": {
+                    **(
+                        {"github": github_connection_refs}
+                        if image_update_target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+                        and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+                        else {}
+                    ),
+                    **dict(sorted(live_connection_refs.items())),
+                }
+            }
             if (
                 image_update_target in OFFICE_GRAPH_LIVE_PROVIDER_IMAGE_UPDATE_TARGETS
                 and phase == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
@@ -11422,7 +11464,10 @@ def _image_update_exchange_readiness_checkpoint(
             raise StageTransitionError(
                 "Graph-bootstrap image readiness checkpoint requires its frozen candidate Compose"
             )
-        expected_monitor_providers = sorted(set(expected_scope_digests) | {"microsoft_graph"})
+        expected_monitor_provider_set = set(expected_scope_digests) | {"microsoft_graph"}
+        if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+            expected_monitor_provider_set.add("github")
+        expected_monitor_providers = sorted(expected_monitor_provider_set)
         if not {"huggingface", "azure", "gcp", "microsoft_graph"} <= set(
             expected_monitor_providers
         ):
@@ -11476,6 +11521,34 @@ def _image_update_exchange_readiness_checkpoint(
                 {(row["providerId"], row["profileRef"]) for row in binding_rows}
                 | {("microsoft_graph", graph_profile_ref)}
             )
+            if target == GITHUB_ISSUES_IMAGE_UPDATE_TARGET:
+                github_refs = receipt.get("githubConnectionRefs")
+                provider_refs = receipt.get("connectionRefByProvider")
+                frozen_github_refs = sorted(
+                    row["connectionRef"] for row in binding_rows if row["providerId"] == "github"
+                )
+                bootstrap = _candidate_config_json(candidate_compose, "connector-bootstrap")
+                github_bootstrap = bootstrap.get("github") if isinstance(bootstrap, dict) else None
+                repositories = (
+                    github_bootstrap.get("repositories")
+                    if isinstance(github_bootstrap, dict)
+                    else None
+                )
+                if (
+                    not isinstance(github_refs, list)
+                    or len(github_refs) != 10
+                    or github_refs != frozen_github_refs
+                    or not isinstance(provider_refs, dict)
+                    or provider_refs.get("github") != github_refs
+                    or len(frozen_github_refs) != 10
+                    or not isinstance(github_bootstrap, dict)
+                    or github_bootstrap.get("expectedAccessMode") != "workspace_operator"
+                    or not isinstance(repositories, list)
+                    or len(repositories) != 10
+                ):
+                    raise StageTransitionError(
+                        "Graph-bootstrap GitHub readiness must match all ten frozen repository bindings"
+                    )
         else:
             if sum(row["providerId"] == "microsoft_graph" for row in binding_rows) != 1:
                 raise StageTransitionError(
@@ -11726,7 +11799,7 @@ def _make_journal(plan: dict[str, Any], plan_path: Path) -> dict[str, Any]:
         },
         "githubIssuesImageUpdate": {
             "required": plan.get("imageUpdateTarget") == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
-            and plan.get("phase") == "issued-connector-activation",
+            and plan.get("phase") in GITHUB_ISSUES_IMAGE_UPDATE_PHASES,
             "beforeReadiness": None,
             "monitorQuiescence": None,
             "afterReadiness": None,
@@ -14016,7 +14089,13 @@ def apply_plan_file(
                             CLOUD_IMAGE_UPDATE_TARGET,
                             GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
                         }
-                        and plan.get("phase") == "issued-connector-activation"
+                        and (
+                            plan.get("phase") == "issued-connector-activation"
+                            or (
+                                plan.get("imageUpdateTarget") == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+                                and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+                            )
+                        )
                     )
                     or (
                         plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
@@ -14165,7 +14244,13 @@ def apply_plan_file(
                             CLOUD_IMAGE_UPDATE_TARGET,
                             GITHUB_ISSUES_IMAGE_UPDATE_TARGET,
                         }
-                        and plan.get("phase") == "issued-connector-activation"
+                        and (
+                            plan.get("phase") == "issued-connector-activation"
+                            or (
+                                plan.get("imageUpdateTarget") == GITHUB_ISSUES_IMAGE_UPDATE_TARGET
+                                and plan.get("phase") == OFFICE_GRAPH_PROVIDER_BOOTSTRAP_PHASE
+                            )
+                        )
                     )
                     or (
                         plan.get("imageUpdateTarget") == WORKSPACE_AUTHORITY_IMAGE_UPDATE_TARGET
@@ -14201,7 +14286,7 @@ def apply_plan_file(
                             plan, journal, candidate_compose=candidate_compose
                         )
                     )
-                    if update_key == "accountCenterImageUpdate":
+                    if update_key in {"accountCenterImageUpdate", "githubIssuesImageUpdate"}:
                         _verify_provider_monitor_quiescence(
                             plan=plan,
                             candidate_compose=candidate_compose,
