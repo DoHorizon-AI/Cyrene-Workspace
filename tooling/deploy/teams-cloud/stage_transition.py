@@ -9688,7 +9688,7 @@ def _verify_all_inputs(plan: dict[str, Any]) -> None:
             )
             continue
         if key == "githubIssuesUnknownPreservationEvidence":
-            _verify_github_issues_unknown_preservation_evidence(value)
+            _verify_operator_private_file_record(value, "GitHub unknown preservation evidence")
             continue
         if value is None:
             continue
@@ -14274,6 +14274,11 @@ def apply_plan_file(
         if journal_path.exists() or journal_path.is_symlink():
             raise StageTransitionError("operation journal already exists; apply is never replayed")
         _verify_all_inputs(plan)
+        github_unknown_evidence = plan["candidateInputs"].get(
+            "githubIssuesUnknownPreservationEvidence"
+        )
+        if github_unknown_evidence is not None:
+            _verify_github_issues_unknown_preservation_evidence(github_unknown_evidence)
         _check_selection_unchanged(plan)
         _candidate_preflight(plan)
         active_compose, _active_lock = _verify_active_baseline(plan, docker_prefix)

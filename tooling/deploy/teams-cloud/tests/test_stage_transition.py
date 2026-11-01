@@ -12612,7 +12612,7 @@ def test_github_unknown_evidence_plan_flag_reaches_the_plan_builder(
     assert capsys.readouterr().out.strip().startswith('{"operationId":')
 
 
-def test_github_unknown_evidence_apply_rechecks_expiry_boundary(
+def test_expired_github_unknown_evidence_blocks_new_apply_but_not_readonly_input_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -12654,6 +12654,11 @@ def test_github_unknown_evidence_apply_rechecks_expiry_boundary(
         stage_transition, "_verify_runtime_config_identity_sources", lambda *_args: None
     )
     plan = {
+        "operationId": "00000000-0000-4000-8000-000000000001",
+        "planSha256": "a" * 64,
+        "project": "cyrene-teams-cloud",
+        "journalDir": str(private_dir / "journals"),
+        "policy": {"dockerPrefix": ["docker"]},
         "activeInputs": {
             "composeFiles": [],
             "envFiles": [],
@@ -12672,10 +12677,101 @@ def test_github_unknown_evidence_apply_rechecks_expiry_boundary(
         "runtimeConfigIdentity": {"active": {}, "candidate": {}},
     }
 
+    stage_transition._verify_github_issues_unknown_preservation_evidence(evidence_record)
     stage_transition._verify_all_inputs(plan)
     fixed_now[0] += timedelta(microseconds=1)
+    stage_transition._verify_all_inputs(plan)
+
+    plan_path = private_dir / "plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    plan_path.chmod(0o600)
+    mutation_checks: list[str] = []
+    monkeypatch.setattr(stage_transition, "_validate_plan", lambda _plan: None)
+    monkeypatch.setattr(runtime_update, "_require_update_operator", lambda: None)
+    monkeypatch.setattr(runtime_update, "_validate_docker_prefix", lambda _prefix: None)
+    monkeypatch.setattr(runtime_update, "_ensure_journal_directory", lambda *_args, **_kwargs: None)
+
+    @contextmanager
+    def operation_lock(_project: str):
+        yield
+
+    monkeypatch.setattr(runtime_update, "_operation_lock", operation_lock)
+    monkeypatch.setattr(
+        stage_transition,
+        "_check_selection_unchanged",
+        lambda _plan: mutation_checks.append("selection-check") or None,
+    )
     with pytest.raises(stage_transition.StageTransitionError, match="evidence is stale"):
-        stage_transition._verify_all_inputs(plan)
+        stage_transition.apply_plan_file(plan_path, expected_digest=plan["planSha256"])
+    assert mutation_checks == []
+
+    target_container_id = "b" * 64
+    journal = {
+        "operationId": plan["operationId"],
+        "planSha256": plan["planSha256"],
+        "planPath": str(plan_path),
+        "state": "RUNNING",
+        "targetProgress": {
+            "github-issues": {
+                "applyIntent": True,
+                "phase": "APPLIED",
+                "healthyContainerId": target_container_id,
+            }
+        },
+        "selection": {
+            "promotionIntent": False,
+            "promoted": False,
+            "path": str(private_dir / "selection.json"),
+            "newSha256": None,
+        },
+    }
+    writes: list[tuple[str, str | None]] = []
+
+    def write_journal(
+        _path: Path,
+        document: dict[str, Any],
+        phase: str,
+        *,
+        state: str | None = None,
+    ) -> None:
+        writes.append((phase, state))
+        if state is not None:
+            document["state"] = state
+
+    monkeypatch.setattr(stage_transition, "_read_journal", lambda _path: journal)
+    monkeypatch.setattr(stage_transition, "_write_journal", write_journal)
+    monkeypatch.setattr(
+        stage_transition,
+        "_candidate_configs",
+        lambda *_args: ({}, {}),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_live_service_inventory",
+        lambda **_kwargs: {"github-issues": {"containerId": target_container_id}},
+    )
+    monkeypatch.setattr(stage_transition, "_current_selection_digest", lambda _path: None)
+    monkeypatch.setattr(
+        stage_transition,
+        "_verify_github_issues_unknown_preservation_evidence",
+        lambda _record: pytest.fail("read-only resume must not apply the creation age limit"),
+    )
+    monkeypatch.setattr(
+        stage_transition,
+        "_journal_summary",
+        lambda document: {
+            "state": document.get("state"),
+            "lastErrorCode": document.get("lastErrorCode"),
+        },
+    )
+    resume = stage_transition.resume_operation(
+        plan["operationId"], journal_dir=private_dir / "journals"
+    )
+    assert resume == {
+        "state": "RECOVERY_REQUIRED",
+        "lastErrorCode": "operation_interrupted_no_mutation_replayed",
+    }
+    assert writes == [("RECOVERY_REQUIRED", "RECOVERY_REQUIRED")]
 
 
 @pytest.mark.parametrize(
