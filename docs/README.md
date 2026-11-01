@@ -29,6 +29,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md): Catalyst-only source review, isolated OCR setup, one-call local model acceptance, dual-profile publishing, and restart recovery.
 - [**Component update packaging**](../packaging/service-bundle.md): Linux component updater, verified catalog metadata, and immutable service packaging.
 - [**Aether migration WSL acceptance**](AETHER_MIGRATION_ACCEPTANCE.md): Isolated local services, the P0–P10 behavior matrix, and evidence rules.
+- [**Aether WSL backup and restore**](AETHER_WSL_BACKUP_RESTORE.md): Complete task-state catalog, quiesced snapshots, PostgreSQL logical dumps, fresh restore, and rollback evidence.
 
 ---
 
@@ -79,6 +80,7 @@ This directory contains the canonical, current-first documentation for the Cyren
 - [**CATALYST_V02_WORKFLOW.md**](CATALYST_V02_WORKFLOW.md)：Catalyst-only 来源审核、隔离 OCR 配置、单次本地模型验收、双制品发布和重启恢复。
 - [**Component update packaging**](../packaging/service-bundle.md)：Linux 组件更新器、已验证目录元数据和不可变服务打包。
 - [**Aether 迁移 WSL 验收**](AETHER_MIGRATION_ACCEPTANCE.md)：隔离的本地服务、P0–P10 行为矩阵和证据规则。
+- [**Aether WSL 备份与恢复**](AETHER_WSL_BACKUP_RESTORE.md)：完整任务状态清单、静止快照、PostgreSQL 逻辑导出、新目标恢复与回滚证据。
 
 ---
 
