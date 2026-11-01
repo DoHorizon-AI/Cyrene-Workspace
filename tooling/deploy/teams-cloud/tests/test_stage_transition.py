@@ -11149,6 +11149,22 @@ def test_github_image_update_journal_and_status_report_readiness_and_monitor_gat
     assert summary["githubIssuesUnknownPreservationStatus"] == "PRESERVED_UNKNOWN_NOT_RESOLVED"
     assert summary["githubIssuesBeforeReadinessStatus"] == "LIVE_VERIFIED"
     assert summary["githubIssuesAfterReadinessStatus"] == "LIVE_VERIFIED"
+
+    legacy_journal = copy.deepcopy(journal)
+    legacy_update = legacy_journal["githubIssuesImageUpdate"]
+    legacy_update.pop("afterMonitorQuiescence")
+    legacy_update.pop("preservedUnknownPlan")
+    legacy_update["monitorQuiescence"] = {
+        "verified": True,
+        "preservedUnknownStatus": "NO_UNKNOWN_RESULT",
+        "preservedUnknownRowSha256": None,
+    }
+    legacy_summary = stage_transition._journal_summary(legacy_journal)
+    assert legacy_journal["schemaVersion"] == stage_transition.JOURNAL_SCHEMA
+    assert legacy_summary["githubIssuesUnknownPreservationStatus"] == "NOT_REQUIRED"
+    assert legacy_summary["githubIssuesMonitorQuiescenceStatus"] == "VERIFIED"
+    assert legacy_summary["githubIssuesImageUpdateStatus"] == "VERIFIED"
+
     journal["githubIssuesImageUpdate"]["afterMonitorQuiescence"]["preservedUnknownRowSha256"] = (
         "f" * 64
     )
@@ -12594,6 +12610,72 @@ def test_github_unknown_evidence_plan_flag_reaches_the_plan_builder(
     assert captured["github_issues_unknown_preservation_evidence"] == evidence_path.resolve()
     assert captured["image_update_target"] == stage_transition.GITHUB_ISSUES_IMAGE_UPDATE_TARGET
     assert capsys.readouterr().out.strip().startswith('{"operationId":')
+
+
+def test_github_unknown_evidence_apply_rechecks_expiry_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Allow the exact 30-minute boundary, then reject the same plan one microsecond later."""
+
+    fixed_now = [datetime(2026, 11, 1, 12, 30, tzinfo=UTC)]
+
+    class FixedClock:
+        @staticmethod
+        def now(_tz: Any = None) -> datetime:
+            return fixed_now[0]
+
+        @staticmethod
+        def fromisoformat(value: str) -> datetime:
+            return datetime.fromisoformat(value)
+
+    monkeypatch.setattr(stage_transition, "datetime", FixedClock)
+    created_at = fixed_now[0] - timedelta(
+        seconds=stage_transition.ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS
+    )
+    evidence = {
+        "schemaVersion": stage_transition.GITHUB_ISSUES_UNKNOWN_PRESERVATION_SCHEMA,
+        "state": "OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT",
+        "createdAtUtc": created_at.isoformat(),
+    }
+    private_dir = tmp_path / ".artifacts"
+    private_dir.mkdir()
+    evidence_path = private_dir / "github-unknown.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    evidence_path.chmod(0o600)
+    evidence_record = stage_transition._operator_private_file_record(
+        evidence_path, "test GitHub unknown-preservation evidence"
+    )
+    monkeypatch.setattr(stage_transition, "_verify_file_group", lambda *_args: None)
+    monkeypatch.setattr(stage_transition, "_verify_record", lambda *_args: None)
+    monkeypatch.setattr(stage_transition, "_verify_directory_group", lambda *_args: None)
+    monkeypatch.setattr(stage_transition, "_verify_secret_manifest", lambda *_args: None)
+    monkeypatch.setattr(
+        stage_transition, "_verify_runtime_config_identity_sources", lambda *_args: None
+    )
+    plan = {
+        "activeInputs": {
+            "composeFiles": [],
+            "envFiles": [],
+            "imageLock": {},
+            "configDirectoryFiles": [],
+        },
+        "candidateInputs": {
+            "composeFiles": [],
+            "envFiles": [],
+            "imageLock": {},
+            "configDirectoryFiles": [],
+            "githubIssuesUnknownPreservationEvidence": evidence_record,
+        },
+        "activeConfigDir": "/private/active-config",
+        "candidateConfigDir": "/private/candidate-config",
+        "runtimeConfigIdentity": {"active": {}, "candidate": {}},
+    }
+
+    stage_transition._verify_all_inputs(plan)
+    fixed_now[0] += timedelta(microseconds=1)
+    with pytest.raises(stage_transition.StageTransitionError, match="evidence is stale"):
+        stage_transition._verify_all_inputs(plan)
 
 
 @pytest.mark.parametrize(

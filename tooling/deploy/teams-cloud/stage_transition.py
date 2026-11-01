@@ -4879,6 +4879,41 @@ def _account_center_preserved_unknown_summary(
     }
 
 
+def _validate_github_issues_unknown_evidence_freshness(
+    evidence: Any, *, now: datetime | None = None
+) -> None:
+    """Require the exact GitHub UNKNOWN evidence schema to remain inside its age window."""
+
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schemaVersion") != GITHUB_ISSUES_UNKNOWN_PRESERVATION_SCHEMA
+        or evidence.get("state") != "OPERATOR_RECORDED_EXCHANGE_UNKNOWN_SNAPSHOT"
+    ):
+        raise StageTransitionError(
+            "GitHub UNKNOWN preservation evidence schema or state is invalid"
+        )
+    created_at = _parse_private_utc_timestamp(
+        evidence.get("createdAtUtc"), "GitHub preservation evidence"
+    )
+    current_time = datetime.now(UTC) if now is None else now
+    age_seconds = (current_time - created_at).total_seconds()
+    if age_seconds < -30 or age_seconds > ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS:
+        raise StageTransitionError("GitHub UNKNOWN preservation evidence is stale")
+
+
+def _verify_github_issues_unknown_preservation_evidence(record: Any) -> None:
+    """Recheck the private evidence digest and freshness before any apply mutation."""
+
+    _verify_operator_private_file_record(record, "GitHub unknown preservation evidence")
+    evidence_path = Path(record["path"])
+    evidence = _read_json(
+        evidence_path,
+        "GitHub unknown preservation evidence",
+        maximum_bytes=ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_BYTES,
+    )
+    _validate_github_issues_unknown_evidence_freshness(evidence)
+
+
 def _github_issues_preserved_unknown_summary(
     *,
     evidence_path: Path,
@@ -4920,12 +4955,7 @@ def _github_issues_preserved_unknown_summary(
         raise StageTransitionError(
             "GitHub UNKNOWN preservation evidence schema or image binding is invalid"
         )
-    created_at = _parse_private_utc_timestamp(
-        evidence.get("createdAtUtc"), "GitHub preservation evidence"
-    )
-    age_seconds = (datetime.now(UTC) - created_at).total_seconds()
-    if age_seconds < -30 or age_seconds > ACCOUNT_CENTER_UNKNOWN_PRESERVATION_MAX_AGE_SECONDS:
-        raise StageTransitionError("GitHub UNKNOWN preservation evidence is stale")
+    _validate_github_issues_unknown_evidence_freshness(evidence)
 
     historical = evidence.get("historicalUnknown")
     historical_fields = {
@@ -9658,7 +9688,7 @@ def _verify_all_inputs(plan: dict[str, Any]) -> None:
             )
             continue
         if key == "githubIssuesUnknownPreservationEvidence":
-            _verify_operator_private_file_record(value, "GitHub unknown preservation evidence")
+            _verify_github_issues_unknown_preservation_evidence(value)
             continue
         if value is None:
             continue
@@ -12410,6 +12440,21 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
         if isinstance(github_issues_update, dict)
         else None
     )
+    github_issues_preserved_unknown_plan = (
+        github_issues_update.get("preservedUnknownPlan")
+        if isinstance(github_issues_update, dict)
+        else None
+    )
+    github_issues_unknown_expected = isinstance(
+        github_issues_preserved_unknown_plan, dict
+    ) and bool(github_issues_preserved_unknown_plan)
+    if (
+        isinstance(github_issues_update, dict)
+        and "afterMonitorQuiescence" not in github_issues_update
+        and not github_issues_unknown_expected
+    ):
+        # V1 journals predate the separate after-check field and stored the final check here.
+        github_issues_after_monitor = github_issues_monitor
     github_issues_monitor_status = (
         "NOT_REQUIRED"
         if not github_issues_update_required
@@ -12428,9 +12473,6 @@ def _journal_summary(journal: dict[str, Any]) -> dict[str, Any]:
             and github_issues_after_monitor.get("verified") is False
         )
         else "PENDING"
-    )
-    github_issues_unknown_expected = isinstance(
-        github_issues_update.get("preservedUnknownPlan"), dict
     )
     github_issues_unknown_status = (
         "NOT_REQUIRED"
