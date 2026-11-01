@@ -23,10 +23,12 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import time
 import urllib.parse
 import urllib.request
@@ -37,6 +39,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_FILE = REPO_ROOT / "tooling/aether-wsl-acceptance/compose.yaml"
 STATE_DIR = Path("/home/baijin/.local/state/cyrene-aether-wsl-acceptance")
+PRIVATE_STATE_PARENT = Path("/home/baijin/.local/state")
 PROJECT_NAME = "cyrene-aether-wsl-acceptance"
 TASK_LABEL = "io.cyrene.task"
 TASK_LABEL_VALUE = "aether-wsl-acceptance-20261031"
@@ -51,6 +54,23 @@ NODE_SHA256 = "e798599612f4bb71333a3397ab0d095fd62214e115aea45aa858a145fc72d67e"
 PNPM_VERSION = "11.7.0"
 PNPM_INTEGRITY = "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=="
 MAX_DOWNLOAD_BYTES = 128 * 1024 * 1024
+MAX_EVIDENCE_FILE_BYTES = 50 * 1024 * 1024
+SAFE_EVIDENCE_SUFFIXES = frozenset(
+    {
+        ".csv",
+        ".html",
+        ".json",
+        ".jsonl",
+        ".log",
+        ".md",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".txt",
+        ".webp",
+        ".zip",
+    }
+)
 MODEL_ARTIFACTS = (
     {
         "name": "Qwen2.5 0.5B Instruct Q4_K_M",
@@ -81,6 +101,90 @@ MODEL_ARTIFACTS = (
         "size": 17082730,
         "sha256": "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39",
         "license": "MIT",
+    },
+)
+SPEECH_ARTIFACTS = (
+    {
+        "name": "SenseVoice sherpa-onnx int8 model",
+        "model_id": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+        "revision": "2365baeacb507f821a0c8120fcee3d484dba7a07",
+        "relative_path": "model.int8.onnx",
+        "destination": "speech/model.int8.onnx",
+        "size": 239233841,
+        "sha256": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+        "license": "FunASR Model Open Source License Agreement v1.1; retain model attribution/name",
+    },
+    {
+        "name": "SenseVoice tokenizer",
+        "model_id": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+        "revision": "2365baeacb507f821a0c8120fcee3d484dba7a07",
+        "relative_path": "tokens.txt",
+        "destination": "speech/tokens.txt",
+        "size": 315894,
+        "sha256": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+        "git_blob_sha1": "2cfc92fc2ff26aaa690b7c01fd96b41109413881",
+        "license": "FunASR Model Open Source License Agreement v1.1; retain model attribution/name",
+    },
+    {
+        "name": "official sherpa-onnx Chinese test audio",
+        "model_id": "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17",
+        "revision": "2365baeacb507f821a0c8120fcee3d484dba7a07",
+        "relative_path": "test_wavs/zh.wav",
+        "destination": "speech/zh.wav",
+        "size": 178988,
+        "sha256": "b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373",
+        "git_blob_sha1": "24a2bfc5c039f9d97db2cf1f2461699b582e0a90",
+        "license": "Official sherpa-onnx model repository test fixture; source revision pinned",
+    },
+)
+SPEECH_WHEELS = (
+    {
+        "name": "sherpa-onnx",
+        "version": "1.13.8",
+        "filename": "sherpa_onnx-1.13.8-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/13/78/2f712b7408ddbb64614c20388912414705b728516224e737b63f2adec94a/sherpa_onnx-1.13.8-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "size": 4400575,
+        "sha256": "6949773017647febc0c3696dffb2c67dd3febd4737b87e3dd135a42773704a06",
+    },
+    {
+        "name": "sherpa-onnx-core",
+        "version": "1.13.8",
+        "filename": "sherpa_onnx_core-1.13.8-py3-none-manylinux2014_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/b6/ca/e27c1fb5c54b181d4a5450f3d5c789d9da02eb42dc9b20cfdab5dda4c864/sherpa_onnx_core-1.13.8-py3-none-manylinux2014_x86_64.whl",
+        "size": 10642497,
+        "sha256": "4da90acf435373d7b2ba9cc0be806e7e274d28f63f5780880b5dea6721626e36",
+    },
+    {
+        "name": "numpy",
+        "version": "2.5.4",
+        "filename": "numpy-2.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/43/a3/c799c62e19c337e6d3770b08e475887fb30ce8477d3c09efca6b2f0228a6/numpy-2.5.4-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "size": 16727283,
+        "sha256": "fbde6962867ee75b48b0ee29b2b9372ec5d617799dbaf38e82dc0596f2f7738a",
+    },
+    {
+        "name": "grpcio",
+        "version": "1.62.3",
+        "filename": "grpcio-1.62.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/82/2e/43218874d1852af1ea9801a2be62cc596ddd45984e7adba0fb9f66393c81/grpcio-1.62.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "size": 5492246,
+        "sha256": "ac9783d5679c8da612465168c820fd0b916e70ec5496c840bddba0be7f2d124c",
+    },
+    {
+        "name": "protobuf",
+        "version": "4.25.9",
+        "filename": "protobuf-4.25.9-py3-none-any.whl",
+        "url": "https://files.pythonhosted.org/packages/16/28/d5065b212685875d3924bcdb3201cbf467cb4d58a18aa19a8dfd99ea80a9/protobuf-4.25.9-py3-none-any.whl",
+        "size": 156822,
+        "sha256": "d49b615e7c935194ac161f0965699ac84df6112c378e05ec53da65d2e4cbb6d4",
+    },
+    {
+        "name": "imageio-ffmpeg",
+        "version": "0.7.0",
+        "filename": "imageio_ffmpeg-0.7.0-py3-none-manylinux2014_x86_64.whl",
+        "url": "https://files.pythonhosted.org/packages/04/96/15fe7ef562f7494c358cbd9b521d2da82d7a331b5513703756166478bd5f/imageio_ffmpeg-0.7.0-py3-none-manylinux2014_x86_64.whl",
+        "size": 29498414,
+        "sha256": "4e1f36bef7bedd4bc5dc25f60a8345d88f57133fa1e754f09b411ac61b854408",
     },
 )
 BROWSER_PACKAGES = (
@@ -163,12 +267,110 @@ def _compose(*args: str, timeout: int = 120) -> subprocess.CompletedProcess[str]
     return _run(command, env=_compose_env(), timeout=timeout, label="Local acceptance Compose")
 
 
+def _validate_private_state_parent() -> None:
+    """Rejects links or unexpected owners in the fixed private-state parent chain."""
+    components = (
+        Path("/"),
+        Path("/home"),
+        Path("/home/baijin"),
+        Path("/home/baijin/.local"),
+        PRIVATE_STATE_PARENT,
+    )
+    for directory in components:
+        try:
+            info = directory.lstat()
+        except OSError:
+            raise AcceptanceError(
+                "A fixed parent of the private task state is unavailable."
+            ) from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise AcceptanceError(
+                "A fixed parent of the private task state is not a real directory."
+            )
+        if directory not in {Path("/"), Path("/home")} and info.st_uid != os.getuid():
+            raise AcceptanceError(
+                "A fixed parent of the private task state has an unexpected owner."
+            )
+
+
 def _secure_directory(path: Path) -> None:
-    """Creates a task-owned directory with owner-only access."""
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
-    if path.stat().st_uid != os.getuid():
-        raise AcceptanceError(f"Task state directory is not owned by the current user: {path}")
+    """Creates a private task directory without following a symlink component."""
+    _validate_private_state_parent()
+    normalized = Path(os.path.abspath(path))
+    try:
+        relative = normalized.relative_to(STATE_DIR)
+    except ValueError:
+        raise AcceptanceError(
+            "Private task directories must remain under the fixed state root."
+        ) from None
+    directories = [STATE_DIR]
+    current = STATE_DIR
+    for component in relative.parts:
+        if component == ".":
+            continue
+        current = current / component
+        directories.append(current)
+    for directory in directories:
+        try:
+            os.mkdir(directory, 0o700)
+        except FileExistsError:
+            pass
+        except OSError:
+            raise AcceptanceError("A private task directory could not be created safely.") from None
+        try:
+            info = directory.lstat()
+        except OSError:
+            raise AcceptanceError("A private task directory is unavailable.") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise AcceptanceError("A private task directory cannot be a symlink or special file.")
+        if info.st_uid != os.getuid():
+            raise AcceptanceError("A private task directory has an unexpected owner.")
+        try:
+            directory_fd = os.open(
+                directory,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError:
+            raise AcceptanceError("A private task directory changed during validation.") from None
+        try:
+            verified = os.fstat(directory_fd)
+            if not stat.S_ISDIR(verified.st_mode) or verified.st_uid != os.getuid():
+                raise AcceptanceError(
+                    "A private task directory changed ownership during validation."
+                )
+            os.fchmod(directory_fd, 0o700)
+        finally:
+            os.close(directory_fd)
+
+
+def _open_private_regular_file(path: Path, flags: int, mode: int, label: str) -> int:
+    """Opens an owned regular file without following its final path component."""
+    try:
+        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), mode)
+    except OSError:
+        raise AcceptanceError(f"The private {label} file could not be opened safely.") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise AcceptanceError(f"The private {label} path is not an owned regular file.")
+        os.fchmod(fd, mode)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_private_json(path: Path, label: str) -> dict[str, Any]:
+    """Reads one task-owned JSON receipt through a no-follow regular-file descriptor."""
+    fd = _open_private_regular_file(path, os.O_RDONLY, 0o600, label)
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as receipt_file:
+            value = json.load(receipt_file)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise AcceptanceError(f"The private {label} JSON is malformed or unreadable.") from None
+    if not isinstance(value, dict):
+        raise AcceptanceError(f"The private {label} JSON must be an object.")
+    return value
 
 
 def _ensure_state() -> None:
@@ -181,32 +383,54 @@ def _ensure_postgres_env() -> None:
     """Creates or validates the private local PostgreSQL credentials file."""
     _ensure_state()
     lock_path = STATE_DIR / ".bootstrap.lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = _open_private_regular_file(
+        lock_path, os.O_CREAT | os.O_RDWR, 0o600, "PostgreSQL bootstrap lock"
+    )
     try:
         os.fchmod(fd, 0o600)
         fcntl.flock(fd, fcntl.LOCK_EX)
-        if not DATABASE_ENV.exists():
+        try:
+            DATABASE_ENV.lstat()
+            env_missing = False
+        except FileNotFoundError:
+            env_missing = True
+        except OSError:
+            raise AcceptanceError(
+                "The private PostgreSQL environment path is unavailable."
+            ) from None
+        if env_missing:
             password = secrets.token_urlsafe(36)
             content = (
                 "POSTGRES_USER=cyrene_aether\n"
                 f"POSTGRES_PASSWORD={password}\n"
                 "POSTGRES_DB=cyrene_aether\n"
             ).encode()
-            env_fd = os.open(DATABASE_ENV, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            env_fd = _open_private_regular_file(
+                DATABASE_ENV,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+                "PostgreSQL environment",
+            )
             try:
                 os.write(env_fd, content)
                 os.fsync(env_fd)
             finally:
                 os.close(env_fd)
-        os.chmod(DATABASE_ENV, 0o600)
-        if DATABASE_ENV.stat().st_uid != os.getuid():
-            raise AcceptanceError("The private PostgreSQL environment file has a different owner.")
+        env_fd = _open_private_regular_file(
+            DATABASE_ENV, os.O_RDONLY, 0o600, "PostgreSQL environment"
+        )
         values: dict[str, str] = {}
-        for line in DATABASE_ENV.read_text(encoding="utf-8").splitlines():
-            key, separator, value = line.partition("=")
-            if not separator or key in values:
-                raise AcceptanceError("The private PostgreSQL environment file is malformed.")
-            values[key] = value
+        try:
+            with os.fdopen(env_fd, "r", encoding="utf-8") as environment_file:
+                for line in environment_file.read().splitlines():
+                    key, separator, value = line.partition("=")
+                    if not separator or key in values:
+                        raise AcceptanceError(
+                            "The private PostgreSQL environment file is malformed."
+                        )
+                    values[key] = value
+        except UnicodeError:
+            raise AcceptanceError("The private PostgreSQL environment file is malformed.") from None
         password = values.get("POSTGRES_PASSWORD", "")
         if (
             set(values) != {"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"}
@@ -223,14 +447,37 @@ def _ensure_postgres_env() -> None:
 def _ensure_postgres_data_dir() -> None:
     """Checks the private bind mount after PostgreSQL may have taken ownership as uid 999."""
     path = STATE_DIR / "postgres-data"
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.is_symlink() or not path.is_dir():
-        raise AcceptanceError("The PostgreSQL data path is not a regular task-owned directory.")
-    info = path.stat()
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        try:
+            os.mkdir(path, 0o700)
+            info = path.lstat()
+        except OSError:
+            raise AcceptanceError("The PostgreSQL data path could not be created safely.") from None
+    except OSError:
+        raise AcceptanceError("The PostgreSQL data path is unavailable.") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise AcceptanceError("The PostgreSQL data path is not a regular task directory.")
     if info.st_uid not in {os.getuid(), 999}:
         raise AcceptanceError("The PostgreSQL data directory has an unexpected owner.")
     if info.st_uid == os.getuid():
-        os.chmod(path, 0o700)
+        try:
+            directory_fd = os.open(
+                path,
+                os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError:
+            raise AcceptanceError(
+                "The PostgreSQL data directory changed during validation."
+            ) from None
+        try:
+            verified = os.fstat(directory_fd)
+            if not stat.S_ISDIR(verified.st_mode) or verified.st_uid != os.getuid():
+                raise AcceptanceError("The PostgreSQL data directory changed ownership.")
+            os.fchmod(directory_fd, 0o700)
+        finally:
+            os.close(directory_fd)
     elif info.st_mode & 0o077:
         raise AcceptanceError(
             "The PostgreSQL-owned data directory is accessible to group or other users."
@@ -396,6 +643,7 @@ def _download(url: str, destination: Path, *, maximum: int) -> None:
         "huggingface.co",
         "cas-bridge.xethub.hf.co",
         "us.aws.cdn.hf.co",
+        "files.pythonhosted.org",
     }
     if parsed.scheme != "https" or parsed.hostname not in allowed_hosts:
         raise AcceptanceError("Refusing a non-HTTPS or unapproved artifact URL.")
@@ -430,6 +678,17 @@ def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as artifact:
         for block in iter(lambda: artifact.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _git_blob_sha1(path: Path) -> str:
+    """Calculates Git's object digest for a small pinned, non-LFS source file."""
+    digest = hashlib.sha1()
+    size = path.stat().st_size
+    digest.update(f"blob {size}\0".encode())
+    with path.open("rb") as artifact:
+        for block in iter(lambda: artifact.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
 
@@ -704,7 +963,9 @@ def _write_private_log(name: str, content: str) -> Path:
     """Writes sanitized command output under the task's private evidence directory."""
     _secure_directory(EVIDENCE_DIR)
     path = EVIDENCE_DIR / name
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    fd = _open_private_regular_file(
+        path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, "evidence log"
+    )
     try:
         os.write(fd, content.encode("utf-8", errors="replace"))
         os.fsync(fd)
@@ -715,17 +976,29 @@ def _write_private_log(name: str, content: str) -> Path:
 
 def _write_private_file(path: Path, content: str) -> Path:
     """Atomically writes a replaceable private task-state file with mode 0600."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    _secure_directory(path.parent)
+    try:
+        existing = path.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError:
+        raise AcceptanceError("A private task file is unavailable.") from None
+    if existing is not None and (
+        stat.S_ISLNK(existing.st_mode)
+        or not stat.S_ISREG(existing.st_mode)
+        or existing.st_uid != os.getuid()
+    ):
+        raise AcceptanceError("A private task file must be an owned regular file.")
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    fd = _open_private_regular_file(
+        temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600, "temporary task"
+    )
     try:
         os.write(fd, content.encode("utf-8"))
         os.fsync(fd)
     finally:
         os.close(fd)
     os.replace(temporary, path)
-    os.chmod(path, 0o600)
     return path
 
 
@@ -814,8 +1087,16 @@ def _prepare_model_artifact(item: dict[str, Any]) -> dict[str, Any]:
         f"https://huggingface.co/{item['model_id']}/resolve/"
         f"{item['revision']}/{item['relative_path']}"
     )
+    if path.is_symlink():
+        raise AcceptanceError(f"A task-local model artifact must not be a symlink: {item['name']}.")
     if path.exists():
-        if path.stat().st_size != item["size"] or _sha256(path) != item["sha256"]:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_size != item["size"]
+            or _sha256(path) != item["sha256"]
+        ):
             raise AcceptanceError(
                 f"A task-local model artifact failed its pinned hash: {item['name']}."
             )
@@ -827,9 +1108,20 @@ def _prepare_model_artifact(item: dict[str, Any]) -> dict[str, Any]:
                 raise AcceptanceError(
                     f"A model download failed its pinned size/hash check: {item['name']}."
                 )
+            expected_blob_sha1 = item.get("git_blob_sha1")
+            if expected_blob_sha1 and _git_blob_sha1(temporary) != expected_blob_sha1:
+                raise AcceptanceError(
+                    f"A model download failed its pinned source-object check: {item['name']}."
+                )
             os.chmod(temporary, 0o600)
             os.replace(temporary, path)
     os.chmod(path, 0o600)
+    expected_blob_sha1 = item.get("git_blob_sha1")
+    actual_blob_sha1 = _git_blob_sha1(path) if expected_blob_sha1 else None
+    if expected_blob_sha1 and actual_blob_sha1 != expected_blob_sha1:
+        raise AcceptanceError(
+            f"A task-local artifact failed its pinned source-object check: {item['name']}."
+        )
     return {
         "name": item["name"],
         "model_id": item["model_id"],
@@ -839,6 +1131,7 @@ def _prepare_model_artifact(item: dict[str, Any]) -> dict[str, Any]:
         "path": str(path),
         "bytes": path.stat().st_size,
         "sha256": _sha256(path),
+        **({"git_blob_sha1": actual_blob_sha1} if actual_blob_sha1 else {}),
     }
 
 
@@ -879,6 +1172,404 @@ def cmd_models_prepare(_: argparse.Namespace) -> None:
             f"model_artifact={item['model_id']} revision={item['revision']} bytes={item['bytes']} sha256={item['sha256']}"
         )
     print(f"model_manifest={manifest_path}")
+
+
+def _speech_site_packages() -> Path:
+    """Returns the acceptance-only Python package extraction location."""
+    path = TOOLCHAIN_DIR / "speech-site-packages"
+    _secure_directory(path)
+    return path
+
+
+def _speech_wheel_path(item: dict[str, Any]) -> Path:
+    """Returns a private wheelhouse path for one pinned speech runtime wheel."""
+    directory = STATE_DIR / "toolchain" / "speech-wheelhouse"
+    _secure_directory(directory)
+    return directory / item["filename"]
+
+
+def _prepare_speech_wheel(item: dict[str, Any]) -> dict[str, Any]:
+    """Downloads one pinned PyPI wheel and checks its exact published digest."""
+    path = _speech_wheel_path(item)
+    if path.is_symlink():
+        raise AcceptanceError(f"A task-local speech wheel must not be a symlink: {item['name']}.")
+    if path.exists():
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_size != item["size"]
+            or _sha256(path) != item["sha256"]
+        ):
+            raise AcceptanceError(
+                f"A task-local speech wheel failed its pinned hash: {item['name']}."
+            )
+    else:
+        with tempfile.TemporaryDirectory(prefix="speech-wheel-", dir=path.parent) as temp_name:
+            temporary = Path(temp_name) / item["filename"]
+            _download(item["url"], temporary, maximum=item["size"] + 1024 * 1024)
+            if temporary.stat().st_size != item["size"] or _sha256(temporary) != item["sha256"]:
+                raise AcceptanceError(f"A speech wheel failed its pinned hash: {item['name']}.")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+    os.chmod(path, 0o600)
+    return {
+        "name": item["name"],
+        "version": item["version"],
+        "filename": item["filename"],
+        "bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+        "path": str(path),
+    }
+
+
+def cmd_speech_prepare(_: argparse.Namespace) -> None:
+    """Prepares pinned SenseVoice assets and an isolated CPU-only Python runtime."""
+    _require_wsl2_x64()
+    _ensure_state()
+    if sys.version_info[:2] != (3, 12):
+        raise AcceptanceError("Speech acceptance requires the local Python 3.12 interpreter.")
+    artifacts = [_prepare_model_artifact(item) for item in SPEECH_ARTIFACTS]
+    wheels = [_prepare_speech_wheel(item) for item in SPEECH_WHEELS]
+    site_packages = _speech_site_packages()
+    python = Path(sys.executable)
+    _run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            str(site_packages),
+            "--no-index",
+            "--no-deps",
+            *(str(_speech_wheel_path(item)) for item in SPEECH_WHEELS),
+        ],
+        timeout=900,
+        label="Pinned local speech package extraction",
+    )
+    package_env = {
+        **os.environ,
+        "PYTHONPATH": str(site_packages),
+        "PYTHONNOUSERSITE": "1",
+    }
+    package_check = _run(
+        [
+            str(python),
+            "-c",
+            (
+                "import grpc, numpy, google.protobuf, sherpa_onnx; "
+                "from imageio_ffmpeg import get_ffmpeg_exe; "
+                "import importlib.metadata as m; "
+                "print('\\n'.join(f'{n}=={m.version(n)}' for n in "
+                "('sherpa-onnx','sherpa-onnx-core','numpy','grpcio','protobuf','imageio-ffmpeg'))); "
+                "print(get_ffmpeg_exe())"
+            ),
+        ],
+        env=package_env,
+        timeout=30,
+        label="Pinned local speech runtime import check",
+    )
+    lines = package_check.stdout.strip().splitlines()
+    if len(lines) != len(SPEECH_WHEELS) + 1:
+        raise AcceptanceError("The task-local speech runtime returned unexpected package metadata.")
+    ffmpeg_path = Path(lines[-1])
+    if not ffmpeg_path.is_file() or not os.access(ffmpeg_path, os.X_OK):
+        raise AcceptanceError("The task-local FFmpeg executable is unavailable.")
+    ffmpeg_version = _run(
+        [str(ffmpeg_path), "-version"], timeout=20, label="Task-local FFmpeg version check"
+    ).stdout.splitlines()[0]
+    ffmpeg_license = _run(
+        [str(ffmpeg_path), "-L"], timeout=20, label="Task-local FFmpeg license check"
+    ).stdout.splitlines()
+    speech_manifest = {
+        "prepared_at_utc": datetime.now(UTC).isoformat(),
+        "source_policy": "immutable official Hugging Face revisions and PyPI wheel digests",
+        "python": "3.12",
+        "python_executable": str(python),
+        "site_packages": str(site_packages),
+        "runtime_packages": [line for line in lines[:-1]],
+        "artifacts": artifacts,
+        "wheels": wheels,
+        "ffmpeg": {
+            "path": str(ffmpeg_path),
+            "sha256": _sha256(ffmpeg_path),
+            "bytes": ffmpeg_path.stat().st_size,
+            "version": ffmpeg_version,
+            "license_report": [
+                line.strip() for line in ffmpeg_license if "license" in line.lower()
+            ][:4],
+        },
+        "model_terms": {
+            "model": "FunASR Model Open Source License Agreement v1.1",
+            "attribution": "Retain SenseVoice/FunASR author/source attribution and model name.",
+            "source": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE",
+        },
+    }
+    manifest_path = STATE_DIR / "models" / "speech" / "manifest.json"
+    _write_private_file(manifest_path, json.dumps(speech_manifest, indent=2) + "\n")
+    print(f"speech_assets=PREPARED artifacts={len(artifacts)} wheels={len(wheels)}")
+    print(f"speech_runtime_python={python}")
+    print(f"speech_ffmpeg={ffmpeg_version} sha256={speech_manifest['ffmpeg']['sha256']}")
+    print(f"speech_manifest={manifest_path}")
+
+
+def _git_head(path: Path, label: str) -> str:
+    """Reads one candidate repository's exact local commit without changing it."""
+    return _run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        timeout=15,
+        label=f"{label} candidate revision lookup",
+    ).stdout.strip()
+
+
+def _source_revision(path: Path, label: str) -> str:
+    """Reads an exact checkout SHA or a task-local immutable archive marker."""
+    try:
+        revision = _git_head(path, label)
+    except AcceptanceError:
+        marker = path / ".cyrene-source-commit"
+        if not marker.is_file() or marker.is_symlink():
+            raise
+        revision = marker.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{40,64}", revision):
+        raise AcceptanceError(f"The {label} source revision is not an exact commit SHA.")
+    return revision
+
+
+def cmd_speech_smoke(args: argparse.Namespace) -> None:
+    """Runs the real local SenseVoice plugin process through DirectPluginRuntime."""
+    _require_wsl2_x64()
+    plugin_source = Path(args.plugin_source).resolve(strict=True)
+    contracts_sdk = Path(args.contracts_sdk).resolve(strict=True)
+    plugin_src = plugin_source / "src"
+    runtime_src = contracts_sdk / "cyrene_plugin_runtime" / "src"
+    speech_contracts_src = contracts_sdk / "cyrene_speech_provider_contracts" / "src"
+    required = (
+        plugin_src / "speech_sensevoice" / "plugin.py",
+        runtime_src / "cyrene_plugin_runtime" / "bootstrap.py",
+        speech_contracts_src / "cyrene_speech_provider_contracts" / "codec.py",
+    )
+    if not all(path.is_file() for path in required):
+        raise AcceptanceError("The candidate plugin or Python contracts checkout is incomplete.")
+    speech_dir = STATE_DIR / "models" / "speech"
+    audio_path = speech_dir / "zh.wav"
+    model_path = speech_dir / "model.int8.onnx"
+    tokens_path = speech_dir / "tokens.txt"
+    if not all(path.is_file() for path in (audio_path, model_path, tokens_path)):
+        raise AcceptanceError(
+            "Prepare the pinned speech assets first with the speech prepare command."
+        )
+    manifest_path = speech_dir / "manifest.json"
+    try:
+        manifest_info = manifest_path.lstat()
+    except OSError:
+        raise AcceptanceError(
+            "Prepare the pinned speech runtime first with the speech prepare command."
+        ) from None
+    if stat.S_ISLNK(manifest_info.st_mode) or not stat.S_ISREG(manifest_info.st_mode):
+        raise AcceptanceError("The prepared speech manifest must be a regular file.")
+    for item in SPEECH_ARTIFACTS:
+        artifact_path = _model_artifact_path(item)
+        if artifact_path.is_symlink() or not artifact_path.is_file():
+            raise AcceptanceError(f"The prepared speech artifact is unavailable: {item['name']}.")
+        artifact_info = artifact_path.lstat()
+        if (
+            not stat.S_ISREG(artifact_info.st_mode)
+            or artifact_info.st_uid != os.getuid()
+            or artifact_info.st_size != item["size"]
+            or _sha256(artifact_path) != item["sha256"]
+        ):
+            raise AcceptanceError(
+                f"The prepared speech artifact failed integrity checks: {item['name']}."
+            )
+        expected_blob_sha1 = item.get("git_blob_sha1")
+        if expected_blob_sha1 and _git_blob_sha1(artifact_path) != expected_blob_sha1:
+            raise AcceptanceError(
+                f"The prepared speech artifact source hash changed: {item['name']}."
+            )
+    speech_site_packages = _speech_site_packages()
+    venv_python = Path(sys.executable)
+    if not speech_site_packages.is_dir():
+        raise AcceptanceError("The task-local speech Python runtime is not prepared.")
+    plugin_sha = _source_revision(plugin_source, "Plugins")
+    contracts_sha = _source_revision(contracts_sdk, "Contracts")
+    if args.expected_plugin_sha and plugin_sha != args.expected_plugin_sha:
+        raise AcceptanceError(
+            "The Plugins speech candidate does not match the requested exact commit."
+        )
+    if args.expected_contracts_sha and contracts_sha != args.expected_contracts_sha:
+        raise AcceptanceError(
+            "The Contracts SDK candidate does not match the requested exact commit."
+        )
+    speech_manifest = _read_private_json(manifest_path, "speech manifest")
+    ffmpeg_manifest = speech_manifest.get("ffmpeg")
+    if not isinstance(ffmpeg_manifest, dict):
+        raise AcceptanceError("The prepared speech manifest is missing FFmpeg metadata.")
+    ffmpeg_path = Path(str(ffmpeg_manifest.get("path", "")))
+    try:
+        ffmpeg_relative = ffmpeg_path.relative_to(STATE_DIR)
+        ffmpeg_info = ffmpeg_path.lstat()
+    except (ValueError, OSError):
+        raise AcceptanceError(
+            "The prepared FFmpeg path is outside task state or unavailable."
+        ) from None
+    if (
+        not ffmpeg_relative.parts
+        or stat.S_ISLNK(ffmpeg_info.st_mode)
+        or not stat.S_ISREG(ffmpeg_info.st_mode)
+        or ffmpeg_info.st_uid != os.getuid()
+        or ffmpeg_info.st_size != ffmpeg_manifest.get("bytes")
+        or _sha256(ffmpeg_path) != ffmpeg_manifest.get("sha256")
+    ):
+        raise AcceptanceError("The prepared FFmpeg binary failed task-state integrity checks.")
+    _secure_directory(STATE_DIR / "speech-home")
+    provider_env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(STATE_DIR / "speech-home"),
+        "PYTHONPATH": ":".join(
+            map(str, (speech_site_packages, plugin_src, runtime_src, speech_contracts_src))
+        ),
+        "PYTHONNOUSERSITE": "1",
+        "CYRENE_CAPABILITY_BINDING_ID": "aether-wsl-speech-acceptance",
+        "CYRENE_CAPABILITY_CONFIGURATION_JSON": json.dumps(
+            {
+                "model_path": str(model_path),
+                "tokens_path": str(tokens_path),
+                "model_id": "sensevoice-small-sherpa-onnx-int8-2024-07-17",
+                "num_threads": 4,
+                "max_input_bytes": 26214400,
+                "max_duration_seconds": 300,
+                "ffmpeg_path": speech_manifest["ffmpeg"]["path"],
+            },
+            separators=(",", ":"),
+        ),
+        "PYTHONUNBUFFERED": "1",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
+    internal_runner = textwrap.dedent(
+        """
+        import json, os, subprocess, sys
+        from pathlib import Path
+        from cyrene_plugin_runtime.client import DirectPayload, DirectPluginClient
+        from cyrene_speech_provider_contracts import (
+            CAPABILITY_ID, INTERFACE_VERSION, METHOD_TRANSCRIBE,
+            REQUEST_TYPE_URLS, RESPONSE_TYPE_URLS, decode_response, encode_request,
+        )
+        from cyrene_speech_provider_contracts import speech_provider_pb2 as wire
+        plugin_root, runtime_bootstrap, audio_file = map(Path, sys.argv[1:4])
+        proc = subprocess.Popen(
+            [sys.executable, '-B', str(runtime_bootstrap), '--entrypoint',
+             'speech_sensevoice.plugin:SenseVoiceSpeechProvider', '--capability',
+             CAPABILITY_ID, '--interface-version', INTERFACE_VERSION,
+             '--listen', '127.0.0.1:0'],
+            cwd=plugin_root, env=os.environ.copy(), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        try:
+            line = proc.stdout.readline() if proc.stdout else ''
+            if not line:
+                raise RuntimeError('plugin_process_failed_before_ready')
+            ready = json.loads(line)
+            connection_ref = ready.get('connection_ref', '')
+            if not connection_ref.startswith('grpc://127.0.0.1:'):
+                raise RuntimeError('plugin_runtime_not_loopback')
+            request = wire.TranscribeRequest()
+            request.input.mime_type = 'audio/wav'
+            request.input.data = audio_file.read_bytes()
+            request.language_hint = 'zh'
+            request.request_id = 'aether-wsl-asr-real-acceptance'
+            encoded = encode_request(METHOD_TRANSCRIBE, request)
+            with DirectPluginClient.for_local_connection_ref(connection_ref) as client:
+                response_payload = client.invoke(
+                    capability=CAPABILITY_ID,
+                    interface_version=INTERFACE_VERSION,
+                    method=METHOD_TRANSCRIBE,
+                    request=DirectPayload(REQUEST_TYPE_URLS[METHOD_TRANSCRIBE], encoded),
+                    deadline_seconds=300,
+                    request_id='aether-wsl-asr-real-acceptance',
+                )
+            if response_payload.type_url != RESPONSE_TYPE_URLS[METHOD_TRANSCRIBE]:
+                raise RuntimeError('plugin_runtime_response_type_mismatch')
+            response = decode_response(METHOD_TRANSCRIBE, response_payload.value)
+            if response.WhichOneof('result') != 'transcription':
+                raise RuntimeError('plugin_returned_typed_error')
+            result = response.transcription
+            print(json.dumps({
+                'status': 'PASS' if result.status == wire.TRANSCRIPTION_STATUS_SUCCEEDED else 'FAIL',
+                'transcription_status': wire.TranscriptionStatus.Name(result.status),
+                'text': result.text,
+                'detected_language': result.detected_language,
+                'duration_ms': result.duration_ms,
+                'segment_count': len(result.segments),
+                'model_id': result.model,
+                'response_type_url': response_payload.type_url,
+                'runtime_connection': 'loopback',
+            }, ensure_ascii=False, separators=(',', ':')))
+            if result.status != wire.TRANSCRIPTION_STATUS_SUCCEEDED or not result.text.strip():
+                raise RuntimeError('plugin_returned_no_transcript')
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+        """
+    )
+    result = _run(
+        [
+            str(venv_python),
+            "-c",
+            internal_runner,
+            str(plugin_source),
+            str(runtime_src / "cyrene_plugin_runtime" / "bootstrap.py"),
+            str(audio_path),
+        ],
+        env=provider_env,
+        cwd=plugin_source,
+        timeout=420,
+        label="Real SenseVoice DirectPluginRuntime acceptance",
+    )
+    try:
+        provider_result = json.loads(result.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError):
+        raise AcceptanceError("The real speech provider returned malformed evidence.") from None
+    if provider_result.get("status") != "PASS":
+        raise AcceptanceError("The real speech provider did not return a successful transcript.")
+    expected_sample_text = "开放时间早上9点至下午5点。"
+    actual_sample_text = str(provider_result.get("text", ""))
+    receipt = {
+        "status": "PASS",
+        "classification": "REAL",
+        "product_scope": "candidate SenseVoice plugin process via local DirectPluginRuntime; no Product route",
+        "plugin_repository": "Plugins",
+        "plugin_sha": plugin_sha,
+        "contracts_sha": contracts_sha,
+        "model_id": provider_result["model_id"],
+        "model_sha256": _sha256(model_path),
+        "tokens_sha256": _sha256(tokens_path),
+        "audio_sha256": _sha256(audio_path),
+        "audio_source_revision": "2365baeacb507f821a0c8120fcee3d484dba7a07",
+        "sample_quality": {
+            "upstream_expected_text": expected_sample_text,
+            "exact_match": actual_sample_text == expected_sample_text,
+            "review_note": "A one-character difference is recorded separately from provider execution status.",
+        },
+        "python_packages": speech_manifest["runtime_packages"],
+        "ffmpeg": speech_manifest["ffmpeg"],
+        "provider_result": provider_result,
+        "completed_at_utc": datetime.now(UTC).isoformat(),
+    }
+    receipt_path = EVIDENCE_DIR / "speech-sensevoice-real.json"
+    _write_private_file(receipt_path, json.dumps(receipt, indent=2, ensure_ascii=False) + "\n")
+    print(
+        f"speech_provider=REAL status=PASS language={provider_result['detected_language']} "
+        f"duration_ms={provider_result['duration_ms']} model={provider_result['model_id']}"
+    )
+    print(f"speech_receipt={receipt_path}")
 
 
 def _task_service_container(service: str) -> str:
@@ -1496,22 +2187,47 @@ def cmd_record(args: argparse.Namespace) -> None:
             raise AcceptanceError("NOT_RUN requires mode NOT_RUN and an explicit reason code.")
     elif args.mode == "NOT_RUN":
         raise AcceptanceError("A completed check must use REAL or SIMULATED mode.")
+    elif not args.evidence:
+        raise AcceptanceError("PASS and FAIL records require at least one evidence file.")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", args.gate):
+        raise AcceptanceError("Gate identifiers must be short lowercase slugs.")
     evidence_entries = []
     for raw_path in args.evidence:
-        path = Path(raw_path).expanduser().resolve(strict=True)
+        path = Path(os.path.abspath(Path(raw_path).expanduser()))
         try:
-            relative = path.relative_to(EVIDENCE_DIR.resolve())
+            relative = path.relative_to(EVIDENCE_DIR)
         except ValueError:
             raise AcceptanceError(
                 "Evidence files must be stored under the private task evidence directory."
             ) from None
-        if not path.is_file() or path.is_symlink():
-            raise AcceptanceError("Evidence references must point to regular, non-symlink files.")
+        if path.suffix.lower() not in SAFE_EVIDENCE_SUFFIXES:
+            raise AcceptanceError("Evidence must use a recognized reviewable file type.")
+        current = EVIDENCE_DIR
+        file_info = None
+        for index, component in enumerate(relative.parts):
+            current = current / component
+            try:
+                info = current.lstat()
+            except OSError:
+                raise AcceptanceError(
+                    "An evidence file or parent directory is unavailable."
+                ) from None
+            if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+                raise AcceptanceError("Evidence paths must be owned and contain no symlink.")
+            if index < len(relative.parts) - 1:
+                if not stat.S_ISDIR(info.st_mode):
+                    raise AcceptanceError("Evidence parent components must be real directories.")
+            else:
+                file_info = info
+        if file_info is None or not stat.S_ISREG(file_info.st_mode):
+            raise AcceptanceError("Evidence references must point to regular files.")
+        if file_info.st_size <= 0 or file_info.st_size > MAX_EVIDENCE_FILE_BYTES:
+            raise AcceptanceError("Evidence files must be nonempty and at most 50 MiB.")
         evidence_entries.append(
             {
                 "path": str(Path("evidence") / relative),
-                "sha256": _sha256(path),
-                "bytes": path.stat().st_size,
+                "sha256": _sha256(current),
+                "bytes": file_info.st_size,
             }
         )
     entry = {
@@ -1526,7 +2242,9 @@ def cmd_record(args: argparse.Namespace) -> None:
     }
     line = (json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     log_path = EVIDENCE_DIR / "evidence.jsonl"
-    fd = os.open(log_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    fd = _open_private_regular_file(
+        log_path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600, "evidence ledger"
+    )
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, line)
@@ -1593,6 +2311,28 @@ def build_parser() -> argparse.ArgumentParser:
     model_up.set_defaults(handler=cmd_models_up)
     model_status = model_actions.add_parser("status", help="Show task-local model endpoint status.")
     model_status.set_defaults(handler=cmd_models_status)
+    speech = subparsers.add_parser(
+        "speech", help="Prepare and exercise the local CPU SenseVoice Plugin runtime."
+    )
+    speech_actions = speech.add_subparsers(dest="speech_action", required=True)
+    speech_prepare = speech_actions.add_parser(
+        "prepare", help="Pin SenseVoice assets, wheels, and a private FFmpeg runtime."
+    )
+    speech_prepare.set_defaults(handler=cmd_speech_prepare)
+    speech_smoke = speech_actions.add_parser(
+        "smoke", help="Invoke a candidate speech Plugin process over loopback gRPC."
+    )
+    speech_smoke.add_argument(
+        "--plugin-source", required=True, help="Plugins speech-sensevoice provider directory."
+    )
+    speech_smoke.add_argument(
+        "--contracts-sdk", required=True, help="Contracts SDK Python directory."
+    )
+    speech_smoke.add_argument("--expected-plugin-sha", help="Require this exact Plugins commit.")
+    speech_smoke.add_argument(
+        "--expected-contracts-sha", help="Require this exact Contracts commit."
+    )
+    speech_smoke.set_defaults(handler=cmd_speech_smoke)
     down = subparsers.add_parser(
         "down", help="Stop this task's service while retaining its database files."
     )

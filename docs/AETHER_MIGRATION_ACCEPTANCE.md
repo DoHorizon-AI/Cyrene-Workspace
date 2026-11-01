@@ -30,6 +30,7 @@ python3 scripts/aether_wsl_acceptance.py browser-deps --playwright-package <inst
 python3 scripts/aether_wsl_acceptance.py up
 python3 scripts/aether_wsl_acceptance.py models prepare
 python3 scripts/aether_wsl_acceptance.py models up
+python3 scripts/aether_wsl_acceptance.py speech prepare
 python3 scripts/aether_wsl_acceptance.py status
 ```
 
@@ -53,6 +54,20 @@ pnpm --version
 The expected database endpoint from a container attached to the internal network is host `postgres`, port `5432`, database/user `cyrene_aether`. Read the password from the private `postgres.env` file through the consuming service's secret-file mechanism. Do not copy it into a tracked `.env` file. Host-published PostgreSQL ports are intentionally absent.
 
 `models prepare` downloads an official Qwen2.5 0.5B Q4_K_M GGUF, a multilingual E5 small quantized ONNX model, and its tokenizer to the private state directory. Each file is pinned to an immutable Hugging Face revision and SHA-256. `models up` builds the pinned Python CPU embedding service, starts it with the pinned `llama.cpp` server, and verifies a real local chat generation plus two 384-dimensional normalized embeddings. Model services publish no host ports. Containers use `http://aether-qwen:8080/v1` and `http://aether-embedding:8081/v1`; the host-run Exchange process can source `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/models-host.env` to use the current private bridge addresses. E5 inputs should include `query: ` or `passage: ` prefixes as appropriate; the local endpoint embeds the supplied text unchanged. The Qwen model is Apache-2.0; the E5 model is MIT ([Qwen model](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF), [E5 model](https://huggingface.co/intfloat/multilingual-e5-small)).
+
+`speech prepare` installs the hash-pinned `sherpa-onnx` CPU wheel and its runtime packages only under the task state, unpacks the pinned `imageio-ffmpeg` wheel there, and downloads the sherpa-compatible SenseVoice int8 ONNX model, tokenizer, and official `zh.wav` fixture at immutable revision `2365baeacb507f821a0c8120fcee3d484dba7a07`. It records wheel, model, tokenizer, audio, FFmpeg binary hashes, and runtime versions in `models/speech/manifest.json`. The model is governed by the [FunASR Model Open Source License Agreement](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE), including source/model attribution and keeping the model name. The bundled FFmpeg binary reports GPLv3; both are used only in local acceptance state and are not packaged into Cyrene releases.
+
+Run a real provider-process check against exact candidate checkouts with:
+
+```bash
+python3 scripts/aether_wsl_acceptance.py speech smoke \
+  --plugin-source <plugins-tools>/plugins/providers/speech-sensevoice \
+  --contracts-sdk <plugins-contracts>/sdk/python \
+  --expected-plugin-sha <full-40-character-sha> \
+  --expected-contracts-sha <full-40-character-sha>
+```
+
+The command starts the formal provider bootstrap bound to an ephemeral `127.0.0.1` DirectPluginRuntime endpoint, sends the fixture through the typed gRPC client, checks the typed response, and stops the child process. It does not call a Product route or a cloud endpoint. The current real receipt confirms successful local CPU inference, but the returned sample has a one-character recognition difference from the upstream expected sentence; provider transport/inference passes while recognition quality remains a separate review item.
 
 Before starting product services, attach their acceptance containers to the existing network created by Compose and publish only the planned loopback ports. Confirm that ports `18680`, `18681`, `18682`, `18684`, and `18685` are free before starting those services. The `doctor` command reports port availability without contacting cloud Cyrene endpoints.
 
@@ -88,7 +103,7 @@ Each row ties a test stimulus to an observable result, the code area that must o
 | P7 / Nous handoff | Create a promise, wait condition, active task, then hand off/restart the session | Durable handoff restores unfinished work and unknown external outcomes without replay | Navigator DSH session/task/schedule; Client task state | `P7/nous-handoff`, task IDs and before/after state |
 | P7 / proactive policy | Trigger follow-up, then disable subscription or enter quiet hours before send | No message is sent after policy change; current grants are checked at send time | Navigator proactive behavior and send gate; connector receipt path | `P7/proactive-send-gate`, policy read-back and connector result |
 | P7 / group hygiene | Feed burst, deleted, self-authored and loop-shaped events | Debounce/merge/retraction/loop rules produce the documented action and do not create duplicate replies | Navigator input/output policy; message connector | `P7/group-hygiene`, event-to-action ledger |
-| P8 / speech | Submit an authorized Chinese/English test clip to the local CPU SenseVoice runtime | Real transcript, language/status and source attachment reference are returned; failure is explicit | Plugins speech provider; local SenseVoice runtime; Navigator media adapter | `P8/asr-real`, model manifest, audio digest and transcript result |
+| P8 / speech | Send the immutable upstream `zh.wav` fixture through the local provider process and typed DirectPluginRuntime client | A real nonempty transcript, language/status, duration and segments return; typed failures remain explicit. The current fixture result differs by one character from the documented sample text, so quality review remains open | Plugins `speech-sensevoice` provider; task-local sherpa-onnx CPU runtime; Navigator media adapter remains a separate gate | `P8/asr-real`, exact Plugins/Contracts SHAs, model/token/audio and FFmpeg hashes, typed response receipt |
 | P8 / image understanding | Attach a real test image to a message and request a grounded description | Model result identifies the attachment source; unsupported media fails clearly | Exchange multimodal route; Navigator attachment context | `P8/image-real`, attachment digest and response reference |
 | P8 / media directory | Add, search, deactivate and restore an authorized sticker/image | Search respects account/persona scope; generation/storage is separate from sending | Plugins media provider/tool; Client media UI | `P8/media-lifecycle`, object IDs and status read-back |
 | P8 / generated card | Render a card and inspect its artifact, then separately send through a local test connector | Artifact digest/version is stable; send receipt is a separate result | Plugins media tool; Navigator artifact/send APIs | `P8/card-and-send`, artifact digest and independent send receipt |
@@ -100,9 +115,9 @@ Each row ties a test stimulus to an observable result, the code area that must o
 
 ## Evidence rules and current state
 
-Store acceptance artifacts in `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/`. Prefer small JSON receipts, API read-backs, sanitized browser results, source hashes and count reconciliations. Do not store raw authorization headers, credentials, private chat dumps, or unredacted browser storage. The `record` command stores only the evidence path, SHA-256, candidate commit IDs and classification; it never reads or prints evidence contents.
+Store acceptance artifacts in `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/`. Prefer small JSON receipts, API read-backs, sanitized browser results, source hashes and count reconciliations. Do not store raw authorization headers, credentials, private chat dumps, or unredacted browser storage. The `record` command stores only the evidence path, SHA-256, candidate commit IDs and classification; it never prints evidence contents. A `PASS` or `FAIL` record must reference at least one owned, regular, non-symlink evidence file with a recognized suffix and bounded size; gate names are restricted to lowercase slugs. `NOT_RUN` records may contain only the required reason and no evidence.
 
-The initial WSL readiness gates are `PASS / REAL`: isolated PostgreSQL, the task-local Node/pnpm toolchain, Playwright Chromium launch, and local Qwen/E5 inference. These establish test infrastructure only; P1–P10 product behavior remains unaccepted until fixed implementation candidates pass their gates. Teams, QQ and Bilibili external traffic is `DEFERRED_BY_USER / NOT_RUN` while dedicated accounts are configured later.
+The initial WSL readiness gates are `PASS / REAL`: isolated PostgreSQL, the task-local Node/pnpm toolchain, Playwright Chromium launch, and local Qwen/E5 inference. The SenseVoice provider subgate also passes as a real candidate plugin process invocation, while its sample transcript has a one-character difference from the upstream expected text. These component checks do not establish the Navigator attachment-to-context flow or full P8 product acceptance; P1–P10 product behavior remains unaccepted until fixed implementation candidates pass their gates. Teams, QQ and Bilibili external traffic is `DEFERRED_BY_USER / NOT_RUN` while dedicated accounts are configured later.
 
 The first model-connector integration receipt records real local Qwen/E5 inference and HTTP 200 through the candidate model-api-connector and Exchange gateway. Route planning, test-principal resolution, and audit observation in that run were simulated, so the persisted Product route, production identity, durable audit, and fixed `18682` service remain `NOT_RUN / ACCEPTANCE_PENDING`. The receipt and the separate `REAL` / `SIMULATED` classifications are in `model-api-connector-exchange-5afc0f4.json` and `evidence.jsonl`.
 
@@ -162,12 +177,29 @@ python3 scripts/aether_wsl_acceptance.py browser-deps --playwright-package <已�
 python3 scripts/aether_wsl_acceptance.py up
 python3 scripts/aether_wsl_acceptance.py models prepare
 python3 scripts/aether_wsl_acceptance.py models up
+python3 scripts/aether_wsl_acceptance.py speech prepare
 python3 scripts/aether_wsl_acceptance.py status
 ```
 
 `up` 仅适用于 Ubuntu 24.04 WSL2 x86_64 和本地 Unix socket Docker context。启动前会检查固定任务子网 `10.247.253.0/24` 是否与现有 Docker network 或 WSL 路由重叠，然后只启动带任务标签的 PostgreSQL 依赖。Compose 文件按镜像清单 digest 锁定 pgvector，使用项目内部网络，不发布端口，并且只绑定新的任务状态目录。停止该服务时运行 `python3 scripts/aether_wsl_acceptance.py down --confirm-project cyrene-aether-wsl-acceptance`；数据库文件会保留。
 
 `browser-deps` 会校验 Ubuntu 包索引中的哈希，下载缺失的 Chromium 库但不安装系统包，并解包到任务状态目录。传入已安装 Playwright 包目录后，它还会启动 Chromium、读取本地 data 页面标题并关闭浏览器。`models prepare` 将固定版本的 Qwen2.5 0.5B Q4_K_M GGUF、多语种 E5 small 量化 ONNX 模型及 tokenizer 下载到私有状态目录，并逐个校验 SHA-256。`models up` 构建固定 Python CPU embedding 服务，启动 `llama.cpp` server，并通过真实推理验证本地聊天响应和两个 384 维归一化向量。模型服务不发布主机端口。容器使用 `http://aether-qwen:8080/v1` 与 `http://aether-embedding:8081/v1`；在 WSL 主机运行的 Exchange 可加载 `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/models-host.env`，使用当前私有 bridge 地址。E5 输入应按用途包含 `query: ` 或 `passage: ` 前缀；endpoint 不会改写输入。Qwen 模型许可为 Apache-2.0，E5 为 MIT（[Qwen 模型](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)、[E5 模型](https://huggingface.co/intfloat/multilingual-e5-small)）。运行 Playwright 命令前加载生成的环境文件：
+
+`speech prepare` 会将带哈希固定的 `sherpa-onnx` CPU wheel 和运行包仅安装到任务状态目录，在那里解包固定版 `imageio-ffmpeg` wheel，并下载 sherpa 兼容的 SenseVoice int8 ONNX 模型、tokenizer 与官方 `zh.wav` fixture（不可变 revision `2365baeacb507f821a0c8120fcee3d484dba7a07`）。wheel、模型、tokenizer、音频、FFmpeg 二进制哈希和运行时版本记录在 `models/speech/manifest.json`。模型遵循 [FunASR Model Open Source License Agreement](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)，需保留来源/作者归属和模型名称。随包 FFmpeg 报告 GPLv3；这两项只用于本地验收状态，不进入 Cyrene release。
+
+按固定候选仓库执行真实 provider 进程检查：
+
+```bash
+python3 scripts/aether_wsl_acceptance.py speech smoke \
+  --plugin-source <plugins-tools>/plugins/providers/speech-sensevoice \
+  --contracts-sdk <plugins-contracts>/sdk/python \
+  --expected-plugin-sha <完整的 40 位提交 SHA> \
+  --expected-contracts-sha <完整的 40 位提交 SHA>
+```
+
+命令会用正式 provider bootstrap 在临时 `127.0.0.1` DirectPluginRuntime 地址启动子进程，经类型化 gRPC client 发送 fixture、校验类型化响应，再停止子进程。它不会调用 Product route 或云端 endpoint。当前真实回执确认本地 CPU 推理成功，但 sample 转写和上游文档预期相差一个字符；provider transport/推理通过，识别质量仍需单独审核。
+
+运行 Playwright 命令前加载生成的环境文件：
 
 ```bash
 source /home/baijin/.local/state/cyrene-aether-wsl-acceptance/toolchain/browser-libs.env
@@ -218,7 +250,7 @@ pnpm --version
 | P7 / Nous 交接 | 创建承诺、等待条件和活跃任务后交接/重启会话 | 持久交接恢复未完成工作和未知外部结果，不自动重放 | Navigator DSH session/task/schedule；Client 任务状态 | `P7/nous-handoff`、任务 ID 和前后状态 |
 | P7 / 主动行为策略 | 触发跟进，再在发送前关闭订阅或进入安静时段 | 策略变更后不发送；发送时检查当前授权 | Navigator proactive behavior/send gate；connector receipt | `P7/proactive-send-gate`、策略回读和 connector 结果 |
 | P7 / 群消息卫生 | 输入突发、撤回、自发及循环形状事件 | 防抖、合并、撤回和循环规则产生预期动作，不重复回复 | Navigator 输入/输出策略；消息 connector | `P7/group-hygiene`、事件到动作账本 |
-| P8 / 语音 | 将获授权的中英测试音频提交到本地 CPU SenseVoice runtime | 返回真实转写、语言/状态和附件来源；错误明确报告 | Plugins speech provider；本地 SenseVoice runtime；Navigator media adapter | `P8/asr-real`、模型清单、音频摘要和转写结果 |
+| P8 / 语音 | 通过本地 provider 进程和类型化 DirectPluginRuntime client 发送不可变上游 `zh.wav` fixture | 返回真实非空转写、语言/状态、时长和分段；类型化错误明确。当前 fixture 结果与文档预期相差一个字符，质量审核仍未完成 | Plugins `speech-sensevoice` provider；任务专属 sherpa-onnx CPU runtime；Navigator 附件适配器是独立门禁 | `P8/asr-real`、Plugins/Contracts 精确 SHA、模型/token/音频与 FFmpeg 哈希、类型化回执 |
 | P8 / 图片理解 | 把真实测试图片附加到消息并请求有依据的描述 | 模型结果能指向附件来源；不支持的媒体明确失败 | Exchange multimodal route；Navigator attachment context | `P8/image-real`、附件摘要和回复引用 |
 | P8 / 媒体目录 | 添加、搜索、停用、恢复一张获授权表情/图片 | 搜索遵守账号/persona 范围；生成/保存与发送分离 | Plugins media provider/tool；Client media UI | `P8/media-lifecycle`、对象 ID 和状态回读 |
 | P8 / 卡片生成 | 生成卡片并检查制品，再通过本地测试 connector 单独发送 | 制品摘要/版本稳定；发送回执是独立结果 | Plugins media tool；Navigator artifact/send APIs | `P8/card-and-send`、制品摘要和独立发送回执 |
@@ -230,9 +262,9 @@ pnpm --version
 
 ## 证据规则与当前状态
 
-把验收产物放在 `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/`。优先保存小型 JSON 回执、API 回读、脱敏浏览器结果、源码摘要和计数对账。不要保存原始授权头、凭据、私聊全文或未脱敏浏览器存储。`record` 命令只保存证据路径、SHA-256、候选提交和分类；不会读取或打印证据内容。
+把验收产物放在 `/home/baijin/.local/state/cyrene-aether-wsl-acceptance/evidence/`。优先保存小型 JSON 回执、API 回读、脱敏浏览器结果、源码摘要和计数对账。不要保存原始授权头、凭据、私聊全文或未脱敏浏览器存储。`record` 命令只保存证据路径、SHA-256、候选提交和分类，不会打印证据内容。`PASS` 或 `FAIL` 必须引用至少一个归当前用户所有、普通文件、非符号链接、扩展名受限且大小有界的证据文件；gate 名称只接受小写 slug。`NOT_RUN` 可以只记录必需原因，不要求证据文件。
 
-当前 WSL 基础设施门禁为 `PASS / REAL`：隔离 PostgreSQL、任务专用 Node/pnpm、Playwright Chromium 启动以及本地 Qwen/E5 推理。这些仅证明验收环境可用；P1–P10 产品行为仍须等固定实现候选通过对应门禁后才能验收。用户稍后配置专用账号前，Teams、QQ 和 Bilibili 外部流量记为 `DEFERRED_BY_USER / NOT_RUN`。
+当前 WSL 基础设施门禁为 `PASS / REAL`：隔离 PostgreSQL、任务专用 Node/pnpm、Playwright Chromium 启动以及本地 Qwen/E5 推理。SenseVoice provider 子门禁也通过真实候选插件进程调用，但 sample 转写和上游预期相差一个字符。这些组件检查不能证明 Navigator 附件到上下文链路或完整 P8 产品验收；P1–P10 产品行为仍须等固定实现候选通过对应门禁后才能验收。用户稍后配置专用账号前，Teams、QQ 和 Bilibili 外部流量记为 `DEFERRED_BY_USER / NOT_RUN`。
 
 首轮模型 connector 集成回执记录了候选 model-api-connector 与 Exchange gateway 对本地 Qwen/E5 的真实调用及 HTTP 200。该轮的 route planner、测试 principal 和 audit observer 使用模拟实现，因此持久化 Product route、生产身份、持久审计和固定 `18682` 服务仍为 `NOT_RUN / ACCEPTANCE_PENDING`。回执及拆分后的 `REAL` / `SIMULATED` 分类记录在 `model-api-connector-exchange-5afc0f4.json` 与 `evidence.jsonl`。
 
