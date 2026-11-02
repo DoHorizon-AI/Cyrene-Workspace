@@ -48,7 +48,12 @@ files inside the instance directory so service UIDs 10001/999 can read them.
 
 ```bash
 cd Cyrene-Workspace
-python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 run        # build, init, up, smoke x3, measure
+# Passing H0 path (deployed Navigator + Exchange). Unpinned `run` uses origin/develop
+# and currently fails: grant schema (H0-01) and Teams channel task visibility (H0-02).
+# 走通路径需钉住线上 Navigator/Exchange；不钉则默认 origin/develop，目前会失败（见 H0-01/H0-02）。
+python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 run \
+  --pin navigator=aa128de69058f36f8b8ed97fae4a9e7773dea168 \
+  --pin exchange=279a1e09efd0fb10096822d57b9de0e574b8f5e9
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 cpu-compare --cpus 0.05 --cpus 0.5 --repeat 5
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 status
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 down --volumes
