@@ -27,7 +27,11 @@ COPY Cyrene-Services/Cyrene-Navigator/pyproject.toml \
      Cyrene-Services/Cyrene-Navigator/README.md \
      Cyrene-Services/Cyrene-Navigator/LICENSE ./
 COPY Cyrene-Services/Cyrene-Navigator/src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && uv sync --frozen --no-dev --no-editable \
+    && apt-get purge --yes --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
 COPY --chown=10001:10001 Cyrene-Services/Cyrene-Navigator/scripts/serve-persistence.py /app/scripts/serve-persistence.py
 COPY --chown=10001:10001 Cyrene-Workspace/tooling/deploy/teams-cloud/secret-env-entrypoint.sh /usr/local/bin/cyrene-secret-env-entrypoint
 RUN chmod 0555 /usr/local/bin/cyrene-secret-env-entrypoint
