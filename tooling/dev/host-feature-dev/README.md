@@ -49,8 +49,10 @@ files inside the instance directory so service UIDs 10001/999 can read them.
 ```bash
 cd Cyrene-Workspace
 # This pin is only Navigator aa128de and Exchange 279a1e0. Plugins and Platform stay on
-# develop. Unpinned `run` follows origin/develop and currently fails (H0-01, H0-02).
-# 钉住的只是 Navigator 与 Exchange；Plugins、Platform 仍是 develop。不钉则按 origin/develop，目前会失败。
+# develop. Unpinned legacy `run` follows origin/develop and stops at task visibility (H0-02);
+# unpinned `run --work-mode private` passes, within the limit described below.
+# 钉住的只是 Navigator 与 Exchange；Plugins、Platform 仍是 develop。不钉时 legacy 会停在任务可见性问题上，
+# private 模式能走通，但有下面说明的限制。
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 run \
   --pin navigator=aa128de69058f36f8b8ed97fae4a9e7773dea168 \
   --pin exchange=279a1e09efd0fb10096822d57b9de0e574b8f5e9
@@ -64,9 +66,21 @@ those volumes and tells you to run `down --volumes` first, instead of regenerati
 password and failing later inside directory migration.
 
 `cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
-`recreateCommandSeconds` and the inspected `NanoCpus` are recorded beside it. Warm-reply
-medians are null when Persistence has at least 30 tasks or a throttle-period ratio of 0.60
-or more. `measure` records the same task count and throttle ratio.
+`recreateCommandSeconds` and the inspected limit (`providerCpuLimit`, `ingressCpuLimit`, in
+cores) are recorded beside it. A reply counts only when it starts with the model's answer marker
+and quotes the tool result, because a failed task's notice is the error followed by the task's
+output, which can hold the same text. Reply, ack, first-message CPU, and memory medians are null,
+and the exit code is 1, when a reply is not real, Persistence has at least 30 tasks, its
+throttle-period ratio is 0.60 or more in the 10 s idle window sampled before sending, or either
+reading is unavailable. The thresholds were set on legacy mode at a 0.10 Persistence quota.
+`cpu-compare` refuses `private`, and on current `develop` only pinned `legacy` produces replies
+at all. `measure` records the task count and a throttle ratio over its own window, and marks an
+unavailable reading as not comparable.
+
+`smoke` also fails if a task it started did not complete. `smoke.json` is written after each run
+with `evidenceComplete: false`, and becomes true once the ledgers are saved and the ledger was
+readable at the start. `replyNotificationStatuses` and `tasksCompleted` cover rows created during
+that smoke, and are null if the ledger could not be read at the start.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -80,6 +94,16 @@ IDs on the same Docker store. Image tags carry the instance name.
 | --- | --- | --- |
 | `legacy` (default) | base + computer-runtime + dev overlay | Production base configuration: one Navigator service principal. |
 | `actor` | adds `compose.automation-workflows.yaml` | Actor-scoped Work tokens (`CYRENE_WORK_ACTOR_TOKEN_MAP_FILE`, `CYRENE_TEAMS_MODEL_ACTOR_SUBJECT`). |
+| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. On DSH a personal session fails after about two minutes idle and a Navigator restart does not recover it, so use a fresh stack and run `smoke` promptly. `cpu-compare` cycles run longer than that, so it refuses this mode. |
+
+`private` mode is not a production configuration. It would fail production preflight, which on
+this route expects seven principals, five actors, and `automation-source-bindings.json`; here
+there are three principals and one actor, and the session principal also has
+`can_write_harness`. `teams-actor-subjects.json` is written once by `init`, and the probe posts
+straight to `teams-ingress` without the public ingress. No Graph provider runs, so
+credential-health notices are not exercised.
+Negative cases stop at the signature and tenant checks: a non-owner actor, a message before
+install, and `action: remove` are not covered.
 
 Run several instances side by side with distinct `--instance` names; each gets its own
 project, subnet block, keys, and image tags.
@@ -91,7 +115,7 @@ project, subnet block, keys, and image tags.
 | `up` | Production cold-start order; exports connector bindings and the live tool catalog from Exchange before Navigator starts; `evidence/*-up/up.json`. |
 | `smoke` | Negative cases (unsigned, attacker-signed, wrong `serviceurl`, expired, wrong audience, foreign tenant) must not be queued; the signed message must produce a reply that quotes the digest of a non-error tool result. Each run has a normalized digest; `consistent` requires all runs to match. `smoke.json` includes `replyNotificationStatuses`. Exchange and Work ledgers are saved alongside. |
 | `measure` | Container count, limits, memory, and idle CPU seconds from cgroup `cpu.stat`, plus Persistence task count and throttle-period ratio. `idleCpuComparable` is false when that service is saturated. |
-| `cpu-compare` | Alternating quotas. Per sample: provider → fresh Exchange → ingress, inspected NanoCpus, recreate-command seconds, readiness, first reply, warm reply, CPU seconds, task count, and throttle ratio. Saturated warm replies are marked invalid. |
+| `cpu-compare` | Alternating quotas. Per sample: provider → fresh Exchange → ingress, inspected CPU limit, recreate-command seconds, readiness, first reply, warm reply, CPU seconds, task count, and throttle ratio. Replies under a saturated Persistence are marked invalid. |
 
 All durations use `CLOCK_MONOTONIC`, which containers share with the host: WSL steps the wall
 clock backwards under load. `readySeconds` runs from the recreate command to the probe's first

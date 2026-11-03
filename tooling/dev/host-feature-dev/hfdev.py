@@ -55,9 +55,12 @@ BASE_COMPOSE_FILES = (
 )
 # "legacy" is the production base Compose. "actor" adds the production actor-scoped Work
 # overlay; Navigator develop (eadef91) reads Teams channel tasks only through it.
+# "private" also enables the private-delivery policy, the production path: the fixture user
+# installs the bot, sends a personal message, and the reply comes back to that conversation.
 ACTOR_WORK_COMPOSE = TEAMS_CLOUD_DIR / "compose.automation-workflows.yaml"
 DEV_COMPOSE = TOOL_DIR / "compose.dev.yaml"
-WORK_MODES = ("actor", "legacy")
+WORK_MODES = ("actor", "legacy", "private")
+ACTOR_WORK_MODES = ("actor", "private")
 WORK_ACTOR_TOKENS = tuple(f"CYRENE_WORK_ACTOR_TOKEN_0{index}" for index in range(1, 6))
 DEFAULT_STATE_ROOT = Path.home() / ".local/state/cyrene-host-feature-dev"
 TASK_LABEL = "host-feature-split-20261102"
@@ -68,9 +71,11 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PORTS = range(18680, 18696)
 ALLOWED_PORTS = range(18700, 18750)
 # H0 acceptance §4: Persistence idle use fills its 0.10 quota near 30 tasks
-# (throttle-period ratio 0.60) and warm replies stop measuring the Teams quota.
+# (throttle-period ratio 0.60) and replies stop measuring the Teams quota.
 PERSISTENCE_TASK_SATURATION = 30
 PERSISTENCE_THROTTLE_SATURATION = 0.60
+PERSISTENCE_IDLE_SAMPLE_SECONDS = 10
+REPLY_OK_PREFIX = "HFDEV-SMOKE-OK"
 NETWORK_POOL = ipaddress.ip_network("10.249.0.0/16")
 INSTANCE_PREFIX = 20
 NETWORK_PREFIX = 26
@@ -677,6 +682,7 @@ def _identities(name: str) -> dict[str, str]:
         "computerConnectionRef": make("computer-connection"),
         "teamId": f"19:hfdev{digest}team@thread.tacv2",
         "channelId": f"19:hfdev{digest}chan@thread.tacv2",
+        "personalConversationId": f"a:hfdev{digest}personal",
         "issuer": ISSUER_TEMPLATE.format(tenant=tenant),
     }
 
@@ -870,7 +876,7 @@ def _refuse_leftover_volumes(names: list[str]) -> None:
     shown = ", ".join(names[:4])
     extra = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
     raise DevStackError(
-        "Postgres and service volumes from an earlier `down` are still present "
+        "Postgres and service volumes from an earlier run are still present "
         f"({shown}{extra}). They keep the previous database password, so a new `init` "
         'fails about a minute later as "Directory migration did not succeed". '
         "Run `down --volumes` before `init`."
@@ -1039,6 +1045,8 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "tenantId": ids["tenantId"],
                 "teamId": ids["teamId"],
                 "channelId": ids["channelId"],
+                "personalConversationId": ids["personalConversationId"],
+                "workMode": args.work_mode,
                 "actorOid": ids["actorOid"],
                 "serviceUrl": SERVICE_URL,
                 "jwtKeyId": JWT_KEY_ID,
@@ -1067,7 +1075,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "can_publish_credential_health": False,
         }
     ]
-    if args.work_mode == "actor":
+    if args.work_mode in ACTOR_WORK_MODES:
         # Same shape as config/automation-work-principals.patch.template.json, one actor.
         principals += [
             {
@@ -1101,10 +1109,20 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "actors": [{"actorAadObjectId": ids["actorOid"], "tokenEnv": WORK_ACTOR_TOKENS[0]}],
             },
         )
-    _write_json(
-        c / "navigator-principal-config.json",
-        {"principals": principals, "product_directory": [], "product_service_credentials": []},
-    )
+    principal_config: dict[str, Any] = {
+        "principals": principals,
+        "product_directory": [],
+        "product_service_credentials": [],
+    }
+    if args.work_mode == "private":
+        principal_config["teams_private_conversations"] = {
+            "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
+            "workspace_id": ids["workspaceId"],
+            "issuer": ids["issuer"],
+            "tenant_id": ids["tenantId"],
+            "bot_app_id": ids["botAppId"],
+        }
+    _write_json(c / "navigator-principal-config.json", principal_config)
     _write_json(
         c / "teams-actor-subjects.json",
         {
@@ -1167,7 +1185,7 @@ def _plugin_mtls(root: str, cert: str, key: str) -> dict[str, str]:
     return {"rootCertificateRef": root, "clientCertificateRef": cert, "clientKeyRef": key}
 
 
-def _exchange_configuration(ids: dict[str, str]) -> dict[str, Any]:
+def _exchange_configuration(ids: dict[str, str], work_mode: str = "legacy") -> dict[str, Any]:
     """Closed Exchange integration-only host configuration for this stack."""
 
     plugin = _plugin_mtls(
@@ -1232,6 +1250,7 @@ def _exchange_configuration(ids: dict[str, str]) -> dict[str, Any]:
                 "allowedTeamIds": [ids["teamId"]],
                 "botAppId": ids["botAppId"],
                 "expectedIssuer": ids["issuer"],
+                **({"personalActorSubjects": [ids["actorOid"]]} if work_mode == "private" else {}),
                 "directPlugin": {
                     "bindingId": TEAMS_BINDING,
                     "connectionRef": "grpcs://teams-provider:7443",
@@ -1314,7 +1333,9 @@ def _compose_environment(
                 "method_callers": {},
             }
         ),
-        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": compact(_exchange_configuration(ids)),
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": compact(
+            _exchange_configuration(ids, work_mode)
+        ),
         "CYRENE_GITHUB_ISSUES_BINDING_ID": GITHUB_BINDING,
         "CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON": "{}",
         "CYRENE_TEAMS_CONNECTOR_BINDING_ID": TEAMS_BINDING,
@@ -1324,7 +1345,7 @@ def _compose_environment(
                 "bot_app_id": ids["botAppId"],
                 "tenant_id": ids["tenantId"],
                 "allowed_team_ids": [ids["teamId"]],
-                "personal_chat_enabled": False,
+                "personal_chat_enabled": work_mode == "private",
                 "client_secret_env_ref": "TEAMS_BOT_CLIENT_SECRET",
                 "timeout_seconds": 10,
             }
@@ -1332,14 +1353,16 @@ def _compose_environment(
         "HFDEV_TOOL_DIR": str(TOOL_DIR),
         "CYRENE_AUTOMATION_HEALTH_EXPORT_DIR": str(instance.runtime_dir / "automation-health"),
         "CYRENE_WORKFLOWS_ENABLED": "false",
-        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "false",
-        "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": ids["actorOid"] if work_mode == "actor" else "",
+        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "true" if work_mode == "private" else "false",
+        "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": ids["actorOid"]
+        if work_mode in ACTOR_WORK_MODES
+        else "",
     }
     navigator_secrets = [
         "CYRENE_SESSION_TOKEN=/run/secrets/navigator-session-token",
         "TEAMS_NAVIGATOR_HMAC_KEY=/run/secrets/teams-navigator-hmac-key",
     ]
-    if work_mode == "actor":
+    if work_mode in ACTOR_WORK_MODES:
         navigator_secrets.append(
             "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token"
         )
@@ -1409,13 +1432,14 @@ EXCHANGE_CLI = "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-ex
 SECRET_ENTRYPOINT = "/usr/local/bin/cyrene-secret-env-entrypoint"
 
 
+def _work_mode(instance: Instance) -> str:
+    if not instance.identity_path.exists():
+        return "legacy"
+    return _read_json(instance.identity_path).get("workMode", "legacy")
+
+
 def _compose_files(instance: Instance) -> tuple[Path, ...]:
-    mode = (
-        _read_json(instance.identity_path).get("workMode", "legacy")
-        if instance.identity_path.exists()
-        else "legacy"
-    )
-    extra = (ACTOR_WORK_COMPOSE,) if mode == "actor" else ()
+    extra = (ACTOR_WORK_COMPOSE,) if _work_mode(instance) in ACTOR_WORK_MODES else ()
     return (*BASE_COMPOSE_FILES, *extra, DEV_COMPOSE)
 
 
@@ -1603,6 +1627,40 @@ def _directory_maintainer(instance: Instance, ids: dict[str, str]) -> dict[str, 
     return json.loads(current.splitlines()[-1])
 
 
+def _private_installation_active(instance: Instance, ids: dict[str, str]) -> bool:
+    """Read the install from Work: ingress counters only show that something was delivered."""
+
+    script = (
+        "import sqlite3,sys\n"
+        "c=sqlite3.connect('file:/var/lib/cyrene-navigator/persistence.db?mode=ro',uri=True)\n"
+        "row=c.execute('SELECT active FROM work_private_installations WHERE organization_id=? "
+        "AND workspace_id=? AND tenant_id=? AND actor_aad_object_id=? AND bot_app_id=?',"
+        "sys.argv[1:6]).fetchone()\n"
+        "print(1 if row and row[0] else 0)\n"
+    )
+    for _ in range(30):
+        completed = _run(
+            [
+                "docker",
+                "exec",
+                _container_id(instance, "navigator-persistence"),
+                "/opt/venv/bin/python",
+                "-c",
+                script,
+                ids["organizationId"],
+                ids["workspaceId"],
+                ids["tenantId"].lower(),
+                ids["actorOid"].lower(),
+                ids["botAppId"].lower(),
+            ],
+            capture=True,
+        )
+        if completed.stdout.strip() == b"1":
+            return True
+        time.sleep(1)
+    return False
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     """Start the stack in production cold-start order and record phase timings."""
 
@@ -1699,6 +1757,14 @@ def cmd_up(args: argparse.Namespace) -> int:
     _compose(
         instance, "--profile", "hfdev-tools", "up", "-d", "--no-build", "hfdev-probe", capture=True
     )
+    if _work_mode(instance) == "private":
+        began = time.monotonic()
+        installation = _probe(instance, "install")
+        if not installation["delivered"]:
+            raise DevStackError(f"Private bot installation was not delivered: {installation}")
+        if not _private_installation_active(instance, ids):
+            raise DevStackError("Work has no active private installation for the fixture user")
+        phase("private-installation", began)
     guard = _guard_runtime(instance)
     report = {
         "schemaVersion": "cyrene-hfdev-up-v1",
@@ -1791,6 +1857,29 @@ def _probe(instance: Instance, *args: str, timeout: float = 600) -> dict[str, An
     return json.loads(output.strip().splitlines()[-1])
 
 
+def _final_tool_digests(model: list[dict[str, Any]]) -> list[str]:
+    """Digests of the tool results the model answered from."""
+
+    return [
+        row["toolResultSha256"]
+        for row in model
+        if row.get("toolResultSha256") and row.get("decision") == "final_after_tool"
+    ]
+
+
+def _reply_quotes_tool_result(reply: dict[str, Any] | None, digests: list[str]) -> bool:
+    """The reply must be the model's own answer.
+
+    A failed task's notice is the error followed by the task output, so it can hold the model's
+    text and digest. Only an answer that starts with the marker is the answer itself.
+    """
+
+    if not reply:
+        return False
+    text = reply.get("text", "")
+    return text.startswith(REPLY_OK_PREFIX) and any(digest in text for digest in digests)
+
+
 def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     """Turn one driver result into named checks plus a run-independent digest."""
 
@@ -1798,11 +1887,7 @@ def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     reply = positive.get("reply")
     model = positive.get("model") or []
     decisions = [row.get("decision") for row in model]
-    tool_digests = [
-        row["toolResultSha256"]
-        for row in model
-        if row.get("toolResultSha256") and row.get("decision") == "final_after_tool"
-    ]
+    tool_digests = _final_tool_digests(model)
     checks: dict[str, bool] = {}
     if "negative" in result:
         checks["forgedOrUnscopedActivitiesRejectedWithoutQueue"] = bool(result["negative"]["ok"])
@@ -1813,9 +1898,7 @@ def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     checks["modelRequestedDirectoryTool"] = "tool_call" in decisions
     checks["modelReceivedToolResult"] = "final_after_tool" in decisions
     checks["toolResultIsNotError"] = "final_after_tool_error" not in decisions
-    checks["replyQuotesToolResult"] = bool(reply) and any(
-        digest in reply["text"] for digest in tool_digests
-    )
+    checks["replyQuotesToolResult"] = _reply_quotes_tool_result(reply, tool_digests)
     normalized = {
         "checks": checks,
         "negativeStatuses": {
@@ -1871,7 +1954,8 @@ LEDGER_QUERIES = {
         {
             "tasks": "SELECT task_id,status,created_at,started_at,ended_at,duration_ms,error "
             "FROM work_tasks ORDER BY created_at",
-            "notifications": "SELECT notification_type,recipient,status,created_at,updated_at,"
+            "notifications": "SELECT notification_id,notification_type,recipient,status,"
+            "created_at,updated_at,"
             "result_json FROM work_notifications ORDER BY created_at",
         },
     ),
@@ -1906,12 +1990,41 @@ def _ledgers(instance: Instance) -> dict[str, Any]:
     return output
 
 
+def _ledger_ids(instance: Instance) -> tuple[set[str], set[str]] | None:
+    """Tasks and notifications already in the ledger, or None if it cannot be read."""
+
+    try:
+        work = _ledgers(instance)["navigator-persistence"]
+    except (DevStackError, KeyError, subprocess.TimeoutExpired):
+        return None
+    return (
+        {row["task_id"] for row in work["tasks"]},
+        {row["notification_id"] for row in work["notifications"]},
+    )
+
+
+def _smoke_summary(instance: Instance, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    digests = {run["verdict"]["normalizedSha256"] for run in runs}
+    return {
+        "schemaVersion": "cyrene-hfdev-smoke-v1",
+        "instance": instance.name,
+        "runs": len(runs),
+        "allPassed": all(run["verdict"]["passed"] for run in runs),
+        "consistent": len(digests) == 1,
+        "normalizedDigests": sorted(digests),
+        "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
+        # False until the ledgers are saved and show which rows belong to this smoke.
+        "evidenceComplete": False,
+    }
+
+
 def cmd_smoke(args: argparse.Namespace) -> int:
     """Run the signed-event → Navigator → Exchange → tool → reply path N times."""
 
     instance = _instance(args)
     evidence = _evidence_run(instance, "smoke")
     started = time.time()
+    before = _ledger_ids(instance)
     runs = []
     for index in range(args.repeat):
         extra = ["--skip-negative"] if args.skip_negative else []
@@ -1923,29 +2036,37 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             f"reply={result['positive'].get('replySeconds')}s digest={verdict['normalizedSha256'][:12]}",
             flush=True,
         )
-    positive_digests = {run["verdict"]["normalizedSha256"] for run in runs}
-    summary = {
-        "schemaVersion": "cyrene-hfdev-smoke-v1",
-        "instance": instance.name,
-        "runs": len(runs),
-        "allPassed": all(run["verdict"]["passed"] for run in runs),
-        "consistent": len(positive_digests) == 1,
-        "normalizedDigests": sorted(positive_digests),
-        "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
-    }
+        # Each finished run goes to disk at once, so a later failure cannot lose it.
+        _write_json(
+            evidence / "smoke.json", {"summary": _smoke_summary(instance, runs), "runs": runs}
+        )
+    summary = _smoke_summary(instance, runs)
     _write_json(evidence / "fixture-ledgers.json", _probe(instance, "captured"))
     ledgers = _ledgers(instance)
     _write_json(evidence / "service-ledgers.json", ledgers)
     # Observation, not a pass criterion: Navigator may record a delivered reply as
     # "uncertain" when the Teams provider's first send outlasts its 10 s request timeout.
     # Written into smoke.json itself; a later print-only field is not evidence.
-    summary["replyNotificationStatuses"] = [
-        row["status"] for row in ledgers["navigator-persistence"]["notifications"]
-    ][-len(runs) :]
+    # Rows from this smoke: a private task has two notifications, a channel task one. Without
+    # the earlier read nothing can say which rows are new, so report that instead of guessing.
+    work = ledgers["navigator-persistence"]
+    tasks_completed: bool | None = None
+    statuses: list[str] | None = None
+    if before is not None:
+        new_tasks = [row for row in work["tasks"] if row["task_id"] not in before[0]]
+        tasks_completed = bool(new_tasks) and all(row["status"] == "completed" for row in new_tasks)
+        statuses = [
+            row["status"]
+            for row in work["notifications"]
+            if row["notification_id"] not in before[1]
+        ]
+    summary["replyNotificationStatuses"] = statuses
+    summary["tasksCompleted"] = tasks_completed
+    summary["evidenceComplete"] = before is not None
     _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _save_logs(instance, evidence, started)
     print(json.dumps({**summary, "evidence": str(evidence)}))
-    return 0 if summary["allPassed"] and summary["consistent"] else 1
+    return 0 if summary["allPassed"] and summary["consistent"] and tasks_completed else 1
 
 
 def _cgroup(container: str) -> dict[str, int] | None:
@@ -1989,11 +2110,14 @@ def _throttle_period_ratio(
 
 
 def _persistence_saturated(task_count: int | None, throttle_ratio: float | None) -> bool:
-    """True when warm-reply time is no longer evidence about the Teams CPU quota."""
+    """True unless both readings show reply time is still evidence about the Teams quota."""
 
-    if task_count is not None and task_count >= PERSISTENCE_TASK_SATURATION:
+    if task_count is None or throttle_ratio is None:
         return True
-    return throttle_ratio is not None and throttle_ratio >= PERSISTENCE_THROTTLE_SATURATION
+    return (
+        task_count >= PERSISTENCE_TASK_SATURATION
+        or throttle_ratio >= PERSISTENCE_THROTTLE_SATURATION
+    )
 
 
 def _persistence_task_count(instance: Instance) -> int | None:
@@ -2139,6 +2263,22 @@ def _cold_start(
     }
 
 
+def _reply_is_real(positive: dict[str, Any]) -> bool:
+    """A reply counts only if it is the model's answer quoting the tool result."""
+
+    return _reply_quotes_tool_result(
+        positive.get("reply"), _final_tool_digests(positive.get("model") or [])
+    )
+
+
+def _persistence_idle_throttle(container: str) -> float | None:
+    """Throttle ratio while nothing is sent; the 0.60 threshold came from idle samples."""
+
+    before = _cgroup(container)
+    time.sleep(PERSISTENCE_IDLE_SAMPLE_SECONDS)
+    return _throttle_period_ratio(before, _cgroup(container))
+
+
 def _ready_after_recreate(start: dict[str, Any]) -> float | None:
     ready = start.get("readySeconds")
     command = start.get("recreateCommandSeconds")
@@ -2147,18 +2287,57 @@ def _ready_after_recreate(start: dict[str, Any]) -> float | None:
     return round(ready - command, 3)
 
 
+def _cpu_compare_medians(rows: list[dict[str, Any]], quotas: list[str]) -> dict[str, Any]:
+    """Median each metric per quota; any invalid sample nulls what depends on the messages."""
+
+    def median(values: list[float | None]) -> float | None:
+        clean = sorted(value for value in values if value is not None)
+        if not clean:
+            return None
+        middle = len(clean) // 2
+        return (
+            clean[middle] if len(clean) % 2 else round((clean[middle - 1] + clean[middle]) / 2, 3)
+        )
+
+    summary: dict[str, Any] = {}
+    reply_keys = {"firstAckSeconds", "firstReplySeconds", "warmAckSeconds", "warmReplySeconds"}
+    for cpus in quotas:
+        subset = [row for row in rows if row["cpus"] == float(cpus)]
+        replies_valid = all(row.get("replyValid") for row in subset) and bool(subset)
+        keys = sorted(
+            {key for row in subset for key in row}
+            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "replyValid"}
+        )
+        summary[cpus] = {}
+        for key in keys:
+            after_messages = "FirstMessage" in key or key.endswith("MemoryMiB")
+            if not replies_valid and (key in reply_keys or after_messages):
+                summary[cpus][key] = None
+            else:
+                summary[cpus][key] = median([row.get(key) for row in subset])
+        summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
+        summary[cpus]["samples"] = len(subset)
+        summary[cpus]["replyComparison"] = "valid" if replies_valid else "invalid"
+    return summary
+
+
 def cmd_cpu_compare(args: argparse.Namespace) -> int:
     """Cold-start both Teams roles under each CPU quota and measure real CPU seconds.
 
     Samples alternate quotas (0.05, 0.5, 0.05, 0.5, ...) so one quota is not entirely
     after the other. Each cycle still follows production order: Teams provider, a fresh
     Exchange, then Teams ingress. ``readySeconds`` includes the compose recreate command;
-    ``recreateCommandSeconds`` is recorded separately. Warm replies are marked invalid
-    when Persistence is saturated.
-    中文：配额交替取样。就绪时间含 compose 命令耗时，并单独记录该耗时。Persistence 饱和时热回复无效。
+    ``recreateCommandSeconds`` is recorded separately. First and warm replies are marked
+    invalid when Persistence is saturated.
+    中文：配额交替取样。就绪时间含 compose 命令耗时，并单独记录该耗时。Persistence 饱和时回复时间无效。
     """
 
     instance = _instance(args)
+    if _work_mode(instance) == "private":
+        raise DevStackError(
+            "cpu-compare needs legacy mode: each cycle runs longer than the two-minute idle "
+            "limit of a DSH personal session, so every sample would fail"
+        )
     evidence = _evidence_run(instance, "cpu-compare")
     rows = []
     for cpus, repeat in _cpu_sample_order(args.cpus, args.repeat):
@@ -2167,20 +2346,20 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         _wait_healthy(instance, "exchange", 300)
         ingress, ingress_start = _cold_start(instance, "teams-ingress", "ingress", cpus)
         persistence = _container_id(instance, "navigator-persistence")
-        persist_before = _cgroup(persistence)
+        # Read before the window opens: this read runs Python inside Persistence.
         task_count = _persistence_task_count(instance)
+        throttle = _persistence_idle_throttle(persistence)
+        saturated = _persistence_saturated(task_count, throttle)
         before = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
         first = _probe(instance, "send", "--timeout", "300")["positive"]
         after = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
         second = _probe(instance, "send", "--timeout", "300")["positive"]
-        persist_after = _cgroup(persistence)
-        throttle = _throttle_period_ratio(persist_before, persist_after)
-        saturated = _persistence_saturated(task_count, throttle)
+        first_real, second_real = _reply_is_real(first), _reply_is_real(second)
         row: dict[str, Any] = {
             "cpus": float(cpus),
             "repeat": repeat,
-            "providerNanoCpus": _cpu_limit(provider),
-            "ingressNanoCpus": _cpu_limit(ingress),
+            "providerCpuLimit": _cpu_limit(provider),
+            "ingressCpuLimit": _cpu_limit(ingress),
             "providerRecreateCommandSeconds": provider_start["recreateCommandSeconds"],
             "ingressRecreateCommandSeconds": ingress_start["recreateCommandSeconds"],
             "providerReadySeconds": provider_start["readySeconds"],
@@ -2188,14 +2367,14 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
             "providerReadyAfterRecreateSeconds": _ready_after_recreate(provider_start),
             "ingressReadyAfterRecreateSeconds": _ready_after_recreate(ingress_start),
             "firstAckSeconds": first.get("ackSeconds"),
-            "firstReplySeconds": first.get("replySeconds"),
+            "firstReplySeconds": first.get("replySeconds") if first_real else None,
             "warmAckSeconds": second.get("ackSeconds"),
-            "warmReplySeconds": second.get("replySeconds"),
-            "firstReplyOk": bool(first.get("reply")) and bool(second.get("reply")),
+            "warmReplySeconds": second.get("replySeconds") if second_real else None,
+            "firstReplyOk": first_real and second_real,
             "persistenceTaskCount": task_count,
             "persistenceThrottlePeriodRatio": throttle,
             "persistenceSaturated": saturated,
-            "warmReplyValid": bool(second.get("reply")) and not saturated,
+            "replyValid": first_real and second_real and not saturated,
         }
         for role, start in (("ingress", ingress_start), ("provider", provider_start)):
             at_ready, message_before, message_after = (
@@ -2228,53 +2407,30 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
     _wait_healthy(instance, "exchange", 300)
     _cold_start(instance, "teams-ingress", "ingress", "0.05")
 
-    def median(values: list[float | None]) -> float | None:
-        clean = sorted(value for value in values if value is not None)
-        if not clean:
-            return None
-        middle = len(clean) // 2
-        return (
-            clean[middle] if len(clean) % 2 else round((clean[middle - 1] + clean[middle]) / 2, 3)
-        )
-
-    summary = {}
-    warm_keys = {"warmAckSeconds", "warmReplySeconds"}
-    for cpus in args.cpus:
-        subset = [row for row in rows if row["cpus"] == float(cpus)]
-        warm_valid = all(row.get("warmReplyValid") for row in subset) and bool(subset)
-        keys = sorted(
-            {key for row in subset for key in row}
-            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "warmReplyValid"}
-        )
-        summary[cpus] = {}
-        for key in keys:
-            if key in warm_keys and not warm_valid:
-                summary[cpus][key] = None
-            else:
-                summary[cpus][key] = median([row.get(key) for row in subset])
-        summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
-        summary[cpus]["samples"] = len(subset)
-        summary[cpus]["warmReplyComparison"] = "valid" if warm_valid else "invalid"
+    summary = _cpu_compare_medians(rows, args.cpus)
     _write_json(
         evidence / "cpu-compare.json",
         {
             "clock": "CLOCK_MONOTONIC",
             "order": "alternating",
-            "warmReplyPolicy": (
-                "invalid when persistenceTaskCount>=30 or throttle period ratio>=0.60; "
-                "warm medians are then null"
+            "replyPolicy": (
+                "invalid when a reply is not the model's answer, a Persistence reading is "
+                "unavailable, persistenceTaskCount>=30, or the idle throttle period ratio>=0.60; "
+                "reply, ack, first-message CPU and memory medians are then null"
             ),
             "rows": rows,
             "medians": summary,
         },
     )
     print(json.dumps({"medians": summary, "evidence": str(evidence)}, indent=2))
-    return 0 if all(row["firstReplyOk"] for row in rows) else 1
+    return 0 if rows and all(row["replyValid"] for row in rows) else 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     """One-command path: build, init, up, smoke (3x), measure."""
 
+    # Refuse before `build` rewrites the image lock, which would also block `up` on these volumes.
+    _refuse_leftover_volumes(_project_volumes(_instance(args)))
     for step in (
         ["build", *[part for pin in args.pin for part in ("--pin", pin)]],
         ["init", "--force", "--work-mode", args.work_mode],
@@ -2313,7 +2469,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-mode",
         choices=WORK_MODES,
         default="legacy",
-        help="legacy: production base Compose (default); actor: add compose.automation-workflows.yaml",
+        help="legacy: production base Compose (default); actor: add "
+        "compose.automation-workflows.yaml; private: also enable private delivery",
     )
     init.set_defaults(handler=cmd_init)
 
@@ -2362,6 +2519,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.handler(args)
     except DevStackError as error:
         print(f"hfdev: {error}", file=sys.stderr)
+        return 2
+    except subprocess.TimeoutExpired as error:
+        print(f"hfdev: command timed out after {error.timeout} s", file=sys.stderr)
         return 2
 
 
