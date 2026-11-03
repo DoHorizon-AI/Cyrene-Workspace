@@ -15,6 +15,7 @@ import re
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -298,8 +299,27 @@ def test_smoke_evidence_includes_notification_statuses():
     source = (TOOL_DIR / "hfdev.py").read_text(encoding="utf-8")
     smoke = source.split("def cmd_smoke", 1)[1].split("\ndef ", 1)[0]
     status_at = smoke.index('summary["replyNotificationStatuses"]')
-    write_at = smoke.index('_write_json(evidence / "smoke.json"')
+    write_at = smoke.rindex('_write_json(evidence / "smoke.json"')
     assert status_at < write_at
+
+
+def test_smoke_verdict_reaches_disk_before_the_ledger_read():
+    source = (TOOL_DIR / "hfdev.py").read_text(encoding="utf-8")
+    smoke = source.split("def cmd_smoke", 1)[1].split("\ndef ", 1)[0]
+    assert smoke.index('_write_json(evidence / "smoke.json"') < smoke.index("_ledgers(instance)")
+
+
+def test_run_refuses_leftover_volumes_before_build(monkeypatch):
+    monkeypatch.setattr(hfdev, "_instance", lambda args: "instance")
+    monkeypatch.setattr(hfdev, "_project_volumes", lambda instance: ["leftover"])
+
+    def fail_if_called(argv):
+        raise AssertionError(f"run reached a step after refusing: {argv}")
+
+    monkeypatch.setattr(hfdev, "main", fail_if_called)
+    args = SimpleNamespace(instance="h0", state_root="/unused", pin=[], work_mode="legacy")
+    with pytest.raises(hfdev.DevStackError, match="down --volumes"):
+        hfdev.cmd_run(args)
 
 
 def test_pins_require_full_shas_and_known_repositories():

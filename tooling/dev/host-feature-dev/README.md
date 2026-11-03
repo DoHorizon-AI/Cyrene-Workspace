@@ -64,9 +64,10 @@ those volumes and tells you to run `down --volumes` first, instead of regenerati
 password and failing later inside directory migration.
 
 `cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
-`recreateCommandSeconds` and the inspected `NanoCpus` are recorded beside it. Warm-reply
-medians are null when Persistence has at least 30 tasks or a throttle-period ratio of 0.60
-or more. `measure` records the same task count and throttle ratio.
+`recreateCommandSeconds` and the inspected limit (`providerCpuLimit`, `ingressCpuLimit`, in
+cores) are recorded beside it. First and warm reply medians are null when Persistence has at
+least 30 tasks or a throttle-period ratio of 0.60 or more. `measure` records the same task
+count and throttle ratio.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -91,7 +92,7 @@ project, subnet block, keys, and image tags.
 | `up` | Production cold-start order; exports connector bindings and the live tool catalog from Exchange before Navigator starts; `evidence/*-up/up.json`. |
 | `smoke` | Negative cases (unsigned, attacker-signed, wrong `serviceurl`, expired, wrong audience, foreign tenant) must not be queued; the signed message must produce a reply that quotes the digest of a non-error tool result. Each run has a normalized digest; `consistent` requires all runs to match. `smoke.json` includes `replyNotificationStatuses`. Exchange and Work ledgers are saved alongside. |
 | `measure` | Container count, limits, memory, and idle CPU seconds from cgroup `cpu.stat`, plus Persistence task count and throttle-period ratio. `idleCpuComparable` is false when that service is saturated. |
-| `cpu-compare` | Alternating quotas. Per sample: provider → fresh Exchange → ingress, inspected NanoCpus, recreate-command seconds, readiness, first reply, warm reply, CPU seconds, task count, and throttle ratio. Saturated warm replies are marked invalid. |
+| `cpu-compare` | Alternating quotas. Per sample: provider → fresh Exchange → ingress, inspected CPU limit, recreate-command seconds, readiness, first reply, warm reply, CPU seconds, task count, and throttle ratio. Replies under a saturated Persistence are marked invalid. |
 
 All durations use `CLOCK_MONOTONIC`, which containers share with the host: WSL steps the wall
 clock backwards under load. `readySeconds` runs from the recreate command to the probe's first

@@ -68,7 +68,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PORTS = range(18680, 18696)
 ALLOWED_PORTS = range(18700, 18750)
 # H0 acceptance §4: Persistence idle use fills its 0.10 quota near 30 tasks
-# (throttle-period ratio 0.60) and warm replies stop measuring the Teams quota.
+# (throttle-period ratio 0.60) and replies stop measuring the Teams quota.
 PERSISTENCE_TASK_SATURATION = 30
 PERSISTENCE_THROTTLE_SATURATION = 0.60
 NETWORK_POOL = ipaddress.ip_network("10.249.0.0/16")
@@ -1933,6 +1933,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         "normalizedDigests": sorted(positive_digests),
         "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
     }
+    # The verdict goes to disk first, so a failed ledger read cannot lose it.
+    _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _write_json(evidence / "fixture-ledgers.json", _probe(instance, "captured"))
     ledgers = _ledgers(instance)
     _write_json(evidence / "service-ledgers.json", ledgers)
@@ -1989,7 +1991,7 @@ def _throttle_period_ratio(
 
 
 def _persistence_saturated(task_count: int | None, throttle_ratio: float | None) -> bool:
-    """True when warm-reply time is no longer evidence about the Teams CPU quota."""
+    """True when reply time is no longer evidence about the Teams CPU quota."""
 
     if task_count is not None and task_count >= PERSISTENCE_TASK_SATURATION:
         return True
@@ -2153,9 +2155,9 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
     Samples alternate quotas (0.05, 0.5, 0.05, 0.5, ...) so one quota is not entirely
     after the other. Each cycle still follows production order: Teams provider, a fresh
     Exchange, then Teams ingress. ``readySeconds`` includes the compose recreate command;
-    ``recreateCommandSeconds`` is recorded separately. Warm replies are marked invalid
-    when Persistence is saturated.
-    中文：配额交替取样。就绪时间含 compose 命令耗时，并单独记录该耗时。Persistence 饱和时热回复无效。
+    ``recreateCommandSeconds`` is recorded separately. First and warm replies are marked
+    invalid when Persistence is saturated.
+    中文：配额交替取样。就绪时间含 compose 命令耗时，并单独记录该耗时。Persistence 饱和时回复时间无效。
     """
 
     instance = _instance(args)
@@ -2167,8 +2169,9 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         _wait_healthy(instance, "exchange", 300)
         ingress, ingress_start = _cold_start(instance, "teams-ingress", "ingress", cpus)
         persistence = _container_id(instance, "navigator-persistence")
-        persist_before = _cgroup(persistence)
+        # Read before the window opens: this read runs Python inside Persistence.
         task_count = _persistence_task_count(instance)
+        persist_before = _cgroup(persistence)
         before = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
         first = _probe(instance, "send", "--timeout", "300")["positive"]
         after = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
@@ -2179,8 +2182,8 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         row: dict[str, Any] = {
             "cpus": float(cpus),
             "repeat": repeat,
-            "providerNanoCpus": _cpu_limit(provider),
-            "ingressNanoCpus": _cpu_limit(ingress),
+            "providerCpuLimit": _cpu_limit(provider),
+            "ingressCpuLimit": _cpu_limit(ingress),
             "providerRecreateCommandSeconds": provider_start["recreateCommandSeconds"],
             "ingressRecreateCommandSeconds": ingress_start["recreateCommandSeconds"],
             "providerReadySeconds": provider_start["readySeconds"],
@@ -2195,7 +2198,7 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
             "persistenceTaskCount": task_count,
             "persistenceThrottlePeriodRatio": throttle,
             "persistenceSaturated": saturated,
-            "warmReplyValid": bool(second.get("reply")) and not saturated,
+            "replyValid": bool(first.get("reply")) and bool(second.get("reply")) and not saturated,
         }
         for role, start in (("ingress", ingress_start), ("provider", provider_start)):
             at_ready, message_before, message_after = (
@@ -2238,31 +2241,31 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         )
 
     summary = {}
-    warm_keys = {"warmAckSeconds", "warmReplySeconds"}
+    reply_keys = {"firstAckSeconds", "firstReplySeconds", "warmAckSeconds", "warmReplySeconds"}
     for cpus in args.cpus:
         subset = [row for row in rows if row["cpus"] == float(cpus)]
-        warm_valid = all(row.get("warmReplyValid") for row in subset) and bool(subset)
+        replies_valid = all(row.get("replyValid") for row in subset) and bool(subset)
         keys = sorted(
             {key for row in subset for key in row}
-            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "warmReplyValid"}
+            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "replyValid"}
         )
         summary[cpus] = {}
         for key in keys:
-            if key in warm_keys and not warm_valid:
+            if key in reply_keys and not replies_valid:
                 summary[cpus][key] = None
             else:
                 summary[cpus][key] = median([row.get(key) for row in subset])
         summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
         summary[cpus]["samples"] = len(subset)
-        summary[cpus]["warmReplyComparison"] = "valid" if warm_valid else "invalid"
+        summary[cpus]["replyComparison"] = "valid" if replies_valid else "invalid"
     _write_json(
         evidence / "cpu-compare.json",
         {
             "clock": "CLOCK_MONOTONIC",
             "order": "alternating",
-            "warmReplyPolicy": (
+            "replyPolicy": (
                 "invalid when persistenceTaskCount>=30 or throttle period ratio>=0.60; "
-                "warm medians are then null"
+                "first and warm reply medians are then null"
             ),
             "rows": rows,
             "medians": summary,
@@ -2275,6 +2278,8 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     """One-command path: build, init, up, smoke (3x), measure."""
 
+    # Refuse before `build` rewrites the image lock, which would also block `up` on these volumes.
+    _refuse_leftover_volumes(_project_volumes(_instance(args)))
     for step in (
         ["build", *[part for pin in args.pin for part in ("--pin", pin)]],
         ["init", "--force", "--work-mode", args.work_mode],
