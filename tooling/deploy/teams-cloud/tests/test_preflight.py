@@ -2320,6 +2320,14 @@ def test_codebuddy_acp_compose_profile_is_opt_in_and_keeps_runtime_boundaries() 
     )
 
 
+def test_navigator_receives_the_organization_named_on_connector_grants() -> None:
+    """Exchange rejects a grant request without this organization, so it must be required."""
+
+    base = yaml.safe_load((DEPLOYMENT_ROOT / "compose.yaml").read_text())
+    value = base["services"]["navigator"]["environment"]["CYRENE_ORGANIZATION_ID"]
+    assert value.startswith("${CYRENE_ORGANIZATION_ID:?")
+
+
 def test_github_only_compose_has_no_hf_service_seed_or_provider_secrets() -> None:
     """Keep Hf provider, bootstrap seed, and Hf-only credentials in an explicit overlay."""
 
