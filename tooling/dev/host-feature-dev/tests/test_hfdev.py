@@ -309,6 +309,14 @@ def test_smoke_verdict_reaches_disk_before_the_ledger_read():
     assert smoke.index('_write_json(evidence / "smoke.json"') < smoke.index("_ledgers(instance)")
 
 
+def test_a_failure_notice_quoting_the_nonce_is_not_a_real_reply():
+    notice = {"reply": {"text": "failed: hfdev-nonce-1"}, "model": [{"decision": "tool_call"}]}
+    assert not hfdev._reply_is_real(notice)
+    assert not hfdev._reply_is_real({"reply": None, "model": [{"decision": "final_after_tool"}]})
+    answer = {"reply": {"text": "ok"}, "model": [{"decision": "final_after_tool"}]}
+    assert hfdev._reply_is_real(answer)
+
+
 def test_private_mode_uses_the_actor_overlay_and_names_the_owner_in_exchange():
     ids = hfdev._identities("h0")
     assert "private" in hfdev.ACTOR_WORK_MODES

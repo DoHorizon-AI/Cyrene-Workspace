@@ -65,9 +65,11 @@ password and failing later inside directory migration.
 
 `cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
 `recreateCommandSeconds` and the inspected limit (`providerCpuLimit`, `ingressCpuLimit`, in
-cores) are recorded beside it. First and warm reply medians are null when Persistence has at
-least 30 tasks or a throttle-period ratio of 0.60 or more. `measure` records the same task
-count and throttle ratio.
+cores) are recorded beside it. A reply counts only when the model answered after a real tool
+result, because a failure notice also quotes the message. First and warm reply medians are null
+when a reply is not real, Persistence has at least 30 tasks, or its throttle-period ratio is
+0.60 or more in the idle window sampled before sending. `measure` records the same task count
+and throttle ratio.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -81,7 +83,7 @@ IDs on the same Docker store. Image tags carry the instance name.
 | --- | --- | --- |
 | `legacy` (default) | base + computer-runtime + dev overlay | Production base configuration: one Navigator service principal. |
 | `actor` | adds `compose.automation-workflows.yaml` | Actor-scoped Work tokens (`CYRENE_WORK_ACTOR_TOKEN_MAP_FILE`, `CYRENE_TEAMS_MODEL_ACTOR_SUBJECT`). |
-| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. |
+| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. On DSH a personal session fails after about two minutes idle and a Navigator restart does not recover it, so use a fresh stack and run `smoke` promptly. `cpu-compare` cycles run longer than that, so it needs `legacy`. |
 
 Run several instances side by side with distinct `--instance` names; each gets its own
 project, subnet block, keys, and image tags.

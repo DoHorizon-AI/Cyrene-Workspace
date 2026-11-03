@@ -74,6 +74,7 @@ ALLOWED_PORTS = range(18700, 18750)
 # (throttle-period ratio 0.60) and replies stop measuring the Teams quota.
 PERSISTENCE_TASK_SATURATION = 30
 PERSISTENCE_THROTTLE_SATURATION = 0.60
+PERSISTENCE_IDLE_SAMPLE_SECONDS = 10
 NETWORK_POOL = ipaddress.ip_network("10.249.0.0/16")
 INSTANCE_PREFIX = 20
 NETWORK_PREFIX = 26
@@ -1967,9 +1968,10 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     # Observation, not a pass criterion: Navigator may record a delivered reply as
     # "uncertain" when the Teams provider's first send outlasts its 10 s request timeout.
     # Written into smoke.json itself; a later print-only field is not evidence.
+    # Every row in the ledger: a private task has two notifications, a channel task one.
     summary["replyNotificationStatuses"] = [
         row["status"] for row in ledgers["navigator-persistence"]["notifications"]
-    ][-len(runs) :]
+    ]
     _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _save_logs(instance, evidence, started)
     print(json.dumps({**summary, "evidence": str(evidence)}))
@@ -2167,6 +2169,21 @@ def _cold_start(
     }
 
 
+def _reply_is_real(positive: dict[str, Any]) -> bool:
+    """A reply counts only after a real tool result: a failure notice also quotes the nonce."""
+
+    decisions = [row.get("decision") for row in positive.get("model") or []]
+    return bool(positive.get("reply")) and "final_after_tool" in decisions
+
+
+def _persistence_idle_throttle(container: str) -> float | None:
+    """Throttle ratio while nothing is sent; the 0.60 threshold came from idle samples."""
+
+    before = _cgroup(container)
+    time.sleep(PERSISTENCE_IDLE_SAMPLE_SECONDS)
+    return _throttle_period_ratio(before, _cgroup(container))
+
+
 def _ready_after_recreate(start: dict[str, Any]) -> float | None:
     ready = start.get("readySeconds")
     command = start.get("recreateCommandSeconds")
@@ -2197,14 +2214,13 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         persistence = _container_id(instance, "navigator-persistence")
         # Read before the window opens: this read runs Python inside Persistence.
         task_count = _persistence_task_count(instance)
-        persist_before = _cgroup(persistence)
+        throttle = _persistence_idle_throttle(persistence)
+        saturated = _persistence_saturated(task_count, throttle)
         before = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
         first = _probe(instance, "send", "--timeout", "300")["positive"]
         after = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
         second = _probe(instance, "send", "--timeout", "300")["positive"]
-        persist_after = _cgroup(persistence)
-        throttle = _throttle_period_ratio(persist_before, persist_after)
-        saturated = _persistence_saturated(task_count, throttle)
+        first_real, second_real = _reply_is_real(first), _reply_is_real(second)
         row: dict[str, Any] = {
             "cpus": float(cpus),
             "repeat": repeat,
@@ -2217,14 +2233,14 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
             "providerReadyAfterRecreateSeconds": _ready_after_recreate(provider_start),
             "ingressReadyAfterRecreateSeconds": _ready_after_recreate(ingress_start),
             "firstAckSeconds": first.get("ackSeconds"),
-            "firstReplySeconds": first.get("replySeconds"),
+            "firstReplySeconds": first.get("replySeconds") if first_real else None,
             "warmAckSeconds": second.get("ackSeconds"),
-            "warmReplySeconds": second.get("replySeconds"),
-            "firstReplyOk": bool(first.get("reply")) and bool(second.get("reply")),
+            "warmReplySeconds": second.get("replySeconds") if second_real else None,
+            "firstReplyOk": first_real and second_real,
             "persistenceTaskCount": task_count,
             "persistenceThrottlePeriodRatio": throttle,
             "persistenceSaturated": saturated,
-            "replyValid": bool(first.get("reply")) and bool(second.get("reply")) and not saturated,
+            "replyValid": first_real and second_real and not saturated,
         }
         for role, start in (("ingress", ingress_start), ("provider", provider_start)):
             at_ready, message_before, message_after = (
@@ -2290,8 +2306,8 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
             "clock": "CLOCK_MONOTONIC",
             "order": "alternating",
             "replyPolicy": (
-                "invalid when persistenceTaskCount>=30 or throttle period ratio>=0.60; "
-                "first and warm reply medians are then null"
+                "invalid when a reply is not a real tool answer, persistenceTaskCount>=30, or "
+                "the idle throttle period ratio>=0.60; first and warm reply medians are then null"
             ),
             "rows": rows,
             "medians": summary,
