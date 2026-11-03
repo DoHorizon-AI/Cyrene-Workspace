@@ -67,6 +67,10 @@ INSTANCE_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 FORBIDDEN_PORTS = range(18680, 18696)
 ALLOWED_PORTS = range(18700, 18750)
+# H0 acceptance §4: Persistence idle use fills its 0.10 quota near 30 tasks
+# (throttle-period ratio 0.60) and warm replies stop measuring the Teams quota.
+PERSISTENCE_TASK_SATURATION = 30
+PERSISTENCE_THROTTLE_SATURATION = 0.60
 NETWORK_POOL = ipaddress.ip_network("10.249.0.0/16")
 INSTANCE_PREFIX = 20
 NETWORK_PREFIX = 26
@@ -842,6 +846,37 @@ def _random_hex(size: int = 32) -> bytes:
     return secrets.token_hex(size).encode()
 
 
+def _project_volumes(instance: Instance) -> list[str]:
+    """Named volumes Compose created for this project. Empty when `down --volumes` ran."""
+
+    output = _text(
+        [
+            "docker",
+            "volume",
+            "ls",
+            "-q",
+            "--filter",
+            f"label=com.docker.compose.project={instance.project}",
+        ]
+    )
+    return [line for line in output.splitlines() if line.strip()]
+
+
+def _refuse_leftover_volumes(names: list[str]) -> None:
+    """Stop `init` from writing a new Postgres password onto the previous data volume."""
+
+    if not names:
+        return
+    shown = ", ".join(names[:4])
+    extra = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
+    raise DevStackError(
+        "Postgres and service volumes from an earlier `down` are still present "
+        f"({shown}{extra}). They keep the previous database password, so a new `init` "
+        'fails about a minute later as "Directory migration did not succeed". '
+        "Run `down --volumes` before `init`."
+    )
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Generate fixture identities, keys, certificates, configs, and compose.env."""
 
@@ -851,6 +886,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise DevStackError("instance already initialized; pass --force to regenerate fixtures")
     if _project_containers(instance):
         raise DevStackError("stop the running stack (`down`) before regenerating fixtures")
+    _refuse_leftover_volumes(_project_volumes(instance))
     ids = _identities(instance.name)
     subnets = _subnets(instance)
     for directory in (
@@ -1594,8 +1630,9 @@ def cmd_up(args: argparse.Namespace) -> int:
     began = time.monotonic()
     # pg_isready already passes while the image's temporary init server runs on a local
     # socket; retry the TLS migration until the final server accepts network clients.
+    last_migration: subprocess.CompletedProcess[bytes] | None = None
     for attempt in range(1, 21):
-        migrated = _compose(
+        last_migration = _compose(
             instance,
             "--profile",
             "directory-bootstrap",
@@ -1606,10 +1643,21 @@ def cmd_up(args: argparse.Namespace) -> int:
             capture=True,
             check=False,
         )
-        if migrated.returncode == 0:
+        if last_migration.returncode == 0:
             break
         if attempt == 20:
-            raise DevStackError("Directory migration did not succeed after 20 attempts")
+            # The output can contain the fixture database URL, so keep it in the evidence
+            # directory instead of the terminal.
+            captured = (last_migration.stderr or b"") + b"\n" + (last_migration.stdout or b"")
+            log_path = evidence / "directory-migrate-last.txt"
+            _write_bytes(log_path, captured[-4000:])
+            raise DevStackError(
+                "Directory migration did not succeed after 20 attempts "
+                f"(last exit {last_migration.returncode}). If fixtures were regenerated "
+                "while Postgres volumes from an earlier `down` still existed, those volumes "
+                "still have the previous password; run `down --volumes`, then `init`. "
+                f"The last command output is in {log_path}."
+            )
         time.sleep(3)
     _compose(
         instance,
@@ -1885,15 +1933,16 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         "normalizedDigests": sorted(positive_digests),
         "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
     }
-    _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _write_json(evidence / "fixture-ledgers.json", _probe(instance, "captured"))
     ledgers = _ledgers(instance)
     _write_json(evidence / "service-ledgers.json", ledgers)
     # Observation, not a pass criterion: Navigator may record a delivered reply as
     # "uncertain" when the Teams provider's first send outlasts its 10 s request timeout.
+    # Written into smoke.json itself; a later print-only field is not evidence.
     summary["replyNotificationStatuses"] = [
         row["status"] for row in ledgers["navigator-persistence"]["notifications"]
     ][-len(runs) :]
+    _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _save_logs(instance, evidence, started)
     print(json.dumps({**summary, "evidence": str(evidence)}))
     return 0 if summary["allPassed"] and summary["consistent"] else 1
@@ -1925,6 +1974,50 @@ def _cgroup(container: str) -> dict[str, int] | None:
     return values
 
 
+def _throttle_period_ratio(
+    before: dict[str, int] | None, after: dict[str, int] | None
+) -> float | None:
+    """Fraction of cgroup CPU periods that were throttled between two samples."""
+
+    if not before or not after:
+        return None
+    periods = after.get("nr_periods", 0) - before.get("nr_periods", 0)
+    if periods <= 0:
+        return None
+    throttled = after.get("nr_throttled", 0) - before.get("nr_throttled", 0)
+    return round(throttled / periods, 3)
+
+
+def _persistence_saturated(task_count: int | None, throttle_ratio: float | None) -> bool:
+    """True when warm-reply time is no longer evidence about the Teams CPU quota."""
+
+    if task_count is not None and task_count >= PERSISTENCE_TASK_SATURATION:
+        return True
+    return throttle_ratio is not None and throttle_ratio >= PERSISTENCE_THROTTLE_SATURATION
+
+
+def _persistence_task_count(instance: Instance) -> int | None:
+    try:
+        tasks = _ledgers(instance)["navigator-persistence"]["tasks"]
+    except (DevStackError, KeyError, subprocess.TimeoutExpired):
+        return None
+    return len(tasks) if isinstance(tasks, list) else None
+
+
+def _cpu_limit(container: str) -> float | None:
+    nano = int(_inspect_container(container)["HostConfig"].get("NanoCpus") or 0)
+    return nano / 1e9 if nano else None
+
+
+def _cpu_sample_order(cpus: list[str], repeat: int) -> list[tuple[str, int]]:
+    """Alternate quotas so the later samples are not all on the last quota.
+
+    中文：配额交替，避免后一组只因为任务变多而显得更慢。
+    """
+
+    return [(cpu, index) for index in range(1, repeat + 1) for cpu in cpus]
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     """Record container inventory, limits, memory, and idle CPU over a window."""
 
@@ -1950,6 +2043,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
             }
         )
     time.sleep(args.window)
+    persistence_ratio: float | None = None
     for row in rows:
         after = _cgroup(row["id"])
         before = row.pop("before")
@@ -1960,6 +2054,10 @@ def cmd_measure(args: argparse.Namespace) -> int:
                 (after.get("throttled_usec", 0) - before.get("throttled_usec", 0)) / 1e6, 3
             )
             row["cpuSecondsSinceStart"] = round(after["usage_usec"] / 1e6, 3)
+            if row["service"] == "navigator-persistence":
+                persistence_ratio = _throttle_period_ratio(before, after)
+    task_count = _persistence_task_count(instance)
+    saturated = _persistence_saturated(task_count, persistence_ratio)
     stack = [row for row in rows if row["role"] == "stack"]
     summary = {
         "schemaVersion": "cyrene-hfdev-measure-v1",
@@ -1979,6 +2077,11 @@ def cmd_measure(args: argparse.Namespace) -> int:
             sum(row.get("cpuSecondsInWindow") or 0 for row in stack) * 60 / args.window, 3
         ),
         "stackImageBytes": sum(row.get("imageSizeBytes") or 0 for row in stack),
+        "persistenceTaskCount": task_count,
+        "persistenceThrottlePeriodRatio": persistence_ratio,
+        "persistenceSaturated": saturated,
+        # Idle CPU grows with the task count. A saturated sample is not a baseline.
+        "idleCpuComparable": not saturated,
     }
     _write_json(evidence / "measure.json", {"summary": summary, "containers": rows})
     print(json.dumps({**summary, "evidence": str(evidence)}))
@@ -2036,66 +2139,89 @@ def _cold_start(
     }
 
 
+def _ready_after_recreate(start: dict[str, Any]) -> float | None:
+    ready = start.get("readySeconds")
+    command = start.get("recreateCommandSeconds")
+    if ready is None or command is None:
+        return None
+    return round(ready - command, 3)
+
+
 def cmd_cpu_compare(args: argparse.Namespace) -> int:
     """Cold-start both Teams roles under each CPU quota and measure real CPU seconds.
 
-    Each cycle follows the production dependency order: Teams provider, then a fresh
-    Exchange (new gRPC channel, no reconnect backoff), then Teams ingress. The first
-    and second messages after readiness separate cold and warm reply latency.
-    中文：每轮按生产依赖顺序冷启动，读取 cgroup cpu.stat 的真实 CPU 秒数与节流时间。
+    Samples alternate quotas (0.05, 0.5, 0.05, 0.5, ...) so one quota is not entirely
+    after the other. Each cycle still follows production order: Teams provider, a fresh
+    Exchange, then Teams ingress. ``readySeconds`` includes the compose recreate command;
+    ``recreateCommandSeconds`` is recorded separately. Warm replies are marked invalid
+    when Persistence is saturated.
+    中文：配额交替取样。就绪时间含 compose 命令耗时，并单独记录该耗时。Persistence 饱和时热回复无效。
     """
 
     instance = _instance(args)
     evidence = _evidence_run(instance, "cpu-compare")
     rows = []
-    for cpus in args.cpus:
-        for index in range(args.repeat):
-            provider, provider_start = _cold_start(instance, "teams-provider", "provider", cpus)
-            _recreate(instance, "exchange", cpus)
-            _wait_healthy(instance, "exchange", 300)
-            ingress, ingress_start = _cold_start(instance, "teams-ingress", "ingress", cpus)
-            before = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
-            first = _probe(instance, "send", "--timeout", "300")["positive"]
-            after = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
-            second = _probe(instance, "send", "--timeout", "300")["positive"]
-            row: dict[str, Any] = {
-                "cpus": float(cpus),
-                "repeat": index + 1,
-                "providerReadySeconds": provider_start["readySeconds"],
-                "ingressReadySeconds": ingress_start["readySeconds"],
-                "firstAckSeconds": first.get("ackSeconds"),
-                "firstReplySeconds": first.get("replySeconds"),
-                "warmAckSeconds": second.get("ackSeconds"),
-                "warmReplySeconds": second.get("replySeconds"),
-                "firstReplyOk": bool(first.get("reply")) and bool(second.get("reply")),
-            }
-            for role, start in (("ingress", ingress_start), ("provider", provider_start)):
-                at_ready, message_before, message_after = (
-                    start["cgroupAtReady"],
-                    before[role],
-                    after[role],
+    for cpus, repeat in _cpu_sample_order(args.cpus, args.repeat):
+        provider, provider_start = _cold_start(instance, "teams-provider", "provider", cpus)
+        _recreate(instance, "exchange", cpus)
+        _wait_healthy(instance, "exchange", 300)
+        ingress, ingress_start = _cold_start(instance, "teams-ingress", "ingress", cpus)
+        persistence = _container_id(instance, "navigator-persistence")
+        persist_before = _cgroup(persistence)
+        task_count = _persistence_task_count(instance)
+        before = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
+        first = _probe(instance, "send", "--timeout", "300")["positive"]
+        after = {"ingress": _cgroup(ingress), "provider": _cgroup(provider)}
+        second = _probe(instance, "send", "--timeout", "300")["positive"]
+        persist_after = _cgroup(persistence)
+        throttle = _throttle_period_ratio(persist_before, persist_after)
+        saturated = _persistence_saturated(task_count, throttle)
+        row: dict[str, Any] = {
+            "cpus": float(cpus),
+            "repeat": repeat,
+            "providerNanoCpus": _cpu_limit(provider),
+            "ingressNanoCpus": _cpu_limit(ingress),
+            "providerRecreateCommandSeconds": provider_start["recreateCommandSeconds"],
+            "ingressRecreateCommandSeconds": ingress_start["recreateCommandSeconds"],
+            "providerReadySeconds": provider_start["readySeconds"],
+            "ingressReadySeconds": ingress_start["readySeconds"],
+            "providerReadyAfterRecreateSeconds": _ready_after_recreate(provider_start),
+            "ingressReadyAfterRecreateSeconds": _ready_after_recreate(ingress_start),
+            "firstAckSeconds": first.get("ackSeconds"),
+            "firstReplySeconds": first.get("replySeconds"),
+            "warmAckSeconds": second.get("ackSeconds"),
+            "warmReplySeconds": second.get("replySeconds"),
+            "firstReplyOk": bool(first.get("reply")) and bool(second.get("reply")),
+            "persistenceTaskCount": task_count,
+            "persistenceThrottlePeriodRatio": throttle,
+            "persistenceSaturated": saturated,
+            "warmReplyValid": bool(second.get("reply")) and not saturated,
+        }
+        for role, start in (("ingress", ingress_start), ("provider", provider_start)):
+            at_ready, message_before, message_after = (
+                start["cgroupAtReady"],
+                before[role],
+                after[role],
+            )
+            if at_ready and message_before and message_after:
+                row[f"{role}StartupCpuSeconds"] = round(at_ready["usage_usec"] / 1e6, 3)
+                row[f"{role}StartupThrottledSeconds"] = round(
+                    at_ready.get("throttled_usec", 0) / 1e6, 3
                 )
-                if at_ready and message_before and message_after:
-                    row[f"{role}StartupCpuSeconds"] = round(at_ready["usage_usec"] / 1e6, 3)
-                    row[f"{role}StartupThrottledSeconds"] = round(
-                        at_ready.get("throttled_usec", 0) / 1e6, 3
+                row[f"{role}FirstMessageCpuSeconds"] = round(
+                    (message_after["usage_usec"] - message_before["usage_usec"]) / 1e6, 3
+                )
+                row[f"{role}FirstMessageThrottledSeconds"] = round(
+                    (
+                        message_after.get("throttled_usec", 0)
+                        - message_before.get("throttled_usec", 0)
                     )
-                    row[f"{role}FirstMessageCpuSeconds"] = round(
-                        (message_after["usage_usec"] - message_before["usage_usec"]) / 1e6, 3
-                    )
-                    row[f"{role}FirstMessageThrottledSeconds"] = round(
-                        (
-                            message_after.get("throttled_usec", 0)
-                            - message_before.get("throttled_usec", 0)
-                        )
-                        / 1e6,
-                        3,
-                    )
-                    row[f"{role}MemoryMiB"] = round(
-                        message_after.get("memory_current", 0) / 2**20, 1
-                    )
-            rows.append(row)
-            print(json.dumps(row), flush=True)
+                    / 1e6,
+                    3,
+                )
+                row[f"{role}MemoryMiB"] = round(message_after.get("memory_current", 0) / 2**20, 1)
+        rows.append(row)
+        print(json.dumps(row), flush=True)
     # Leave the stack on production quotas.
     _cold_start(instance, "teams-provider", "provider", "0.05")
     _recreate(instance, "exchange", "0.05")
@@ -2112,15 +2238,35 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         )
 
     summary = {}
+    warm_keys = {"warmAckSeconds", "warmReplySeconds"}
     for cpus in args.cpus:
         subset = [row for row in rows if row["cpus"] == float(cpus)]
-        keys = sorted({key for row in subset for key in row} - {"cpus", "repeat", "firstReplyOk"})
-        summary[cpus] = {key: median([row.get(key) for row in subset]) for key in keys}
+        warm_valid = all(row.get("warmReplyValid") for row in subset) and bool(subset)
+        keys = sorted(
+            {key for row in subset for key in row}
+            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "warmReplyValid"}
+        )
+        summary[cpus] = {}
+        for key in keys:
+            if key in warm_keys and not warm_valid:
+                summary[cpus][key] = None
+            else:
+                summary[cpus][key] = median([row.get(key) for row in subset])
         summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
         summary[cpus]["samples"] = len(subset)
+        summary[cpus]["warmReplyComparison"] = "valid" if warm_valid else "invalid"
     _write_json(
         evidence / "cpu-compare.json",
-        {"clock": "CLOCK_MONOTONIC", "rows": rows, "medians": summary},
+        {
+            "clock": "CLOCK_MONOTONIC",
+            "order": "alternating",
+            "warmReplyPolicy": (
+                "invalid when persistenceTaskCount>=30 or throttle period ratio>=0.60; "
+                "warm medians are then null"
+            ),
+            "rows": rows,
+            "medians": summary,
+        },
     )
     print(json.dumps({"medians": summary, "evidence": str(evidence)}, indent=2))
     return 0 if all(row["firstReplyOk"] for row in rows) else 1

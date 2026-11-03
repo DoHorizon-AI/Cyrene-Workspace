@@ -1,14 +1,17 @@
-# Developer overlay for tooling/deploy/teams-cloud/compose.yaml + compose.computer-runtime.yaml
-# (+ compose.automation-workflows.yaml in the default "actor" work mode).
+# Developer overlay for tooling/deploy/teams-cloud/compose.yaml + compose.computer-runtime.yaml.
+# Actor work mode also adds compose.automation-workflows.yaml. The default work mode is legacy.
 # hfdev.py renders every ${...} value into the instance compose.env; do not run this file alone.
 #
-# Differences from production are limited to:
+# Differences from the production base Compose:
 #   * every network is internal and uses an explicit subnet from 10.249.0.0/16;
-#   * Navigator uses the OpenAI-compatible stub model instead of CodeBuddy;
+#   * Navigator uses the DSH executor and the OpenAI-compatible stub model, not CodeBuddy/ACP;
+#   * CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS is 2 (the base file's "1" fails serve.ts, range 2..32);
+#   * the Navigator principal fixture sets can_write_harness (the production template omits it);
+#   * Exchange depends_on overrides the base list and adds teams-provider and computer-runtime-proxy;
 #   * Teams containers trust one extra fixture CA for the Microsoft endpoint fixtures;
 #   * GitHub Issues is not started (computer-runtime is the one tool plugin);
 #   * two fixture services, one maintainer job, and one probe container are added.
-# 中文：只改变上述开发差异，其余服务定义沿用生产 Compose。
+# 中文：默认是 legacy。差异含 DSH、can_write_harness、并发 2、Exchange 的 depends_on。
 
 x-hfdev-labels: &hfdev-labels
   io.cyrene.task: host-feature-split-20261102
@@ -57,7 +60,8 @@ services:
       CYRENE_HARNESS_MODEL: hfdev-stub-model
       CYRENE_EXCHANGE_URL: https://model-stub:8443
       CYRENE_CONVERSATION_ASSISTANT_ENABLED: "false"
-      # Production's literal "1" is rejected by serve.ts (2..32); see the H0 receipt.
+      # Base compose.yaml sets "1"; serve.ts validateTaskConcurrency requires 2..32.
+      # The production ACP overlay sets 2. This overlay does the same so the base file can start.
       CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "2"
       DSH_TELEMETRY_DISABLED: "1"
       # Rendered by hfdev.py: the base (or actor-Work overlay) map plus the stub model token.

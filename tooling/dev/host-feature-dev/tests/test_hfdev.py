@@ -255,6 +255,53 @@ def test_smoke_digest_ignores_nonce_but_not_outcome():
     )
 
 
+def test_overlay_header_states_legacy_default_and_base_file_deltas():
+    text = (TOOL_DIR / "compose.dev.yaml").read_text(encoding="utf-8")
+    header = text.split("x-hfdev-labels", 1)[0]
+    assert "default work mode is legacy" in header
+    assert 'default "actor"' not in header
+    assert "DSH" in header
+    assert "can_write_harness" in header
+    assert "CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS is 2" in header
+    assert "depends_on" in header
+    assert "H0 receipt" not in text
+
+
+def test_init_refuses_leftover_volumes_with_the_volumes_command():
+    with pytest.raises(hfdev.DevStackError, match="down --volumes"):
+        hfdev._refuse_leftover_volumes(["cyrene-hfdev-h0_directory-postgres"])
+    hfdev._refuse_leftover_volumes([])
+
+
+def test_cpu_samples_alternate_quotas():
+    assert hfdev._cpu_sample_order(["0.05", "0.5"], 2) == [
+        ("0.05", 1),
+        ("0.5", 1),
+        ("0.05", 2),
+        ("0.5", 2),
+    ]
+
+
+def test_persistence_saturation_marks_the_known_threshold():
+    assert not hfdev._persistence_saturated(29, 0.59)
+    assert hfdev._persistence_saturated(30, 0.1)
+    assert hfdev._persistence_saturated(0, 0.60)
+    assert (
+        hfdev._throttle_period_ratio(
+            {"nr_periods": 10, "nr_throttled": 1}, {"nr_periods": 20, "nr_throttled": 7}
+        )
+        == 0.6
+    )
+
+
+def test_smoke_evidence_includes_notification_statuses():
+    source = (TOOL_DIR / "hfdev.py").read_text(encoding="utf-8")
+    smoke = source.split("def cmd_smoke", 1)[1].split("\ndef ", 1)[0]
+    status_at = smoke.index('summary["replyNotificationStatuses"]')
+    write_at = smoke.index('_write_json(evidence / "smoke.json"')
+    assert status_at < write_at
+
+
 def test_pins_require_full_shas_and_known_repositories():
     assert hfdev._parse_pins(["exchange=" + "b" * 40]) == {"exchange": "b" * 40}
     for value in ("exchange=b551da2", "workspace=" + "b" * 40, "unknown=" + "b" * 40, "exchange"):

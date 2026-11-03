@@ -16,7 +16,7 @@ and the developer overlay [`compose.dev.yaml`](compose.dev.yaml):
 
 | Service | Source | Notes |
 | --- | --- | --- |
-| postgres, workspace-authority, account-center, exchange, navigator-persistence, navigator, teams-provider, teams-ingress, computer-runtime, computer-runtime-proxy | production definitions | Images built for the host architecture from exact commits. Navigator runs with `CYRENE_CONVERSATION_ASSISTANT_ENABLED=false`. |
+| postgres, workspace-authority, account-center, exchange, navigator-persistence, navigator, teams-provider, teams-ingress, computer-runtime, computer-runtime-proxy | production definitions | Images built for the host architecture from exact commits. Navigator runs the DSH executor with `CYRENE_CONVERSATION_ASSISTANT_ENABLED=false` and `CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS=2` (the base file's `1` is rejected). The fixture principal sets `can_write_harness`. Exchange `depends_on` also waits for teams-provider and computer-runtime-proxy. |
 | microsoft-fixture | `fixtures/microsoft_fixture.py` | Answers Bot Framework JWKS, Entra token, and Bot Connector paths through private aliases only. |
 | model-stub | `fixtures/model_stub.py` | Deterministic OpenAI-compatible SSE model: one `computer.directory.list` call, then a final answer. |
 | hfdev-probe | `fixtures/teams_smoke.py` | Smoke driver and readiness probe; excluded from metrics. |
@@ -48,9 +48,9 @@ files inside the instance directory so service UIDs 10001/999 can read them.
 
 ```bash
 cd Cyrene-Workspace
-# Passing H0 path (deployed Navigator + Exchange). Unpinned `run` uses origin/develop
-# and currently fails: grant schema (H0-01) and Teams channel task visibility (H0-02).
-# 走通路径需钉住线上 Navigator/Exchange；不钉则默认 origin/develop，目前会失败（见 H0-01/H0-02）。
+# This pin is only Navigator aa128de and Exchange 279a1e0. Plugins and Platform stay on
+# develop. Unpinned `run` follows origin/develop and currently fails (H0-01, H0-02).
+# 钉住的只是 Navigator 与 Exchange；Plugins、Platform 仍是 develop。不钉则按 origin/develop，目前会失败。
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 run \
   --pin navigator=aa128de69058f36f8b8ed97fae4a9e7773dea168 \
   --pin exchange=279a1e09efd0fb10096822d57b9de0e574b8f5e9
@@ -58,6 +58,15 @@ python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 cpu-compare --cpus 0
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 status
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 down --volumes
 ```
+
+`down` without `--volumes` keeps Postgres data. The next `init` (including `run`) refuses
+those volumes and tells you to run `down --volumes` first, instead of regenerating the
+password and failing later inside directory migration.
+
+`cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
+`recreateCommandSeconds` and the inspected `NanoCpus` are recorded beside it. Warm-reply
+medians are null when Persistence has at least 30 tasks or a throttle-period ratio of 0.60
+or more. `measure` records the same task count and throttle ratio.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -80,13 +89,15 @@ project, subnet block, keys, and image tags.
 | `build` | `images.lock.json` with source commits, image IDs, and Dockerfile digests. |
 | `init` | Fixture identities, keys, certificates, configs, and `compose.env`. |
 | `up` | Production cold-start order; exports connector bindings and the live tool catalog from Exchange before Navigator starts; `evidence/*-up/up.json`. |
-| `smoke` | Negative cases (unsigned, attacker-signed, wrong `serviceurl`, expired, wrong audience, foreign tenant) must not be queued; the signed message must produce a reply that quotes the digest of a non-error tool result. Each run has a normalized digest; `consistent` requires all runs to match. Exchange and Work ledgers are saved alongside. |
-| `measure` | Container count, limits, memory, and idle CPU seconds from cgroup `cpu.stat`. |
-| `cpu-compare` | Per quota: provider → fresh Exchange → ingress cold start, readiness, first and warm reply, CPU and throttled seconds. |
+| `smoke` | Negative cases (unsigned, attacker-signed, wrong `serviceurl`, expired, wrong audience, foreign tenant) must not be queued; the signed message must produce a reply that quotes the digest of a non-error tool result. Each run has a normalized digest; `consistent` requires all runs to match. `smoke.json` includes `replyNotificationStatuses`. Exchange and Work ledgers are saved alongside. |
+| `measure` | Container count, limits, memory, and idle CPU seconds from cgroup `cpu.stat`, plus Persistence task count and throttle-period ratio. `idleCpuComparable` is false when that service is saturated. |
+| `cpu-compare` | Alternating quotas. Per sample: provider → fresh Exchange → ingress, inspected NanoCpus, recreate-command seconds, readiness, first reply, warm reply, CPU seconds, task count, and throttle ratio. Saturated warm replies are marked invalid. |
 
 All durations use `CLOCK_MONOTONIC`, which containers share with the host: WSL steps the wall
-clock backwards under load. Readiness is timed from the recreate command to the probe's first
-successful check (ingress `/health/ready`; provider mTLS gRPC Health).
+clock backwards under load. `readySeconds` runs from the recreate command to the probe's first
+successful check (ingress `/health/ready`; provider mTLS gRPC Health) and therefore includes
+compose command time. `recreateCommandSeconds` is that command alone;
+`readyAfterRecreateSeconds` is the remainder.
 
 Evidence: `instances/<instance>/evidence/<UTC>-<command>/`. Results that depend on the
 Microsoft fixtures or the model stub are `SIMULATED`; the Cyrene service path is real.
