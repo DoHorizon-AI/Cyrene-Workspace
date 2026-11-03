@@ -81,6 +81,7 @@ IDs on the same Docker store. Image tags carry the instance name.
 | --- | --- | --- |
 | `legacy` (default) | base + computer-runtime + dev overlay | Production base configuration: one Navigator service principal. |
 | `actor` | adds `compose.automation-workflows.yaml` | Actor-scoped Work tokens (`CYRENE_WORK_ACTOR_TOKEN_MAP_FILE`, `CYRENE_TEAMS_MODEL_ACTOR_SUBJECT`). |
+| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. |
 
 Run several instances side by side with distinct `--instance` names; each gets its own
 project, subnet block, keys, and image tags.

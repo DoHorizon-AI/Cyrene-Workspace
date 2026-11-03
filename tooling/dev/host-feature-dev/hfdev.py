@@ -55,9 +55,12 @@ BASE_COMPOSE_FILES = (
 )
 # "legacy" is the production base Compose. "actor" adds the production actor-scoped Work
 # overlay; Navigator develop (eadef91) reads Teams channel tasks only through it.
+# "private" also enables the private-delivery policy, the production path: the fixture user
+# installs the bot, sends a personal message, and the reply comes back to that conversation.
 ACTOR_WORK_COMPOSE = TEAMS_CLOUD_DIR / "compose.automation-workflows.yaml"
 DEV_COMPOSE = TOOL_DIR / "compose.dev.yaml"
-WORK_MODES = ("actor", "legacy")
+WORK_MODES = ("actor", "legacy", "private")
+ACTOR_WORK_MODES = ("actor", "private")
 WORK_ACTOR_TOKENS = tuple(f"CYRENE_WORK_ACTOR_TOKEN_0{index}" for index in range(1, 6))
 DEFAULT_STATE_ROOT = Path.home() / ".local/state/cyrene-host-feature-dev"
 TASK_LABEL = "host-feature-split-20261102"
@@ -677,6 +680,7 @@ def _identities(name: str) -> dict[str, str]:
         "computerConnectionRef": make("computer-connection"),
         "teamId": f"19:hfdev{digest}team@thread.tacv2",
         "channelId": f"19:hfdev{digest}chan@thread.tacv2",
+        "personalConversationId": f"a:hfdev{digest}personal",
         "issuer": ISSUER_TEMPLATE.format(tenant=tenant),
     }
 
@@ -1039,6 +1043,8 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "tenantId": ids["tenantId"],
                 "teamId": ids["teamId"],
                 "channelId": ids["channelId"],
+                "personalConversationId": ids["personalConversationId"],
+                "workMode": args.work_mode,
                 "actorOid": ids["actorOid"],
                 "serviceUrl": SERVICE_URL,
                 "jwtKeyId": JWT_KEY_ID,
@@ -1067,7 +1073,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "can_publish_credential_health": False,
         }
     ]
-    if args.work_mode == "actor":
+    if args.work_mode in ACTOR_WORK_MODES:
         # Same shape as config/automation-work-principals.patch.template.json, one actor.
         principals += [
             {
@@ -1101,10 +1107,19 @@ def cmd_init(args: argparse.Namespace) -> int:
                 "actors": [{"actorAadObjectId": ids["actorOid"], "tokenEnv": WORK_ACTOR_TOKENS[0]}],
             },
         )
-    _write_json(
-        c / "navigator-principal-config.json",
-        {"principals": principals, "product_directory": [], "product_service_credentials": []},
-    )
+    principal_config: dict[str, Any] = {
+        "principals": principals,
+        "product_directory": [],
+        "product_service_credentials": [],
+    }
+    if args.work_mode == "private":
+        principal_config["teams_private_conversations"] = {
+            "workspace_id": ids["workspaceId"],
+            "issuer": ids["issuer"],
+            "tenant_id": ids["tenantId"],
+            "bot_app_id": ids["botAppId"],
+        }
+    _write_json(c / "navigator-principal-config.json", principal_config)
     _write_json(
         c / "teams-actor-subjects.json",
         {
@@ -1167,7 +1182,7 @@ def _plugin_mtls(root: str, cert: str, key: str) -> dict[str, str]:
     return {"rootCertificateRef": root, "clientCertificateRef": cert, "clientKeyRef": key}
 
 
-def _exchange_configuration(ids: dict[str, str]) -> dict[str, Any]:
+def _exchange_configuration(ids: dict[str, str], work_mode: str = "legacy") -> dict[str, Any]:
     """Closed Exchange integration-only host configuration for this stack."""
 
     plugin = _plugin_mtls(
@@ -1232,6 +1247,7 @@ def _exchange_configuration(ids: dict[str, str]) -> dict[str, Any]:
                 "allowedTeamIds": [ids["teamId"]],
                 "botAppId": ids["botAppId"],
                 "expectedIssuer": ids["issuer"],
+                **({"personalActorSubjects": [ids["actorOid"]]} if work_mode == "private" else {}),
                 "directPlugin": {
                     "bindingId": TEAMS_BINDING,
                     "connectionRef": "grpcs://teams-provider:7443",
@@ -1314,7 +1330,9 @@ def _compose_environment(
                 "method_callers": {},
             }
         ),
-        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": compact(_exchange_configuration(ids)),
+        "CYRENE_EXCHANGE_INTEGRATION_CONFIGURATION_JSON": compact(
+            _exchange_configuration(ids, work_mode)
+        ),
         "CYRENE_GITHUB_ISSUES_BINDING_ID": GITHUB_BINDING,
         "CYRENE_GITHUB_ISSUES_CONFIGURATION_JSON": "{}",
         "CYRENE_TEAMS_CONNECTOR_BINDING_ID": TEAMS_BINDING,
@@ -1324,7 +1342,7 @@ def _compose_environment(
                 "bot_app_id": ids["botAppId"],
                 "tenant_id": ids["tenantId"],
                 "allowed_team_ids": [ids["teamId"]],
-                "personal_chat_enabled": False,
+                "personal_chat_enabled": work_mode == "private",
                 "client_secret_env_ref": "TEAMS_BOT_CLIENT_SECRET",
                 "timeout_seconds": 10,
             }
@@ -1332,14 +1350,16 @@ def _compose_environment(
         "HFDEV_TOOL_DIR": str(TOOL_DIR),
         "CYRENE_AUTOMATION_HEALTH_EXPORT_DIR": str(instance.runtime_dir / "automation-health"),
         "CYRENE_WORKFLOWS_ENABLED": "false",
-        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "false",
-        "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": ids["actorOid"] if work_mode == "actor" else "",
+        "CYRENE_TEAMS_PERSONAL_CHAT_ENABLED": "true" if work_mode == "private" else "false",
+        "CYRENE_TEAMS_MODEL_ACTOR_SUBJECT": ids["actorOid"]
+        if work_mode in ACTOR_WORK_MODES
+        else "",
     }
     navigator_secrets = [
         "CYRENE_SESSION_TOKEN=/run/secrets/navigator-session-token",
         "TEAMS_NAVIGATOR_HMAC_KEY=/run/secrets/teams-navigator-hmac-key",
     ]
-    if work_mode == "actor":
+    if work_mode in ACTOR_WORK_MODES:
         navigator_secrets.append(
             "CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN=/run/secrets/teams-private-bridge-token"
         )
@@ -1415,7 +1435,7 @@ def _compose_files(instance: Instance) -> tuple[Path, ...]:
         if instance.identity_path.exists()
         else "legacy"
     )
-    extra = (ACTOR_WORK_COMPOSE,) if mode == "actor" else ()
+    extra = (ACTOR_WORK_COMPOSE,) if mode in ACTOR_WORK_MODES else ()
     return (*BASE_COMPOSE_FILES, *extra, DEV_COMPOSE)
 
 
@@ -1699,6 +1719,12 @@ def cmd_up(args: argparse.Namespace) -> int:
     _compose(
         instance, "--profile", "hfdev-tools", "up", "-d", "--no-build", "hfdev-probe", capture=True
     )
+    if _read_json(instance.identity_path).get("workMode") == "private":
+        began = time.monotonic()
+        installation = _probe(instance, "install")
+        if not installation["delivered"]:
+            raise DevStackError(f"Private bot installation was not delivered: {installation}")
+        phase("private-installation", began)
     guard = _guard_runtime(instance)
     report = {
         "schemaVersion": "cyrene-hfdev-up-v1",

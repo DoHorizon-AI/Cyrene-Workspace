@@ -152,8 +152,67 @@ def _activity(config: dict[str, Any], nonce: str, **overrides: Any) -> dict[str,
             }
         ],
     }
+    if config.get("workMode") == "private":
+        activity["conversation"] = {
+            "id": config["personalConversationId"],
+            "conversationType": "personal",
+            "isGroup": False,
+            "tenantId": config["tenantId"],
+        }
+        activity["channelData"] = {"tenant": {"id": config["tenantId"]}}
+        activity["text"] = f"hfdev-nonce-{nonce} please list the workspace directory"
+        activity["entities"] = []
     activity.update(overrides)
     return activity
+
+
+def _installation_activity(config: dict[str, Any]) -> dict[str, Any]:
+    """One signed personal install: Teams sends this when the user adds the bot."""
+
+    return {
+        "type": "installationUpdate",
+        "action": "add",
+        "id": str(int(time.time() * 1000) + secrets.randbelow(1000)),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+        "serviceUrl": config["serviceUrl"],
+        "channelId": "msteams",
+        "from": {
+            "id": "29:hfdev-fixture-user",
+            "name": "HFDev Fixture User",
+            "aadObjectId": config["actorOid"],
+        },
+        "recipient": {"id": f"28:{config['botAppId']}", "name": "Cyrene"},
+        "conversation": {
+            "id": config["personalConversationId"],
+            "conversationType": "personal",
+            "isGroup": False,
+            "tenantId": config["tenantId"],
+        },
+        "channelData": {"tenant": {"id": config["tenantId"]}},
+    }
+
+
+def install(config: dict[str, Any], timeout: float) -> dict[str, Any]:
+    """Post the install and wait until ingress delivers it to Navigator."""
+
+    delivered_before = int(_delivery_status(config)["delivered_count"])
+    status, ack_seconds = _post_activity(
+        config, _installation_activity(config), _token(config, SIGNING_KEY)
+    )
+    result: dict[str, Any] = {
+        "ackStatus": status,
+        "ackSeconds": round(ack_seconds, 3),
+        "delivered": False,
+    }
+    deadline = time.monotonic() + timeout
+    while status == 200 and time.monotonic() < deadline:
+        counts = _delivery_status(config)
+        if int(counts["delivered_count"]) > delivered_before:
+            result["delivered"] = True
+            break
+        time.sleep(0.2)
+    result["queue"] = {name: _delivery_status(config)[name] for name in QUEUE_COUNTS}
+    return result
 
 
 def _post_activity(
@@ -325,6 +384,16 @@ def negatives(config: dict[str, Any]) -> dict[str, Any]:
     foreign["channelData"]["tenant"]["id"] = foreign_tenant
     foreign["conversation"]["tenantId"] = foreign_tenant
     cases["foreign_tenant_signed"] = (foreign, _token(config, SIGNING_KEY), {200})
+    if config.get("workMode") == "private":
+        cases["unsigned_installation"] = (_installation_activity(config), None, {401})
+        foreign_install = _installation_activity(config)
+        foreign_install["channelData"]["tenant"]["id"] = foreign_tenant
+        foreign_install["conversation"]["tenantId"] = foreign_tenant
+        cases["foreign_tenant_installation"] = (
+            foreign_install,
+            _token(config, SIGNING_KEY),
+            {200},
+        )
     before = _queue_total(config)
     replies_before = len(
         [row for row in _captured(config) if row.get("outcome") == "activity_recorded"]
@@ -426,6 +495,8 @@ def main() -> int:
     send = commands.add_parser("send")
     send.add_argument("--nonce", default=None)
     send.add_argument("--timeout", type=float, default=240)
+    installation = commands.add_parser("install")
+    installation.add_argument("--timeout", type=float, default=120)
     ready = commands.add_parser("wait-ready")
     ready.add_argument("--role", action="append", choices=("ingress", "provider"), required=True)
     ready.add_argument("--timeout", type=float, default=300)
@@ -445,6 +516,8 @@ def main() -> int:
         output = _delivery_status(config)
     elif args.command == "captured":
         output = {"fixture": _captured(config), "model": _model_requests(config)}
+    elif args.command == "install":
+        output = install(config, args.timeout)
     else:
         nonce = args.nonce or secrets.token_hex(8)
         output = {}
