@@ -13,6 +13,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import sqlite3
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -309,8 +311,8 @@ def _real_send(seconds=2.0):
             "ackSeconds": 0.1,
             "replySeconds": seconds,
             "reply": {
-                "text": "ok abc123",
-                "textTemplate": "ok abc123",
+                "text": "HFDEV-SMOKE-OK nonce=n result_sha256=abc123",
+                "textTemplate": "HFDEV-SMOKE-OK nonce=<nonce> result_sha256=abc123",
                 "authorized": True,
                 "conversationMatches": True,
             },
@@ -319,19 +321,37 @@ def _real_send(seconds=2.0):
     }
 
 
+# Navigator builds a failed task's notice as the error, a blank line, then the task output.
+NOTICE_TEXT = (
+    'session "teams-private-1": write ownership was lost; close this handle and reopen\n\n'
+    "HFDEV-SMOKE-OK nonce=n result_sha256=abc123"
+)
+
+
 def _notice_send():
     positive = _real_send()["positive"]
-    positive["reply"] = {"text": "failed: hfdev-nonce-1", "textTemplate": "failed"}
+    positive["reply"] = {
+        "text": NOTICE_TEXT,
+        "textTemplate": NOTICE_TEXT,
+        "authorized": True,
+        "conversationMatches": True,
+    }
     return {"positive": positive}
 
 
-def test_a_failure_notice_quoting_the_nonce_is_not_a_real_reply():
-    notice = {"reply": {"text": "failed: hfdev-nonce-1"}, "model": [{"decision": "tool_call"}]}
-    assert not hfdev._reply_is_real(notice)
+def test_a_failure_notice_holding_the_answer_is_not_a_real_reply():
     assert not hfdev._reply_is_real({"reply": None, "model": REAL_MODEL})
-    # The model finished, then the task failed: the notice still does not quote the result.
     assert not hfdev._reply_is_real(_notice_send()["positive"])
     assert hfdev._reply_is_real(_real_send()["positive"])
+    assert not hfdev.evaluate_smoke(_notice_send())["passed"]
+    assert hfdev.evaluate_smoke(_real_send())["passed"]
+
+
+def test_a_tool_error_digest_never_counts():
+    model = [{"decision": "final_after_tool_error", "toolResultSha256": "abc123"}]
+    assert hfdev._final_tool_digests(model) == []
+    positive = {**_real_send()["positive"], "model": model}
+    assert not hfdev._reply_is_real(positive)
 
 
 def test_an_unknown_persistence_reading_counts_as_saturated():
@@ -445,8 +465,15 @@ def _fake_smoke(monkeypatch, tmp_path, sends, ledgers, *, repeat=1):
     return SimpleNamespace(repeat=repeat, skip_negative=True, timeout=1.0)
 
 
-def _ledger(*statuses):
-    return {"navigator-persistence": {"notifications": [{"status": s} for s in statuses]}}
+def _ledger(*statuses, tasks=()):
+    return {
+        "navigator-persistence": {
+            "tasks": [{"task_id": str(i), "status": s} for i, s in enumerate(tasks)],
+            "notifications": [
+                {"notification_id": str(i), "status": s} for i, s in enumerate(statuses)
+            ],
+        }
+    }
 
 
 def test_smoke_keeps_the_verdict_when_the_final_ledger_read_fails(monkeypatch, tmp_path):
@@ -483,12 +510,229 @@ def test_smoke_statuses_cover_only_this_smoke(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         [_real_send()],
-        [_ledger("failed", "uncertain"), _ledger("failed", "uncertain", "delivered", "delivered")],
+        [
+            _ledger("failed", "uncertain", tasks=("failed",)),
+            _ledger("failed", "uncertain", "delivered", "delivered", tasks=("failed", "completed")),
+        ],
     )
     assert hfdev.cmd_smoke(args) == 0
     summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
     assert summary["replyNotificationStatuses"] == ["delivered", "delivered"]
+    assert summary["tasksCompleted"] is True
     assert summary["evidenceComplete"] is True
+
+
+def test_smoke_fails_on_a_failing_verdict(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_notice_send()],
+        [_ledger(), _ledger("delivered", tasks=("completed",))],
+    )
+    assert hfdev.cmd_smoke(args) == 1
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["allPassed"] is False
+
+
+def test_smoke_fails_when_runs_differ(monkeypatch, tmp_path):
+    other = _real_send()
+    other["positive"]["ackStatus"] = 201
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send(), other],
+        [_ledger(), _ledger("delivered", tasks=("completed", "completed"))],
+        repeat=2,
+    )
+    assert hfdev.cmd_smoke(args) == 1
+
+
+def test_smoke_fails_when_its_task_failed_despite_a_clean_reply(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send()],
+        [_ledger(), _ledger("delivered", tasks=("failed",))],
+    )
+    assert hfdev.cmd_smoke(args) == 1
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["allPassed"] is True
+    assert summary["tasksCompleted"] is False
+
+
+def test_smoke_reports_unknown_scope_when_the_first_ledger_read_fails(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send()],
+        [hfdev.DevStackError("no ledger"), _ledger("delivered", tasks=("completed",))],
+    )
+    assert hfdev.cmd_smoke(args) == 1
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["replyNotificationStatuses"] is None
+    assert summary["tasksCompleted"] is None
+    assert summary["evidenceComplete"] is False
+
+
+def test_task_count_is_unknown_when_the_ledger_cannot_be_read(monkeypatch):
+    def fail(instance):
+        raise hfdev.DevStackError("no ledger")
+
+    monkeypatch.setattr(hfdev, "_ledgers", fail)
+    assert hfdev._persistence_task_count(SimpleNamespace()) is None
+
+
+def test_idle_throttle_samples_the_configured_window(monkeypatch):
+    slept = []
+    samples = iter([{"nr_periods": 10, "nr_throttled": 1}, {"nr_periods": 20, "nr_throttled": 6}])
+    monkeypatch.setattr(hfdev, "_cgroup", lambda container: next(samples))
+    monkeypatch.setattr(hfdev.time, "sleep", slept.append)
+    assert hfdev._persistence_idle_throttle("container") == 0.5
+    assert slept == [hfdev.PERSISTENCE_IDLE_SAMPLE_SECONDS]
+
+
+def test_cpu_compare_with_no_samples_is_not_a_success(monkeypatch, tmp_path):
+    identity = tmp_path / "identity.json"
+    identity.write_text('{"workMode": "legacy"}', encoding="utf-8")
+    instance = SimpleNamespace(name="t", identity_path=identity)
+    monkeypatch.setattr(hfdev, "_instance", lambda args: instance)
+    monkeypatch.setattr(hfdev, "_evidence_run", lambda inst, label: tmp_path)
+    monkeypatch.setattr(hfdev, "_cold_start", lambda *args: ("container", {}))
+    monkeypatch.setattr(hfdev, "_recreate", lambda *args: "container")
+    monkeypatch.setattr(hfdev, "_wait_healthy", lambda *args: None)
+    assert hfdev.cmd_cpu_compare(SimpleNamespace(cpus=["0.5"], repeat=0)) == 1
+
+
+def _fake_measure(monkeypatch, tmp_path, task_count):
+    monkeypatch.setattr(hfdev, "_instance", lambda args: SimpleNamespace(name="t"))
+    monkeypatch.setattr(hfdev, "_evidence_run", lambda inst, label: tmp_path)
+    monkeypatch.setattr(hfdev, "_project_containers", lambda *a, **k: [{"ID": "persistence"}])
+    monkeypatch.setattr(
+        hfdev,
+        "_inspect_container",
+        lambda container: {
+            "Config": {
+                "Labels": {"com.docker.compose.service": "navigator-persistence"},
+                "Image": "image",
+            },
+            "Image": "sha256:image",
+            "HostConfig": {"NanoCpus": 100_000_000, "Memory": 1},
+            "State": {},
+        },
+    )
+    monkeypatch.setattr(hfdev, "_inspect_image", lambda image: {"Size": 1})
+    samples = iter(
+        [
+            {"usage_usec": 0, "nr_periods": 0, "nr_throttled": 0, "memory_current": 1},
+            {"usage_usec": 1, "nr_periods": 10, "nr_throttled": 1, "memory_current": 1},
+        ]
+    )
+    monkeypatch.setattr(hfdev, "_cgroup", lambda container: next(samples))
+    monkeypatch.setattr(hfdev, "_persistence_task_count", lambda inst: task_count)
+    monkeypatch.setattr(hfdev.time, "sleep", lambda seconds: None)
+    assert hfdev.cmd_measure(SimpleNamespace(window=1)) == 0
+    return json.loads((tmp_path / "measure.json").read_text(encoding="utf-8"))["summary"]
+
+
+def test_measure_marks_a_clean_reading_comparable(monkeypatch, tmp_path):
+    summary = _fake_measure(monkeypatch, tmp_path, 3)
+    assert summary["persistenceSaturated"] is False
+    assert summary["idleCpuComparable"] is True
+
+
+def test_measure_marks_an_unknown_reading_not_comparable(monkeypatch, tmp_path):
+    summary = _fake_measure(monkeypatch, tmp_path, None)
+    assert summary["persistenceTaskCount"] is None
+    assert summary["idleCpuComparable"] is False
+
+
+def test_main_reports_a_timeout_instead_of_a_traceback(monkeypatch, capsys):
+    def time_out(args):
+        raise hfdev.subprocess.TimeoutExpired("docker", 5)
+
+    monkeypatch.setattr(hfdev, "cmd_status", time_out)
+    assert hfdev.main(["status"]) == 2
+    assert "timed out" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("mode", "personal", "actor_subject"),
+    [("legacy", False, False), ("actor", False, True), ("private", True, True)],
+)
+def test_compose_environment_enables_personal_delivery_only_in_private_mode(
+    tmp_path, mode, personal, actor_subject
+):
+    ids = hfdev._identities("h0")
+    instance = SimpleNamespace(
+        name="h0",
+        project="cyrene-hfdev-h0",
+        config_dir=tmp_path,
+        secrets_dir=tmp_path,
+        runtime_dir=tmp_path,
+    )
+    lock = {
+        "images": {"teams": {"composeEnv": "CYRENE_IMAGE_TEAMS_INGRESS", "image": "image"}},
+        "externalImages": {"postgres": {"image": "postgres"}},
+    }
+    subnets = {name: "10.249.0.0/26" for name in hfdev.NETWORKS}
+    environment = hfdev._compose_environment(instance, lock, ids, subnets, "fingerprint", mode)
+    assert environment["CYRENE_TEAMS_PERSONAL_CHAT_ENABLED"] == ("true" if personal else "false")
+    assert environment["CYRENE_TEAMS_MODEL_ACTOR_SUBJECT"] == (
+        ids["actorOid"] if actor_subject else ""
+    )
+    secret_map = environment["HFDEV_NAVIGATOR_SECRET_FILE_MAP"]
+    assert ("CYRENE_PRIVATE_TEAMS_BRIDGE_TOKEN" in secret_map) is actor_subject
+
+
+def _installation_db(path, rows):
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE work_private_installations (organization_id TEXT, workspace_id TEXT, "
+        "tenant_id TEXT, actor_aad_object_id TEXT, bot_app_id TEXT, active INTEGER)"
+    )
+    connection.executemany("INSERT INTO work_private_installations VALUES (?,?,?,?,?,?)", rows)
+    connection.commit()
+    connection.close()
+
+
+@pytest.mark.parametrize(
+    ("active", "matching", "expected"),
+    [(1, True, True), (0, True, False), (1, False, False)],
+)
+def test_private_installation_check_reads_the_exact_row(
+    monkeypatch, tmp_path, active, matching, expected
+):
+    ids = hfdev._identities("h0")
+    database = tmp_path / "persistence.db"
+    actor = ids["actorOid"].lower() if matching else "someone-else"
+    _installation_db(
+        database,
+        [
+            (
+                ids["organizationId"],
+                ids["workspaceId"],
+                ids["tenantId"].lower(),
+                actor,
+                ids["botAppId"].lower(),
+                active,
+            )
+        ],
+    )
+
+    def run_against_temp_database(argv, capture=False):
+        script = argv[argv.index("-c") + 1].replace(
+            "/var/lib/cyrene-navigator/persistence.db", str(database)
+        )
+        return subprocess.run(
+            [sys.executable, "-c", script, *argv[argv.index("-c") + 2 :]],
+            capture_output=True,
+            check=True,
+        )
+
+    monkeypatch.setattr(hfdev, "_run", run_against_temp_database)
+    monkeypatch.setattr(hfdev, "_container_id", lambda *args: "container")
+    monkeypatch.setattr(hfdev.time, "sleep", lambda seconds: None)
+    assert hfdev._private_installation_active(SimpleNamespace(), ids) is expected
 
 
 def test_compose_files_add_the_actor_overlay_only_for_actor_modes(tmp_path):
@@ -531,6 +775,31 @@ def test_private_activity_is_personal_and_channel_activity_is_unchanged(smoke_dr
     }
     assert "team" not in private["channelData"]
     assert private["entities"] == []
+
+
+def test_private_negatives_add_install_cases_and_channel_ones_do_not(smoke_driver, monkeypatch):
+    monkeypatch.setattr(smoke_driver, "_token", lambda *args, **kwargs: "token")
+    monkeypatch.setattr(smoke_driver, "_queue_total", lambda config: 0)
+    monkeypatch.setattr(smoke_driver, "_captured", lambda config: [])
+    monkeypatch.setattr(smoke_driver, "_model_requests", lambda config: [])
+    monkeypatch.setattr(smoke_driver.time, "sleep", lambda seconds: None)
+    posted = []
+
+    def post(config, activity, token):
+        posted.append(activity)
+        return (401 if token is None else 200, 0.1)
+
+    monkeypatch.setattr(smoke_driver, "_post_activity", post)
+    channel = smoke_driver.negatives(SMOKE_CONFIG)
+    assert "unsigned_installation" not in channel["cases"]
+    private = smoke_driver.negatives({**SMOKE_CONFIG, "workMode": "private"})
+    assert private["cases"]["unsigned_installation"]["status"] == 401
+    foreign = next(
+        a
+        for a in posted
+        if a["type"] == "installationUpdate" and a["channelData"]["tenant"]["id"] != "tenant"
+    )
+    assert foreign["conversation"]["tenantId"] == foreign["channelData"]["tenant"]["id"]
 
 
 def _counts(delivered=0, rejected=0, dead=0):

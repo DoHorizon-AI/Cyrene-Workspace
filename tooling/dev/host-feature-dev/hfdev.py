@@ -75,6 +75,7 @@ ALLOWED_PORTS = range(18700, 18750)
 PERSISTENCE_TASK_SATURATION = 30
 PERSISTENCE_THROTTLE_SATURATION = 0.60
 PERSISTENCE_IDLE_SAMPLE_SECONDS = 10
+REPLY_OK_PREFIX = "HFDEV-SMOKE-OK"
 NETWORK_POOL = ipaddress.ip_network("10.249.0.0/16")
 INSTANCE_PREFIX = 20
 NETWORK_PREFIX = 26
@@ -1431,13 +1432,14 @@ EXCHANGE_CLI = "/app/Cyrene-Services/Cyrene-Exchange/product/.venv/bin/cyrene-ex
 SECRET_ENTRYPOINT = "/usr/local/bin/cyrene-secret-env-entrypoint"
 
 
+def _work_mode(instance: Instance) -> str:
+    if not instance.identity_path.exists():
+        return "legacy"
+    return _read_json(instance.identity_path).get("workMode", "legacy")
+
+
 def _compose_files(instance: Instance) -> tuple[Path, ...]:
-    mode = (
-        _read_json(instance.identity_path).get("workMode", "legacy")
-        if instance.identity_path.exists()
-        else "legacy"
-    )
-    extra = (ACTOR_WORK_COMPOSE,) if mode in ACTOR_WORK_MODES else ()
+    extra = (ACTOR_WORK_COMPOSE,) if _work_mode(instance) in ACTOR_WORK_MODES else ()
     return (*BASE_COMPOSE_FILES, *extra, DEV_COMPOSE)
 
 
@@ -1631,8 +1633,9 @@ def _private_installation_active(instance: Instance, ids: dict[str, str]) -> boo
     script = (
         "import sqlite3,sys\n"
         "c=sqlite3.connect('file:/var/lib/cyrene-navigator/persistence.db?mode=ro',uri=True)\n"
-        "row=c.execute('SELECT active FROM work_private_installations "
-        "WHERE actor_aad_object_id=? AND bot_app_id=?',sys.argv[1:3]).fetchone()\n"
+        "row=c.execute('SELECT active FROM work_private_installations WHERE organization_id=? "
+        "AND workspace_id=? AND tenant_id=? AND actor_aad_object_id=? AND bot_app_id=?',"
+        "sys.argv[1:6]).fetchone()\n"
         "print(1 if row and row[0] else 0)\n"
     )
     for _ in range(30):
@@ -1644,6 +1647,9 @@ def _private_installation_active(instance: Instance, ids: dict[str, str]) -> boo
                 "/opt/venv/bin/python",
                 "-c",
                 script,
+                ids["organizationId"],
+                ids["workspaceId"],
+                ids["tenantId"].lower(),
                 ids["actorOid"].lower(),
                 ids["botAppId"].lower(),
             ],
@@ -1751,7 +1757,7 @@ def cmd_up(args: argparse.Namespace) -> int:
     _compose(
         instance, "--profile", "hfdev-tools", "up", "-d", "--no-build", "hfdev-probe", capture=True
     )
-    if _read_json(instance.identity_path).get("workMode") == "private":
+    if _work_mode(instance) == "private":
         began = time.monotonic()
         installation = _probe(instance, "install")
         if not installation["delivered"]:
@@ -1861,6 +1867,19 @@ def _final_tool_digests(model: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _reply_quotes_tool_result(reply: dict[str, Any] | None, digests: list[str]) -> bool:
+    """The reply must be the model's own answer.
+
+    A failed task's notice is the error followed by the task output, so it can hold the model's
+    text and digest. Only an answer that starts with the marker is the answer itself.
+    """
+
+    if not reply:
+        return False
+    text = reply.get("text", "")
+    return text.startswith(REPLY_OK_PREFIX) and any(digest in text for digest in digests)
+
+
 def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     """Turn one driver result into named checks plus a run-independent digest."""
 
@@ -1879,9 +1898,7 @@ def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     checks["modelRequestedDirectoryTool"] = "tool_call" in decisions
     checks["modelReceivedToolResult"] = "final_after_tool" in decisions
     checks["toolResultIsNotError"] = "final_after_tool_error" not in decisions
-    checks["replyQuotesToolResult"] = bool(reply) and any(
-        digest in reply["text"] for digest in tool_digests
-    )
+    checks["replyQuotesToolResult"] = _reply_quotes_tool_result(reply, tool_digests)
     normalized = {
         "checks": checks,
         "negativeStatuses": {
@@ -1937,7 +1954,8 @@ LEDGER_QUERIES = {
         {
             "tasks": "SELECT task_id,status,created_at,started_at,ended_at,duration_ms,error "
             "FROM work_tasks ORDER BY created_at",
-            "notifications": "SELECT notification_type,recipient,status,created_at,updated_at,"
+            "notifications": "SELECT notification_id,notification_type,recipient,status,"
+            "created_at,updated_at,"
             "result_json FROM work_notifications ORDER BY created_at",
         },
     ),
@@ -1972,13 +1990,17 @@ def _ledgers(instance: Instance) -> dict[str, Any]:
     return output
 
 
-def _notification_count(instance: Instance) -> int:
-    """Rows already in the ledger; 0 if unreadable, so statuses are then over-reported."""
+def _ledger_ids(instance: Instance) -> tuple[set[str], set[str]] | None:
+    """Tasks and notifications already in the ledger, or None if it cannot be read."""
 
     try:
-        return len(_ledgers(instance)["navigator-persistence"]["notifications"])
+        work = _ledgers(instance)["navigator-persistence"]
     except (DevStackError, KeyError, subprocess.TimeoutExpired):
-        return 0
+        return None
+    return (
+        {row["task_id"] for row in work["tasks"]},
+        {row["notification_id"] for row in work["notifications"]},
+    )
 
 
 def _smoke_summary(instance: Instance, runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1991,7 +2013,7 @@ def _smoke_summary(instance: Instance, runs: list[dict[str, Any]]) -> dict[str, 
         "consistent": len(digests) == 1,
         "normalizedDigests": sorted(digests),
         "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
-        # False until the ledgers and fixture records are saved beside it.
+        # False until the ledgers are saved and show which rows belong to this smoke.
         "evidenceComplete": False,
     }
 
@@ -2002,7 +2024,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     instance = _instance(args)
     evidence = _evidence_run(instance, "smoke")
     started = time.time()
-    notifications_before = _notification_count(instance)
+    before = _ledger_ids(instance)
     runs = []
     for index in range(args.repeat):
         extra = ["--skip-negative"] if args.skip_negative else []
@@ -2025,16 +2047,26 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     # Observation, not a pass criterion: Navigator may record a delivered reply as
     # "uncertain" when the Teams provider's first send outlasts its 10 s request timeout.
     # Written into smoke.json itself; a later print-only field is not evidence.
-    # Rows from this smoke: a private task has two notifications, a channel task one.
-    summary["replyNotificationStatuses"] = [
-        row["status"]
-        for row in ledgers["navigator-persistence"]["notifications"][notifications_before:]
-    ]
-    summary["evidenceComplete"] = True
+    # Rows from this smoke: a private task has two notifications, a channel task one. Without
+    # the earlier read nothing can say which rows are new, so report that instead of guessing.
+    work = ledgers["navigator-persistence"]
+    tasks_completed: bool | None = None
+    statuses: list[str] | None = None
+    if before is not None:
+        new_tasks = [row for row in work["tasks"] if row["task_id"] not in before[0]]
+        tasks_completed = bool(new_tasks) and all(row["status"] == "completed" for row in new_tasks)
+        statuses = [
+            row["status"]
+            for row in work["notifications"]
+            if row["notification_id"] not in before[1]
+        ]
+    summary["replyNotificationStatuses"] = statuses
+    summary["tasksCompleted"] = tasks_completed
+    summary["evidenceComplete"] = before is not None
     _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _save_logs(instance, evidence, started)
     print(json.dumps({**summary, "evidence": str(evidence)}))
-    return 0 if summary["allPassed"] and summary["consistent"] else 1
+    return 0 if summary["allPassed"] and summary["consistent"] and tasks_completed else 1
 
 
 def _cgroup(container: str) -> dict[str, int] | None:
@@ -2232,11 +2264,11 @@ def _cold_start(
 
 
 def _reply_is_real(positive: dict[str, Any]) -> bool:
-    """A reply counts only if it quotes a tool result: a failure notice also quotes the nonce."""
+    """A reply counts only if it is the model's answer quoting the tool result."""
 
-    reply = positive.get("reply")
-    digests = _final_tool_digests(positive.get("model") or [])
-    return bool(reply) and any(digest in reply.get("text", "") for digest in digests)
+    return _reply_quotes_tool_result(
+        positive.get("reply"), _final_tool_digests(positive.get("model") or [])
+    )
 
 
 def _persistence_idle_throttle(container: str) -> float | None:
@@ -2278,7 +2310,8 @@ def _cpu_compare_medians(rows: list[dict[str, Any]], quotas: list[str]) -> dict[
         )
         summary[cpus] = {}
         for key in keys:
-            if not replies_valid and (key in reply_keys or "FirstMessage" in key):
+            after_messages = "FirstMessage" in key or key.endswith("MemoryMiB")
+            if not replies_valid and (key in reply_keys or after_messages):
                 summary[cpus][key] = None
             else:
                 summary[cpus][key] = median([row.get(key) for row in subset])
@@ -2300,7 +2333,7 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
     """
 
     instance = _instance(args)
-    if _read_json(instance.identity_path).get("workMode") == "private":
+    if _work_mode(instance) == "private":
         raise DevStackError(
             "cpu-compare needs legacy mode: each cycle runs longer than the two-minute idle "
             "limit of a DSH personal session, so every sample would fail"
@@ -2381,15 +2414,16 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
             "clock": "CLOCK_MONOTONIC",
             "order": "alternating",
             "replyPolicy": (
-                "invalid when a reply is not a real tool answer, persistenceTaskCount>=30, or "
-                "the idle throttle period ratio>=0.60; first and warm reply medians are then null"
+                "invalid when a reply is not the model's answer, a Persistence reading is "
+                "unavailable, persistenceTaskCount>=30, or the idle throttle period ratio>=0.60; "
+                "reply, ack, first-message CPU and memory medians are then null"
             ),
             "rows": rows,
             "medians": summary,
         },
     )
     print(json.dumps({"medians": summary, "evidence": str(evidence)}, indent=2))
-    return 0 if all(row["replyValid"] for row in rows) else 1
+    return 0 if rows and all(row["replyValid"] for row in rows) else 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:

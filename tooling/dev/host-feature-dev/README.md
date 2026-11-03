@@ -67,17 +67,20 @@ password and failing later inside directory migration.
 
 `cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
 `recreateCommandSeconds` and the inspected limit (`providerCpuLimit`, `ingressCpuLimit`, in
-cores) are recorded beside it. A reply counts only when it quotes the tool result the model
-answered from, because a failure notice also quotes the message. Reply, ack, and first-message
-CPU medians are null, and the exit code is 1, when a reply is not real, Persistence has at least
-30 tasks, its throttle-period ratio is 0.60 or more in the 10 s idle window sampled before
-sending, or either reading is unavailable. The thresholds were set on legacy mode at a 0.10
-Persistence quota. `cpu-compare` runs only in `legacy`, which on current `develop` needs the pins
-above. `measure` records the task count and a throttle ratio over its own window, and marks an
+cores) are recorded beside it. A reply counts only when it starts with the model's answer marker
+and quotes the tool result, because a failed task's notice is the error followed by the task's
+output, which can hold the same text. Reply, ack, first-message CPU, and memory medians are null,
+and the exit code is 1, when a reply is not real, Persistence has at least 30 tasks, its
+throttle-period ratio is 0.60 or more in the 10 s idle window sampled before sending, or either
+reading is unavailable. The thresholds were set on legacy mode at a 0.10 Persistence quota.
+`cpu-compare` refuses `private`, and on current `develop` only pinned `legacy` produces replies
+at all. `measure` records the task count and a throttle ratio over its own window, and marks an
 unavailable reading as not comparable.
 
-`smoke.json` is written after each run with `evidenceComplete: false`, and becomes true once the
-ledgers are saved. `replyNotificationStatuses` covers notifications created during that smoke.
+`smoke` also fails if a task it started did not complete. `smoke.json` is written after each run
+with `evidenceComplete: false`, and becomes true once the ledgers are saved and the ledger was
+readable at the start. `replyNotificationStatuses` and `tasksCompleted` cover rows created during
+that smoke, and are null if the ledger could not be read at the start.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -96,7 +99,9 @@ IDs on the same Docker store. Image tags carry the instance name.
 `private` mode is not a production configuration. It would fail production preflight, which on
 this route expects seven principals, five actors, and `automation-source-bindings.json`; here
 there are three principals and one actor, and the session principal also has
-`can_write_harness`. No Graph provider runs, so credential-health notices are not exercised.
+`can_write_harness`. `teams-actor-subjects.json` is written once by `init`, and the probe posts
+straight to `teams-ingress` without the public ingress. No Graph provider runs, so
+credential-health notices are not exercised.
 Negative cases stop at the signature and tenant checks: a non-owner actor, a message before
 install, and `action: remove` are not covered.
 
