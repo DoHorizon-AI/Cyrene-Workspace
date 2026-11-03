@@ -1,5 +1,6 @@
 # Developer overlay for tooling/deploy/teams-cloud/compose.yaml + compose.computer-runtime.yaml.
-# Actor work mode also adds compose.automation-workflows.yaml. The default work mode is legacy.
+# Actor and private work modes also add compose.automation-workflows.yaml.
+# The default work mode is legacy.
 # hfdev.py renders every ${...} value into the instance compose.env; do not run this file alone.
 #
 # Differences from the production base Compose:
