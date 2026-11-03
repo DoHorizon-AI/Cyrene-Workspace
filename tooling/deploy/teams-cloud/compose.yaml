@@ -322,6 +322,7 @@ services:
     environment:
       CYRENE_HARNESS_MODEL_SOURCE: codebuddy
       CYRENE_HARNESS_MODEL: ${CYRENE_HARNESS_MODEL:-glm-5.3-flash}
+      CYRENE_ORGANIZATION_ID: ${CYRENE_ORGANIZATION_ID:?organization ID is required}
       CYRENE_WORKSPACE_ID: ${CYRENE_WORKSPACE_ID:?workspace ID is required}
       CYRENE_PERSISTENCE_URL: https://navigator-persistence:8080
       CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "1"
