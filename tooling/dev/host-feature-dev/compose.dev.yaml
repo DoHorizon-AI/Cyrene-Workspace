@@ -1,0 +1,432 @@
+# Developer overlay for tooling/deploy/teams-cloud/compose.yaml + compose.computer-runtime.yaml.
+# Actor work mode also adds compose.automation-workflows.yaml. The default work mode is legacy.
+# hfdev.py renders every ${...} value into the instance compose.env; do not run this file alone.
+#
+# Differences from the production base Compose:
+#   * every network is internal and uses an explicit subnet from 10.249.0.0/16;
+#   * Navigator uses the DSH executor and the OpenAI-compatible stub model, not CodeBuddy/ACP;
+#   * CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS is 2 (the base file's "1" fails serve.ts, range 2..32);
+#   * the Navigator principal fixture sets can_write_harness (the production template omits it);
+#   * Exchange depends_on overrides the base list and adds teams-provider and computer-runtime-proxy;
+#   * Teams containers trust one extra fixture CA for the Microsoft endpoint fixtures;
+#   * GitHub Issues is not started (computer-runtime is the one tool plugin);
+#   * two fixture services, one maintainer job, and one probe container are added.
+# 中文：默认是 legacy。差异含 DSH、can_write_harness、并发 2、Exchange 的 depends_on。
+
+x-hfdev-labels: &hfdev-labels
+  io.cyrene.task: host-feature-split-20261102
+  io.cyrene.owner: cursor
+  io.cyrene.managed-by: tooling/dev/host-feature-dev/hfdev.py
+
+x-hfdev-fixture-hardening: &hfdev-fixture-hardening
+  pull_policy: never
+  user: "10001:10001"
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,size=16m
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  postgres:
+    labels: *hfdev-labels
+
+  workspace-authority:
+    labels: *hfdev-labels
+
+  directory-migrate:
+    labels: *hfdev-labels
+
+  directory-runtime-role-bootstrap:
+    labels: *hfdev-labels
+
+  account-center:
+    labels: *hfdev-labels
+
+  navigator-persistence:
+    labels: *hfdev-labels
+
+  navigator:
+    labels: *hfdev-labels
+    environment:
+      CYRENE_HARNESS_MODEL_SOURCE: exchange
+      CYRENE_HARNESS_MODEL: hfdev-stub-model
+      CYRENE_EXCHANGE_URL: https://model-stub:8443
+      CYRENE_CONVERSATION_ASSISTANT_ENABLED: "false"
+      # Base compose.yaml sets "1"; serve.ts validateTaskConcurrency requires 2..32.
+      # The production ACP overlay sets 2. This overlay does the same so the base file can start.
+      CYRENE_EXECUTOR_MAX_CONCURRENT_TASKS: "2"
+      DSH_TELEMETRY_DISABLED: "1"
+      # Rendered by hfdev.py: the base (or actor-Work overlay) map plus the stub model token.
+      CYRENE_SECRET_FILE_MAP: ${HFDEV_NAVIGATOR_SECRET_FILE_MAP:?}
+    secrets:
+      - source: hfdev-model-stub-token
+        target: hfdev-model-stub-token
+    depends_on:
+      model-stub:
+        condition: service_healthy
+
+  exchange:
+    labels: *hfdev-labels
+    depends_on: !override
+      workspace-authority:
+        condition: service_healthy
+      account-center:
+        condition: service_healthy
+      teams-provider:
+        condition: service_healthy
+      computer-runtime-proxy:
+        condition: service_healthy
+
+  github-issues:
+    profiles: [hfdev-disabled]
+
+  directory-operator:
+    profiles: [hfdev-disabled]
+
+  teams-public-ingress:
+    profiles: [hfdev-disabled]
+
+  teams-provider:
+    labels: *hfdev-labels
+    cpus: ${HFDEV_TEAMS_PROVIDER_CPUS:-0.05}
+    environment:
+      CYRENE_INTERNAL_CA_FILE: /run/secrets/hfdev-external-fixture-root-ca
+    secrets:
+      - source: hfdev-external-fixture-root-ca
+        target: hfdev-external-fixture-root-ca
+
+  teams-ingress:
+    labels: *hfdev-labels
+    cpus: ${HFDEV_TEAMS_INGRESS_CPUS:-0.05}
+    environment:
+      CYRENE_INTERNAL_CA_FILE: /run/secrets/hfdev-external-fixture-root-ca
+    secrets:
+      - source: hfdev-external-fixture-root-ca
+        target: hfdev-external-fixture-root-ca
+
+  computer-runtime:
+    labels: *hfdev-labels
+
+  computer-runtime-proxy:
+    labels: *hfdev-labels
+
+  # Answers only the Microsoft endpoints the Teams SDK calls. Reachable solely through
+  # private aliases; it validates the fixture bot secret and records every request.
+  microsoft-fixture:
+    <<: *hfdev-fixture-hardening
+    image: ${CYRENE_IMAGE_TEAMS_INGRESS:?build the developer images first}
+    restart: unless-stopped
+    labels:
+      <<: *hfdev-labels
+      io.cyrene.hfdev.role: fixture
+    entrypoint: ["python", "/opt/hfdev/microsoft_fixture.py"]
+    command:
+      - --config
+      - /run/secrets/hfdev-microsoft-fixture-config
+      - --cert
+      - /run/secrets/hfdev-microsoft-fixture-tls-cert
+      - --key
+      - /run/secrets/hfdev-microsoft-fixture-tls-key
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    volumes:
+      - type: bind
+        source: ${HFDEV_TOOL_DIR:?}/fixtures
+        target: /opt/hfdev
+        read_only: true
+    secrets:
+      - source: hfdev-microsoft-fixture-config
+        target: hfdev-microsoft-fixture-config
+      - source: hfdev-microsoft-fixture-tls-cert
+        target: hfdev-microsoft-fixture-tls-cert
+      - source: hfdev-microsoft-fixture-tls-key
+        target: hfdev-microsoft-fixture-tls-key
+    networks:
+      teams-egress:
+        aliases: [login.botframework.com]
+      teams-provider-egress:
+        aliases: [login.microsoftonline.com, smba.trafficmanager.net]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "/opt/hfdev/microsoft_fixture.py", "--health"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  # Deterministic OpenAI-compatible SSE model: one computer.directory.list call, then a
+  # final answer that quotes the tool result digest.
+  model-stub:
+    <<: *hfdev-fixture-hardening
+    image: ${CYRENE_IMAGE_TEAMS_INGRESS:?build the developer images first}
+    restart: unless-stopped
+    labels:
+      <<: *hfdev-labels
+      io.cyrene.hfdev.role: fixture
+    entrypoint: ["python", "/opt/hfdev/model_stub.py"]
+    command:
+      - --token-file
+      - /run/secrets/hfdev-model-stub-token
+      - --cert
+      - /run/secrets/hfdev-model-stub-tls-cert
+      - --key
+      - /run/secrets/hfdev-model-stub-tls-key
+    volumes:
+      - type: bind
+        source: ${HFDEV_TOOL_DIR:?}/fixtures
+        target: /opt/hfdev
+        read_only: true
+    secrets:
+      - source: hfdev-model-stub-token
+        target: hfdev-model-stub-token
+      - source: hfdev-model-stub-tls-cert
+        target: hfdev-model-stub-tls-cert
+      - source: hfdev-model-stub-tls-key
+        target: hfdev-model-stub-tls-key
+    networks:
+      navigator-egress:
+        aliases: [model-stub]
+    mem_limit: 96m
+    memswap_limit: 96m
+    cpus: "0.25"
+    pids_limit: 64
+    healthcheck:
+      test: ["CMD", "python", "/opt/hfdev/model_stub.py", "--health"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  # One-shot Directory maintainer grant for the fixture actor (operator URL only).
+  hfdev-directory-maintainer:
+    image: ${CYRENE_IMAGE_WORKSPACE_AUTHORITY:?build the developer images first}
+    pull_policy: never
+    restart: "no"
+    profiles: [hfdev-bootstrap]
+    labels: *hfdev-labels
+    entrypoint:
+      - /usr/local/bin/cyrene-secret-env-entrypoint
+      - /usr/local/bin/cy-workspace-directory-admin
+    environment:
+      CYRENE_SECRET_FILE_MAP: CYRENE_WORKSPACE_DIRECTORY_OPERATOR_DATABASE_URL=/run/secrets/directory-operator-database-url,CYRENE_WORKSPACE_DIRECTORY_DATABASE_URL=/run/secrets/directory-runtime-reader-database-url
+      CYRENE_WORKSPACE_DIRECTORY_OPERATOR_ID: ${CYRENE_DIRECTORY_OPERATOR_ACTOR_ID:?}
+    secrets:
+      - source: directory-operator-database-url
+        target: directory-operator-database-url
+      - source: directory-runtime-reader-database-url
+        target: directory-runtime-reader-database-url
+      - source: postgres-root-ca
+        target: postgres-root-ca
+    networks:
+      - directory-private
+    mem_limit: 64m
+    memswap_limit: 64m
+    cpus: "0.25"
+    pids_limit: 64
+
+  # Measurement and smoke driver. Not part of the stack under test; excluded from metrics.
+  hfdev-probe:
+    <<: *hfdev-fixture-hardening
+    image: ${CYRENE_IMAGE_TEAMS_INGRESS:?build the developer images first}
+    restart: "no"
+    profiles: [hfdev-tools]
+    labels:
+      <<: *hfdev-labels
+      io.cyrene.hfdev.role: tool
+    entrypoint: ["sleep", "infinity"]
+    # The Teams image's own HEALTHCHECK probes a port this container never serves.
+    healthcheck:
+      disable: true
+    volumes:
+      - type: bind
+        source: ${HFDEV_TOOL_DIR:?}/fixtures
+        target: /opt/hfdev
+        read_only: true
+    secrets:
+      - source: hfdev-smoke-config
+        target: hfdev-smoke-config
+      - source: hfdev-teams-fixture-signing-key
+        target: hfdev-teams-fixture-signing-key
+      - source: hfdev-teams-attacker-signing-key
+        target: hfdev-teams-attacker-signing-key
+      - source: hfdev-external-fixture-root-ca
+        target: hfdev-external-fixture-root-ca
+      - source: internal-service-root-ca
+        target: internal-service-root-ca
+      - source: teams-delivery-admin-token
+        target: teams-delivery-admin-token
+      - source: navigator-session-token
+        target: navigator-session-token
+      - source: exchange-plugin-root-ca
+        target: exchange-plugin-root-ca
+      - source: teams-connector-health-client-cert
+        target: teams-connector-health-client-cert
+      - source: teams-connector-health-client-key
+        target: teams-connector-health-client-key
+    networks:
+      teams-proxy-private: {}
+      navigator-teams-private: {}
+      teams-provider-private: {}
+      teams-provider-egress: {}
+      navigator-egress: {}
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: "0.5"
+    pids_limit: 64
+
+networks:
+  account-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_ACCOUNT_EGRESS:?}
+  account-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_ACCOUNT_PRIVATE:?}
+  cloud-management-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_CLOUD_MANAGEMENT_EGRESS:?}
+  cloud-management-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_CLOUD_MANAGEMENT_PRIVATE:?}
+  computer-runtime-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_COMPUTER_RUNTIME_PRIVATE:?}
+  directory-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_DIRECTORY_PRIVATE:?}
+  exchange-authority-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_EXCHANGE_AUTHORITY_PRIVATE:?}
+  exchange-computer-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_EXCHANGE_COMPUTER_PRIVATE:?}
+  github-account-center-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_GITHUB_ACCOUNT_CENTER_PRIVATE:?}
+  github-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_GITHUB_EGRESS:?}
+  github-exchange-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_GITHUB_EXCHANGE_PRIVATE:?}
+  ingress-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_INGRESS_EGRESS:?}
+  navigator-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_NAVIGATOR_EGRESS:?}
+  navigator-exchange-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_NAVIGATOR_EXCHANGE_PRIVATE:?}
+  navigator-persistence-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_NAVIGATOR_PERSISTENCE_PRIVATE:?}
+  navigator-teams-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_NAVIGATOR_TEAMS_PRIVATE:?}
+  teams-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_TEAMS_EGRESS:?}
+  teams-provider-egress:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_TEAMS_PROVIDER_EGRESS:?}
+  teams-provider-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_TEAMS_PROVIDER_PRIVATE:?}
+  teams-proxy-private:
+    internal: true
+    labels: *hfdev-labels
+    ipam:
+      config:
+        - subnet: ${HFDEV_SUBNET_TEAMS_PROXY_PRIVATE:?}
+
+secrets:
+  hfdev-external-fixture-root-ca:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-external-fixture-root-ca
+  hfdev-microsoft-fixture-config:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-microsoft-fixture-config
+  hfdev-microsoft-fixture-tls-cert:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-microsoft-fixture-tls-cert
+  hfdev-microsoft-fixture-tls-key:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-microsoft-fixture-tls-key
+  hfdev-model-stub-token:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-model-stub-token
+  hfdev-model-stub-tls-cert:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-model-stub-tls-cert
+  hfdev-model-stub-tls-key:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-model-stub-tls-key
+  hfdev-smoke-config:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-smoke-config
+  hfdev-teams-fixture-signing-key:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-teams-fixture-signing-key
+  hfdev-teams-attacker-signing-key:
+    file: ${CYRENE_SECRETS_DIR:?}/hfdev-teams-attacker-signing-key
