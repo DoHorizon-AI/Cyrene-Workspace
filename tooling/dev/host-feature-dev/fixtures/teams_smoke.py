@@ -193,9 +193,9 @@ def _installation_activity(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def install(config: dict[str, Any], timeout: float) -> dict[str, Any]:
-    """Post the install and wait until ingress delivers it to Navigator."""
+    """Post the install and wait until ingress delivers it to Navigator or gives up on it."""
 
-    delivered_before = int(_delivery_status(config)["delivered_count"])
+    before = _delivery_status(config)
     status, ack_seconds = _post_activity(
         config, _installation_activity(config), _token(config, SIGNING_KEY)
     )
@@ -207,11 +207,15 @@ def install(config: dict[str, Any], timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while status == 200 and time.monotonic() < deadline:
         counts = _delivery_status(config)
-        if int(counts["delivered_count"]) > delivered_before:
+        if int(counts["delivered_count"]) > int(before["delivered_count"]):
             result["delivered"] = True
             break
+        if any(int(counts[name]) > int(before[name]) for name in ("rejected_count", "dead_count")):
+            result["refused"] = True
+            break
         time.sleep(0.2)
-    result["queue"] = {name: _delivery_status(config)[name] for name in QUEUE_COUNTS}
+    counts = _delivery_status(config)
+    result["queue"] = {name: counts[name] for name in QUEUE_COUNTS}
     return result
 
 

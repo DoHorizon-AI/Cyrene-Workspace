@@ -49,8 +49,10 @@ files inside the instance directory so service UIDs 10001/999 can read them.
 ```bash
 cd Cyrene-Workspace
 # This pin is only Navigator aa128de and Exchange 279a1e0. Plugins and Platform stay on
-# develop. Unpinned `run` follows origin/develop and currently fails (H0-01, H0-02).
-# 钉住的只是 Navigator 与 Exchange；Plugins、Platform 仍是 develop。不钉则按 origin/develop，目前会失败。
+# develop. Unpinned legacy `run` follows origin/develop and stops at task visibility (H0-02);
+# unpinned `run --work-mode private` passes, within the limit described below.
+# 钉住的只是 Navigator 与 Exchange；Plugins、Platform 仍是 develop。不钉时 legacy 会停在任务可见性问题上，
+# private 模式能走通，但有下面说明的限制。
 python3 tooling/dev/host-feature-dev/hfdev.py --instance h0 run \
   --pin navigator=aa128de69058f36f8b8ed97fae4a9e7773dea168 \
   --pin exchange=279a1e09efd0fb10096822d57b9de0e574b8f5e9
@@ -65,11 +67,17 @@ password and failing later inside directory migration.
 
 `cpu-compare` alternates quotas. `readySeconds` includes the compose recreate command;
 `recreateCommandSeconds` and the inspected limit (`providerCpuLimit`, `ingressCpuLimit`, in
-cores) are recorded beside it. A reply counts only when the model answered after a real tool
-result, because a failure notice also quotes the message. First and warm reply medians are null
-when a reply is not real, Persistence has at least 30 tasks, or its throttle-period ratio is
-0.60 or more in the idle window sampled before sending. `measure` records the same task count
-and throttle ratio.
+cores) are recorded beside it. A reply counts only when it quotes the tool result the model
+answered from, because a failure notice also quotes the message. Reply, ack, and first-message
+CPU medians are null, and the exit code is 1, when a reply is not real, Persistence has at least
+30 tasks, its throttle-period ratio is 0.60 or more in the 10 s idle window sampled before
+sending, or either reading is unavailable. The thresholds were set on legacy mode at a 0.10
+Persistence quota. `cpu-compare` runs only in `legacy`, which on current `develop` needs the pins
+above. `measure` records the task count and a throttle ratio over its own window, and marks an
+unavailable reading as not comparable.
+
+`smoke.json` is written after each run with `evidenceComplete: false`, and becomes true once the
+ledgers are saved. `replyNotificationStatuses` covers notifications created during that smoke.
 
 `build --pin exchange=<40-char SHA>` (also `platform`, `plugins`, `navigator`) overrides the
 default `develop` head of a repository; `run` accepts the same `--pin` options. The Workspace
@@ -83,7 +91,14 @@ IDs on the same Docker store. Image tags carry the instance name.
 | --- | --- | --- |
 | `legacy` (default) | base + computer-runtime + dev overlay | Production base configuration: one Navigator service principal. |
 | `actor` | adds `compose.automation-workflows.yaml` | Actor-scoped Work tokens (`CYRENE_WORK_ACTOR_TOKEN_MAP_FILE`, `CYRENE_TEAMS_MODEL_ACTOR_SUBJECT`). |
-| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. On DSH a personal session fails after about two minutes idle and a Navigator restart does not recover it, so use a fresh stack and run `smoke` promptly. `cpu-compare` cycles run longer than that, so it needs `legacy`. |
+| `private` | same as `actor` | Adds the private-delivery policy. `up` posts a signed bot install; `smoke` sends a personal message and expects the reply in that conversation. Closest to production's path, but still DSH and fixtures, not `codebuddy-acp`. On DSH a personal session fails after about two minutes idle and a Navigator restart does not recover it, so use a fresh stack and run `smoke` promptly. `cpu-compare` cycles run longer than that, so it refuses this mode. |
+
+`private` mode is not a production configuration. It would fail production preflight, which on
+this route expects seven principals, five actors, and `automation-source-bindings.json`; here
+there are three principals and one actor, and the session principal also has
+`can_write_harness`. No Graph provider runs, so credential-health notices are not exercised.
+Negative cases stop at the signature and tenant checks: a non-owner actor, a message before
+install, and `action: remove` are not covered.
 
 Run several instances side by side with distinct `--instance` names; each gets its own
 project, subnet block, keys, and image tags.

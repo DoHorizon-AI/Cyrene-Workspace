@@ -875,7 +875,7 @@ def _refuse_leftover_volumes(names: list[str]) -> None:
     shown = ", ".join(names[:4])
     extra = f" (+{len(names) - 4} more)" if len(names) > 4 else ""
     raise DevStackError(
-        "Postgres and service volumes from an earlier `down` are still present "
+        "Postgres and service volumes from an earlier run are still present "
         f"({shown}{extra}). They keep the previous database password, so a new `init` "
         'fails about a minute later as "Directory migration did not succeed". '
         "Run `down --volumes` before `init`."
@@ -1115,6 +1115,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     }
     if args.work_mode == "private":
         principal_config["teams_private_conversations"] = {
+            "actor_subjects_file_env": "TEAMS_TASK_ACTOR_SUBJECTS_FILE",
             "workspace_id": ids["workspaceId"],
             "issuer": ids["issuer"],
             "tenant_id": ids["tenantId"],
@@ -1624,6 +1625,36 @@ def _directory_maintainer(instance: Instance, ids: dict[str, str]) -> dict[str, 
     return json.loads(current.splitlines()[-1])
 
 
+def _private_installation_active(instance: Instance, ids: dict[str, str]) -> bool:
+    """Read the install from Work: ingress counters only show that something was delivered."""
+
+    script = (
+        "import sqlite3,sys\n"
+        "c=sqlite3.connect('file:/var/lib/cyrene-navigator/persistence.db?mode=ro',uri=True)\n"
+        "row=c.execute('SELECT active FROM work_private_installations "
+        "WHERE actor_aad_object_id=? AND bot_app_id=?',sys.argv[1:3]).fetchone()\n"
+        "print(1 if row and row[0] else 0)\n"
+    )
+    for _ in range(30):
+        completed = _run(
+            [
+                "docker",
+                "exec",
+                _container_id(instance, "navigator-persistence"),
+                "/opt/venv/bin/python",
+                "-c",
+                script,
+                ids["actorOid"].lower(),
+                ids["botAppId"].lower(),
+            ],
+            capture=True,
+        )
+        if completed.stdout.strip() == b"1":
+            return True
+        time.sleep(1)
+    return False
+
+
 def cmd_up(args: argparse.Namespace) -> int:
     """Start the stack in production cold-start order and record phase timings."""
 
@@ -1725,6 +1756,8 @@ def cmd_up(args: argparse.Namespace) -> int:
         installation = _probe(instance, "install")
         if not installation["delivered"]:
             raise DevStackError(f"Private bot installation was not delivered: {installation}")
+        if not _private_installation_active(instance, ids):
+            raise DevStackError("Work has no active private installation for the fixture user")
         phase("private-installation", began)
     guard = _guard_runtime(instance)
     report = {
@@ -1818,6 +1851,16 @@ def _probe(instance: Instance, *args: str, timeout: float = 600) -> dict[str, An
     return json.loads(output.strip().splitlines()[-1])
 
 
+def _final_tool_digests(model: list[dict[str, Any]]) -> list[str]:
+    """Digests of the tool results the model answered from."""
+
+    return [
+        row["toolResultSha256"]
+        for row in model
+        if row.get("toolResultSha256") and row.get("decision") == "final_after_tool"
+    ]
+
+
 def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     """Turn one driver result into named checks plus a run-independent digest."""
 
@@ -1825,11 +1868,7 @@ def evaluate_smoke(result: dict[str, Any]) -> dict[str, Any]:
     reply = positive.get("reply")
     model = positive.get("model") or []
     decisions = [row.get("decision") for row in model]
-    tool_digests = [
-        row["toolResultSha256"]
-        for row in model
-        if row.get("toolResultSha256") and row.get("decision") == "final_after_tool"
-    ]
+    tool_digests = _final_tool_digests(model)
     checks: dict[str, bool] = {}
     if "negative" in result:
         checks["forgedOrUnscopedActivitiesRejectedWithoutQueue"] = bool(result["negative"]["ok"])
@@ -1933,12 +1972,37 @@ def _ledgers(instance: Instance) -> dict[str, Any]:
     return output
 
 
+def _notification_count(instance: Instance) -> int:
+    """Rows already in the ledger; 0 if unreadable, so statuses are then over-reported."""
+
+    try:
+        return len(_ledgers(instance)["navigator-persistence"]["notifications"])
+    except (DevStackError, KeyError, subprocess.TimeoutExpired):
+        return 0
+
+
+def _smoke_summary(instance: Instance, runs: list[dict[str, Any]]) -> dict[str, Any]:
+    digests = {run["verdict"]["normalizedSha256"] for run in runs}
+    return {
+        "schemaVersion": "cyrene-hfdev-smoke-v1",
+        "instance": instance.name,
+        "runs": len(runs),
+        "allPassed": all(run["verdict"]["passed"] for run in runs),
+        "consistent": len(digests) == 1,
+        "normalizedDigests": sorted(digests),
+        "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
+        # False until the ledgers and fixture records are saved beside it.
+        "evidenceComplete": False,
+    }
+
+
 def cmd_smoke(args: argparse.Namespace) -> int:
     """Run the signed-event → Navigator → Exchange → tool → reply path N times."""
 
     instance = _instance(args)
     evidence = _evidence_run(instance, "smoke")
     started = time.time()
+    notifications_before = _notification_count(instance)
     runs = []
     for index in range(args.repeat):
         extra = ["--skip-negative"] if args.skip_negative else []
@@ -1950,28 +2014,23 @@ def cmd_smoke(args: argparse.Namespace) -> int:
             f"reply={result['positive'].get('replySeconds')}s digest={verdict['normalizedSha256'][:12]}",
             flush=True,
         )
-    positive_digests = {run["verdict"]["normalizedSha256"] for run in runs}
-    summary = {
-        "schemaVersion": "cyrene-hfdev-smoke-v1",
-        "instance": instance.name,
-        "runs": len(runs),
-        "allPassed": all(run["verdict"]["passed"] for run in runs),
-        "consistent": len(positive_digests) == 1,
-        "normalizedDigests": sorted(positive_digests),
-        "replySeconds": [run["result"]["positive"].get("replySeconds") for run in runs],
-    }
-    # The verdict goes to disk first, so a failed ledger read cannot lose it.
-    _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
+        # Each finished run goes to disk at once, so a later failure cannot lose it.
+        _write_json(
+            evidence / "smoke.json", {"summary": _smoke_summary(instance, runs), "runs": runs}
+        )
+    summary = _smoke_summary(instance, runs)
     _write_json(evidence / "fixture-ledgers.json", _probe(instance, "captured"))
     ledgers = _ledgers(instance)
     _write_json(evidence / "service-ledgers.json", ledgers)
     # Observation, not a pass criterion: Navigator may record a delivered reply as
     # "uncertain" when the Teams provider's first send outlasts its 10 s request timeout.
     # Written into smoke.json itself; a later print-only field is not evidence.
-    # Every row in the ledger: a private task has two notifications, a channel task one.
+    # Rows from this smoke: a private task has two notifications, a channel task one.
     summary["replyNotificationStatuses"] = [
-        row["status"] for row in ledgers["navigator-persistence"]["notifications"]
+        row["status"]
+        for row in ledgers["navigator-persistence"]["notifications"][notifications_before:]
     ]
+    summary["evidenceComplete"] = True
     _write_json(evidence / "smoke.json", {"summary": summary, "runs": runs})
     _save_logs(instance, evidence, started)
     print(json.dumps({**summary, "evidence": str(evidence)}))
@@ -2019,11 +2078,14 @@ def _throttle_period_ratio(
 
 
 def _persistence_saturated(task_count: int | None, throttle_ratio: float | None) -> bool:
-    """True when reply time is no longer evidence about the Teams CPU quota."""
+    """True unless both readings show reply time is still evidence about the Teams quota."""
 
-    if task_count is not None and task_count >= PERSISTENCE_TASK_SATURATION:
+    if task_count is None or throttle_ratio is None:
         return True
-    return throttle_ratio is not None and throttle_ratio >= PERSISTENCE_THROTTLE_SATURATION
+    return (
+        task_count >= PERSISTENCE_TASK_SATURATION
+        or throttle_ratio >= PERSISTENCE_THROTTLE_SATURATION
+    )
 
 
 def _persistence_task_count(instance: Instance) -> int | None:
@@ -2170,10 +2232,11 @@ def _cold_start(
 
 
 def _reply_is_real(positive: dict[str, Any]) -> bool:
-    """A reply counts only after a real tool result: a failure notice also quotes the nonce."""
+    """A reply counts only if it quotes a tool result: a failure notice also quotes the nonce."""
 
-    decisions = [row.get("decision") for row in positive.get("model") or []]
-    return bool(positive.get("reply")) and "final_after_tool" in decisions
+    reply = positive.get("reply")
+    digests = _final_tool_digests(positive.get("model") or [])
+    return bool(reply) and any(digest in reply.get("text", "") for digest in digests)
 
 
 def _persistence_idle_throttle(container: str) -> float | None:
@@ -2192,6 +2255,39 @@ def _ready_after_recreate(start: dict[str, Any]) -> float | None:
     return round(ready - command, 3)
 
 
+def _cpu_compare_medians(rows: list[dict[str, Any]], quotas: list[str]) -> dict[str, Any]:
+    """Median each metric per quota; any invalid sample nulls what depends on the messages."""
+
+    def median(values: list[float | None]) -> float | None:
+        clean = sorted(value for value in values if value is not None)
+        if not clean:
+            return None
+        middle = len(clean) // 2
+        return (
+            clean[middle] if len(clean) % 2 else round((clean[middle - 1] + clean[middle]) / 2, 3)
+        )
+
+    summary: dict[str, Any] = {}
+    reply_keys = {"firstAckSeconds", "firstReplySeconds", "warmAckSeconds", "warmReplySeconds"}
+    for cpus in quotas:
+        subset = [row for row in rows if row["cpus"] == float(cpus)]
+        replies_valid = all(row.get("replyValid") for row in subset) and bool(subset)
+        keys = sorted(
+            {key for row in subset for key in row}
+            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "replyValid"}
+        )
+        summary[cpus] = {}
+        for key in keys:
+            if not replies_valid and (key in reply_keys or "FirstMessage" in key):
+                summary[cpus][key] = None
+            else:
+                summary[cpus][key] = median([row.get(key) for row in subset])
+        summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
+        summary[cpus]["samples"] = len(subset)
+        summary[cpus]["replyComparison"] = "valid" if replies_valid else "invalid"
+    return summary
+
+
 def cmd_cpu_compare(args: argparse.Namespace) -> int:
     """Cold-start both Teams roles under each CPU quota and measure real CPU seconds.
 
@@ -2204,6 +2300,11 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
     """
 
     instance = _instance(args)
+    if _read_json(instance.identity_path).get("workMode") == "private":
+        raise DevStackError(
+            "cpu-compare needs legacy mode: each cycle runs longer than the two-minute idle "
+            "limit of a DSH personal session, so every sample would fail"
+        )
     evidence = _evidence_run(instance, "cpu-compare")
     rows = []
     for cpus, repeat in _cpu_sample_order(args.cpus, args.repeat):
@@ -2273,33 +2374,7 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
     _wait_healthy(instance, "exchange", 300)
     _cold_start(instance, "teams-ingress", "ingress", "0.05")
 
-    def median(values: list[float | None]) -> float | None:
-        clean = sorted(value for value in values if value is not None)
-        if not clean:
-            return None
-        middle = len(clean) // 2
-        return (
-            clean[middle] if len(clean) % 2 else round((clean[middle - 1] + clean[middle]) / 2, 3)
-        )
-
-    summary = {}
-    reply_keys = {"firstAckSeconds", "firstReplySeconds", "warmAckSeconds", "warmReplySeconds"}
-    for cpus in args.cpus:
-        subset = [row for row in rows if row["cpus"] == float(cpus)]
-        replies_valid = all(row.get("replyValid") for row in subset) and bool(subset)
-        keys = sorted(
-            {key for row in subset for key in row}
-            - {"cpus", "repeat", "firstReplyOk", "persistenceSaturated", "replyValid"}
-        )
-        summary[cpus] = {}
-        for key in keys:
-            if key in reply_keys and not replies_valid:
-                summary[cpus][key] = None
-            else:
-                summary[cpus][key] = median([row.get(key) for row in subset])
-        summary[cpus]["allRepliesOk"] = all(row["firstReplyOk"] for row in subset)
-        summary[cpus]["samples"] = len(subset)
-        summary[cpus]["replyComparison"] = "valid" if replies_valid else "invalid"
+    summary = _cpu_compare_medians(rows, args.cpus)
     _write_json(
         evidence / "cpu-compare.json",
         {
@@ -2314,7 +2389,7 @@ def cmd_cpu_compare(args: argparse.Namespace) -> int:
         },
     )
     print(json.dumps({"medians": summary, "evidence": str(evidence)}, indent=2))
-    return 0 if all(row["firstReplyOk"] for row in rows) else 1
+    return 0 if all(row["replyValid"] for row in rows) else 1
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -2360,7 +2435,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-mode",
         choices=WORK_MODES,
         default="legacy",
-        help="legacy: production base Compose (default); actor: add compose.automation-workflows.yaml",
+        help="legacy: production base Compose (default); actor: add "
+        "compose.automation-workflows.yaml; private: also enable private delivery",
     )
     init.set_defaults(handler=cmd_init)
 
@@ -2409,6 +2485,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.handler(args)
     except DevStackError as error:
         print(f"hfdev: {error}", file=sys.stderr)
+        return 2
+    except subprocess.TimeoutExpired as error:
+        print(f"hfdev: command timed out after {error.timeout} s", file=sys.stderr)
         return 2
 
 

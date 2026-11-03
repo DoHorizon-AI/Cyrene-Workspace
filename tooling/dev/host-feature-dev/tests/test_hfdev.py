@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 import uuid
@@ -295,26 +296,272 @@ def test_persistence_saturation_marks_the_known_threshold():
     )
 
 
-def test_smoke_evidence_includes_notification_statuses():
-    source = (TOOL_DIR / "hfdev.py").read_text(encoding="utf-8")
-    smoke = source.split("def cmd_smoke", 1)[1].split("\ndef ", 1)[0]
-    status_at = smoke.index('summary["replyNotificationStatuses"]')
-    write_at = smoke.rindex('_write_json(evidence / "smoke.json"')
-    assert status_at < write_at
+REAL_MODEL = [
+    {"decision": "tool_call"},
+    {"decision": "final_after_tool", "toolResultSha256": "abc123"},
+]
 
 
-def test_smoke_verdict_reaches_disk_before_the_ledger_read():
-    source = (TOOL_DIR / "hfdev.py").read_text(encoding="utf-8")
-    smoke = source.split("def cmd_smoke", 1)[1].split("\ndef ", 1)[0]
-    assert smoke.index('_write_json(evidence / "smoke.json"') < smoke.index("_ledgers(instance)")
+def _real_send(seconds=2.0):
+    return {
+        "positive": {
+            "ackStatus": 200,
+            "ackSeconds": 0.1,
+            "replySeconds": seconds,
+            "reply": {
+                "text": "ok abc123",
+                "textTemplate": "ok abc123",
+                "authorized": True,
+                "conversationMatches": True,
+            },
+            "model": REAL_MODEL,
+        }
+    }
+
+
+def _notice_send():
+    positive = _real_send()["positive"]
+    positive["reply"] = {"text": "failed: hfdev-nonce-1", "textTemplate": "failed"}
+    return {"positive": positive}
 
 
 def test_a_failure_notice_quoting_the_nonce_is_not_a_real_reply():
     notice = {"reply": {"text": "failed: hfdev-nonce-1"}, "model": [{"decision": "tool_call"}]}
     assert not hfdev._reply_is_real(notice)
-    assert not hfdev._reply_is_real({"reply": None, "model": [{"decision": "final_after_tool"}]})
-    answer = {"reply": {"text": "ok"}, "model": [{"decision": "final_after_tool"}]}
-    assert hfdev._reply_is_real(answer)
+    assert not hfdev._reply_is_real({"reply": None, "model": REAL_MODEL})
+    # The model finished, then the task failed: the notice still does not quote the result.
+    assert not hfdev._reply_is_real(_notice_send()["positive"])
+    assert hfdev._reply_is_real(_real_send()["positive"])
+
+
+def test_an_unknown_persistence_reading_counts_as_saturated():
+    assert hfdev._persistence_saturated(None, 0.1)
+    assert hfdev._persistence_saturated(1, None)
+    assert hfdev._persistence_saturated(None, None)
+
+
+def _fake_cpu_compare(monkeypatch, tmp_path, sends, *, task_count=1, throttle=0.1, mode="legacy"):
+    identity = tmp_path / "identity.json"
+    identity.write_text(f'{{"workMode": "{mode}"}}', encoding="utf-8")
+    instance = SimpleNamespace(name="t", identity_path=identity)
+    start = {
+        "readySeconds": 2.0,
+        "recreateCommandSeconds": 1.0,
+        "cgroupAtReady": {"usage_usec": 1_000_000, "throttled_usec": 0},
+    }
+    queue = iter(sends)
+    monkeypatch.setattr(hfdev, "_instance", lambda args: instance)
+    monkeypatch.setattr(hfdev, "_evidence_run", lambda inst, label: tmp_path)
+    monkeypatch.setattr(hfdev, "_cold_start", lambda *args: ("container", start))
+    monkeypatch.setattr(hfdev, "_recreate", lambda *args: "container")
+    monkeypatch.setattr(hfdev, "_wait_healthy", lambda *args: None)
+    monkeypatch.setattr(hfdev, "_container_id", lambda *args: "container")
+    monkeypatch.setattr(hfdev, "_persistence_task_count", lambda inst: task_count)
+    monkeypatch.setattr(hfdev, "_persistence_idle_throttle", lambda container: throttle)
+    monkeypatch.setattr(hfdev, "_cpu_limit", lambda container: 0.5)
+    monkeypatch.setattr(
+        hfdev,
+        "_cgroup",
+        lambda container: {"usage_usec": 2_000_000, "throttled_usec": 0, "memory_current": 1},
+    )
+    monkeypatch.setattr(hfdev, "_probe", lambda inst, *args: next(queue))
+    args = SimpleNamespace(cpus=["0.5"], repeat=1)
+    code = hfdev.cmd_cpu_compare(args)
+    data = json.loads((tmp_path / "cpu-compare.json").read_text(encoding="utf-8"))
+    return code, data["rows"][0], data["medians"]["0.5"]
+
+
+def test_cpu_compare_reports_real_replies_as_a_valid_comparison(monkeypatch, tmp_path):
+    code, row, medians = _fake_cpu_compare(
+        monkeypatch, tmp_path, [_real_send(9.0), _real_send(2.0)]
+    )
+    assert code == 0
+    assert row["replyValid"] is True
+    assert medians["firstReplySeconds"] == 9.0
+    assert medians["warmReplySeconds"] == 2.0
+    assert medians["replyComparison"] == "valid"
+
+
+def test_cpu_compare_does_not_count_a_failure_notice(monkeypatch, tmp_path):
+    code, row, medians = _fake_cpu_compare(monkeypatch, tmp_path, [_notice_send(), _real_send()])
+    assert code == 1
+    assert row["firstReplySeconds"] is None
+    assert row["replyValid"] is False
+    assert medians["replyComparison"] == "invalid"
+    for key in ("firstReplySeconds", "warmReplySeconds", "ingressFirstMessageCpuSeconds"):
+        assert medians[key] is None
+    assert medians["ingressReadySeconds"] == 2.0
+
+
+@pytest.mark.parametrize(
+    "readings",
+    [
+        {"task_count": 30},
+        {"throttle": 0.6},
+        {"task_count": None},
+        {"throttle": None},
+    ],
+)
+def test_cpu_compare_is_invalid_when_persistence_is_not_known_to_be_free(
+    monkeypatch, tmp_path, readings
+):
+    code, _, medians = _fake_cpu_compare(
+        monkeypatch, tmp_path, [_real_send(), _real_send()], **readings
+    )
+    assert code == 1
+    assert medians["replyComparison"] == "invalid"
+    assert medians["firstReplySeconds"] is None
+
+
+def test_cpu_compare_refuses_private_mode(monkeypatch, tmp_path):
+    with pytest.raises(hfdev.DevStackError, match="legacy"):
+        _fake_cpu_compare(monkeypatch, tmp_path, [], mode="private")
+
+
+def _fake_smoke(monkeypatch, tmp_path, sends, ledgers, *, repeat=1):
+    instance = SimpleNamespace(name="t")
+    queue = iter(sends)
+    ledger_queue = iter(ledgers)
+
+    def probe(inst, command, *args):
+        if command == "captured":
+            return {"fixture": [], "model": []}
+        item = next(queue)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def read_ledgers(inst):
+        item = next(ledger_queue)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(hfdev, "_instance", lambda args: instance)
+    monkeypatch.setattr(hfdev, "_evidence_run", lambda inst, label: tmp_path)
+    monkeypatch.setattr(hfdev, "_probe", probe)
+    monkeypatch.setattr(hfdev, "_ledgers", read_ledgers)
+    monkeypatch.setattr(hfdev, "_save_logs", lambda *args: None)
+    return SimpleNamespace(repeat=repeat, skip_negative=True, timeout=1.0)
+
+
+def _ledger(*statuses):
+    return {"navigator-persistence": {"notifications": [{"status": s} for s in statuses]}}
+
+
+def test_smoke_keeps_the_verdict_when_the_final_ledger_read_fails(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send()],
+        [_ledger(), hfdev.DevStackError("no ledger")],
+    )
+    with pytest.raises(hfdev.DevStackError):
+        hfdev.cmd_smoke(args)
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["evidenceComplete"] is False
+    assert summary["runs"] == 1
+
+
+def test_smoke_keeps_finished_runs_when_a_later_probe_fails(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send(), hfdev.DevStackError("probe failed")],
+        [_ledger()],
+        repeat=2,
+    )
+    with pytest.raises(hfdev.DevStackError):
+        hfdev.cmd_smoke(args)
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["runs"] == 1
+    assert summary["evidenceComplete"] is False
+
+
+def test_smoke_statuses_cover_only_this_smoke(monkeypatch, tmp_path):
+    args = _fake_smoke(
+        monkeypatch,
+        tmp_path,
+        [_real_send()],
+        [_ledger("failed", "uncertain"), _ledger("failed", "uncertain", "delivered", "delivered")],
+    )
+    assert hfdev.cmd_smoke(args) == 0
+    summary = json.loads((tmp_path / "smoke.json").read_text(encoding="utf-8"))["summary"]
+    assert summary["replyNotificationStatuses"] == ["delivered", "delivered"]
+    assert summary["evidenceComplete"] is True
+
+
+def test_compose_files_add_the_actor_overlay_only_for_actor_modes(tmp_path):
+    identity = tmp_path / "identity.json"
+    for mode, expected in (("legacy", False), ("actor", True), ("private", True)):
+        identity.write_text(f'{{"workMode": "{mode}"}}', encoding="utf-8")
+        files = hfdev._compose_files(SimpleNamespace(identity_path=identity))
+        assert (hfdev.ACTOR_WORK_COMPOSE in files) is expected
+
+
+@pytest.fixture
+def smoke_driver(monkeypatch):
+    monkeypatch.setitem(sys.modules, "jwt", SimpleNamespace(encode=lambda *a, **k: "token"))
+    driver = _load("teams_smoke", TOOL_DIR / "fixtures/teams_smoke.py")
+    return driver
+
+
+SMOKE_CONFIG = {
+    "botAppId": "bot",
+    "tenantId": "tenant",
+    "teamId": "team",
+    "channelId": "19:channel",
+    "personalConversationId": "a:personal",
+    "actorOid": "actor",
+    "serviceUrl": "https://example.invalid/",
+    "jwtKeyId": "key",
+}
+
+
+def test_private_activity_is_personal_and_channel_activity_is_unchanged(smoke_driver):
+    channel = smoke_driver._activity(SMOKE_CONFIG, "n")
+    assert channel["conversation"]["conversationType"] == "channel"
+    assert channel["channelData"]["team"] == {"id": "team"}
+    private = smoke_driver._activity({**SMOKE_CONFIG, "workMode": "private"}, "n")
+    assert private["conversation"] == {
+        "id": "a:personal",
+        "conversationType": "personal",
+        "isGroup": False,
+        "tenantId": "tenant",
+    }
+    assert "team" not in private["channelData"]
+    assert private["entities"] == []
+
+
+def _counts(delivered=0, rejected=0, dead=0):
+    return {
+        "queued_count": 0,
+        "leased_count": 0,
+        "retry_wait_count": 0,
+        "delivered_count": delivered,
+        "rejected_count": rejected,
+        "dead_count": dead,
+    }
+
+
+@pytest.mark.parametrize(
+    ("after", "delivered", "refused"),
+    [
+        (_counts(delivered=1), True, False),
+        (_counts(rejected=1), False, True),
+        (_counts(dead=1), False, True),
+    ],
+)
+def test_install_reports_what_ingress_did_without_waiting_out_the_timeout(
+    smoke_driver, monkeypatch, after, delivered, refused
+):
+    states = iter([_counts(), after, after])
+    monkeypatch.setattr(smoke_driver, "_delivery_status", lambda config: next(states))
+    monkeypatch.setattr(smoke_driver, "_post_activity", lambda *args: (200, 0.1))
+    monkeypatch.setattr(smoke_driver, "_token", lambda *args, **kwargs: "token")
+    result = smoke_driver.install(SMOKE_CONFIG, 60)
+    assert result["delivered"] is delivered
+    assert result.get("refused", False) is refused
 
 
 def test_private_mode_uses_the_actor_overlay_and_names_the_owner_in_exchange():
